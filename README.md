@@ -1,4 +1,7 @@
 <img width="189" height="189" alt="6a357c99-15ea-4ef6-b917-cac1fe279918-remove-bg-io" src="https://github.com/user-attachments/assets/5f3b0327-59a9-4e8d-92f9-141164861046" />
+
+
+
 # R-mind
 
 **A cross-platform visual thinking and mind-mapping workspace.**
