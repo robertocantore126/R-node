@@ -33,7 +33,6 @@ export function Palette(): JSX.Element | null {
       { label: "Export as JSON", hint: "Ctrl+E", run: () => store.exportJson() },
       { label: "Export as Markdown", hint: "", run: () => store.exportMarkdown() },
       { label: "Export as PNG", hint: "", run: () => runExportPng() },
-      { label: "Toggle theme (dark/light)", hint: "Ctrl+T", run: () => store.toggleTheme() },
       { label: "Toggle outline panel", hint: "", run: () => store.toggleOutliner() },
       { label: "Toggle inspector", hint: "", run: () => store.toggleInspector() },
       { label: "Zen / focus mode", hint: "Ctrl+Shift+F", run: () => store.toggleZen() },

@@ -124,9 +124,14 @@ export function CanvasView(): JSX.Element {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       if (e.ctrlKey || e.metaKey) {
+        // Wheel-up zooms in (deltaY < 0). Flipped alongside pan so ctrl+scroll
+        // stays coherent for users with inverted/natural-scroll deltas.
         store.zoomAt(sx, sy, e.deltaY < 0 ? 1.12 : 1 / 1.12, w, h);
       } else {
-        store.panBy(e.deltaX, e.deltaY);
+        // Scroll down → map content moves up (document-style pan). The sign is
+        // flipped from the raw delta so the direction matches the OS-scroll
+        // convention instead of appearing inverted.
+        store.panBy(-e.deltaX, -e.deltaY);
       }
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
@@ -356,10 +361,23 @@ function TopicEditor({ style, scale }: { style: CSSProperties; scale: number }):
     // Type/paste-to-edit: the store may hand us initial content that replaces
     // the title (XMind-style). Otherwise select the existing text for a fresh edit.
     const pending = store.consumePendingInsert();
-    if (pending !== null) setValue(pending);
+    if (pending !== null) {
+      setValue(pending);
+      store.setEditingDraft(pending);
+    } else {
+      store.setEditingDraft(value);
+      ref.current?.select();
+    }
     ref.current?.focus();
-    if (pending === null) ref.current?.select();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store]);
+
+  // Keep the store's editing draft in sync with every keystroke. The canvas
+  // pointer handler clears editingId before the textarea blur fires, so the
+  // draft is what actually gets committed when the user clicks away.
+  useEffect(() => {
+    store.setEditingDraft(value);
+  }, [value, store]);
 
   // Grow the box to contain the LIVE text (typed or pasted) so nothing is
   // clipped while editing — after commit the canvas box is sized identically.
@@ -371,7 +389,7 @@ function TopicEditor({ style, scale }: { style: CSSProperties; scale: number }):
   };
 
   const commit = (): void => {
-    store.commitEdit(value);
+    store.commitEdit();
   };
 
   return (
@@ -383,7 +401,12 @@ function TopicEditor({ style, scale }: { style: CSSProperties; scale: number }):
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Enter" && !e.shiftKey) {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+          // Save while editing: commit the draft (editor stays open) so the
+          // browser "Save page" dialog never eats the keystroke.
+          e.preventDefault();
+          void store.saveNow();
+        } else if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           commit();
         } else if (e.key === "Escape") {

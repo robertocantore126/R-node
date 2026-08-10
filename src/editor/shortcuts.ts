@@ -42,11 +42,18 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
   "Mod+p": "present",
   "Mod+Shift+f": "zen",
   "Mod+1": "fit-view",
-  "Mod+t": "theme",
 };
 
 export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number, vh: number): boolean {
-  if (store.getSnapshot().editingId) return false;
+  if (store.getSnapshot().editingId) {
+    // While the type-to-edit editor is still mounting, buffer printable
+    // characters into the pending insert so fast typing never loses a key.
+    // Once the textarea is mounted (pending consumed) keys reach it directly.
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1 && !e.key.match(/\s/)) {
+      return store.appendPendingInsert(e.key);
+    }
+    return false;
+  }
 
   if (e.key === "Escape") {
     const s = store.getSnapshot();
@@ -183,9 +190,6 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       return true;
     case "fit-view":
       store.fitView(vw, vh);
-      return true;
-    case "theme":
-      store.toggleTheme();
       return true;
     default:
       return false;

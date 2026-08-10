@@ -93,6 +93,80 @@ describe("type-to-edit", () => {
     expect(store.consumePendingInsert()).toBeNull();
   });
 
+  it("buffers extra keystrokes while the type-to-edit editor is mounting", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+
+    // First character starts editing; the next one arrives before the
+    // textarea has consumed the pending insert — it must be buffered, not lost.
+    store.typeToEdit("f");
+    expect(store.appendPendingInsert("a")).toBe(true);
+    expect(store.appendPendingInsert("s")).toBe(true);
+    expect(store.consumePendingInsert()).toBe("fas");
+
+    // Once consumed (editor mounted), the textarea owns the keyboard: the
+    // buffer is closed and keys must NOT be appended.
+    expect(store.appendPendingInsert("t")).toBe(false);
+  });
+
+  it("commits the in-progress edit when the selection changes (click away)", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[0])!;
+    store.select(main.id);
+    store.typeToEdit("H");
+
+    // TopicEditor keeps the store draft in sync with every keystroke.
+    store.setEditingDraft("Hello typed text");
+
+    // Clicking another node runs BEFORE the textarea blur: selection changes
+    // must commit the draft instead of discarding it.
+    store.select(root.id);
+    expect(store.doc.node(main.id)!.title).toBe("Hello typed text");
+    expect(store.getSnapshot().editingId).toBeNull();
+  });
+
+  it("commits the draft on commitEdit() and discards it on cancelEdit()", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[0])!;
+    store.select(main.id);
+    store.startEdit(main.id);
+    store.setEditingDraft("Kept text");
+    store.commitEdit();
+    expect(store.doc.node(main.id)!.title).toBe("Kept text");
+
+    store.startEdit(main.id);
+    store.setEditingDraft("Discarded text");
+    store.cancelEdit();
+    expect(store.doc.node(main.id)!.title).toBe("Kept text");
+    expect(store.getSnapshot().editingId).toBeNull();
+  });
+
+  it("Ctrl+S saves the in-progress draft without closing the editor", async () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[0])!;
+    store.select(main.id);
+    store.startEdit(main.id);
+    store.setEditingDraft("Saved while typing");
+
+    // first save downloads the .rnode.json — stub it (no DOM in node env)
+    vi.spyOn(store as unknown as { download: () => void }, "download").mockImplementation(() => {});
+    await store.saveNow();
+
+    // The draft was committed to the document AND the editor stays open.
+    expect(store.doc.node(main.id)!.title).toBe("Saved while typing");
+    expect(store.getSnapshot().editingId).toBe(main.id);
+    expect(store.getSnapshot().sync).toBe("saved");
+  });
+
   it("pastes plain text into the selected topic (falls back from map paste)", async () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();
@@ -150,20 +224,30 @@ describe("save / load file", () => {
     expect(store.importDocumentFromJson(JSON.stringify({ documentId: "d_x", sheets: [{ rootNodeId: "r", nodes: {} }] }))).toBeNull();
   });
 
-  it("downloads the .rnode.json only on the first save, then overwrites silently", async () => {
+  it("writes the CURRENT content on every save (download fallback without the File System Access API)", async () => {
     const store = new EditorStore(memoryAdapter);
-    const download = vi.spyOn(store as unknown as { download: () => void }, "download").mockImplementation(() => {});
+    const blobs: Blob[] = [];
+    const download = vi
+      .spyOn(store as unknown as { download: (blob: Blob) => void }, "download")
+      .mockImplementation((blob: Blob) => { blobs.push(blob); });
+
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    store.createChild();
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.execOps([
+      { opId: "t", actorId: "t", ts: new Date().toISOString(), type: "setTitle", id: main.id, title: "Versione corrente", prev: main.title } as never,
+    ]);
 
     await store.saveNow();
-    expect(download).toHaveBeenCalledTimes(1); // first save → file written
-    expect(store.getSnapshot().sync).toBe("saved");
+    await store.saveNow(); // second save must not be stale either
 
-    await store.saveNow();
-    expect(download).toHaveBeenCalledTimes(1); // already saved → overwrite only
     expect(store.getSnapshot().sync).toBe("saved");
+    expect(download).toHaveBeenCalledTimes(2);
+    const parsed = JSON.parse(await blobs[1].text());
+    expect(parsed.sheets[0].nodes[main.id].title).toBe("Versione corrente");
   });
 
-  it("does not re-download a document that was already in storage on load", async () => {
+  it("saves a document loaded from storage with current content after reload", async () => {
     const stored: StorageAdapter = {
       label: "test",
       async load() {
@@ -173,10 +257,12 @@ describe("save / load file", () => {
     };
     const store = new EditorStore(stored);
     await store.init();
-    const download = vi.spyOn(store as unknown as { download: () => void }, "download").mockImplementation(() => {});
+    const blobs: Blob[] = [];
+    vi.spyOn(store as unknown as { download: (blob: Blob) => void }, "download")
+      .mockImplementation((blob: Blob) => { blobs.push(blob); });
 
     await store.saveNow();
-    expect(download).not.toHaveBeenCalled(); // loaded from storage → already saved
+    expect(blobs).toHaveLength(1); // the file is written with current content
     expect(store.getSnapshot().sync).toBe("saved");
   });
 });

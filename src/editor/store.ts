@@ -19,6 +19,15 @@ import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
 
+declare global {
+  interface Window {
+    showSaveFilePicker?: (opts?: {
+      suggestedName?: string;
+      types?: { description?: string; accept: Record<string, string[]> }[];
+    }) => Promise<FileSystemFileHandle>;
+  }
+}
+
 export type NavDir = "up" | "down" | "left" | "right";
 
 export interface EditorState {
@@ -42,7 +51,7 @@ export interface EditorState {
   canUndo: boolean;
   canRedo: boolean;
   docTitle: string;
-  theme: "light" | "dark";
+  theme: "light";
   structureType: string;
   mode: "select" | "pan";
   zen: boolean;
@@ -56,10 +65,21 @@ export class EditorStore {
   private model: DocumentModel;
   private history = new History();
   private adapter: StorageAdapter;
-  /** Document ids already persisted to the storage adapter this session. */
-  private persistedIds = new Set<string>();
+  /**
+   * File System Access handles (per document) so later saves silently
+   * OVERWRITE the .rnode.json the user picked instead of re-downloading.
+   * Handles are persisted in IndexedDB to survive reloads.
+   */
+  private fileHandles = new Map<string, FileSystemFileHandle>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Live text of the inline editor, kept in sync by TopicEditor on every
+   * keystroke. The canvas pointer handler runs BEFORE the textarea blur, so
+   * selection changes would lose typed text without this draft: selection
+   * changes commit the draft instead of discarding it.
+   */
+  private editingDraft: string | null = null;
   /** Canvas-backed measurer: layout and renderer agree on every topic size. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
 
@@ -112,7 +132,7 @@ export class EditorStore {
       canUndo: false,
       canRedo: false,
       docTitle: d.title,
-      theme: d.settings.theme,
+      theme: "light",
       structureType: d.sheets[0].structure.structureType,
       mode: "select",
       zen: false,
@@ -128,7 +148,7 @@ export class EditorStore {
       canUndo: this.history.canUndo,
       canRedo: this.history.canRedo,
       docTitle: d.title,
-      theme: d.settings.theme,
+      theme: "light",
       structureType: d.sheets[0].structure.structureType,
     };
     this.snap = { ...this.state, selection: [...this.state.selection], searchResults: [...this.state.searchResults] };
@@ -151,9 +171,6 @@ export class EditorStore {
 
   async init(): Promise<void> {
     const docs = await this.adapter.load();
-    // Docs found in storage are already saved — their next Save only
-    // overwrites, it must not re-download the .rnode.json file.
-    for (const d of docs) this.persistedIds.add(d.documentId);
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
     } else {
@@ -224,27 +241,137 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   /**
-   * Save the workspace: persist all docs to the storage adapter. The portable
-   * .rnode.json file is written once, on the FIRST save of a document — a map
-   * that is already saved locally is only overwritten in storage, never
-   * re-downloaded.
+   * Save the workspace: persist all docs to the storage adapter AND write the
+   * portable .rnode.json. The first save lets the user pick the file location
+   * (File System Access API); every later save silently OVERWRITES that same
+   * file, so the file on disk is always the current version. Falls back to a
+   * plain download (current content) where the API is unavailable.
    */
   async saveNow(): Promise<void> {
+    // A Ctrl+S pressed while the inline editor is open must save the text the
+    // user is typing: commit the draft without closing the editor, so they
+    // can keep going. The later blur/Enter commit finds the title up to date.
+    this.commitDraftKeepEditing();
     try {
       await this.adapter.save(this.state.docs);
-      const firstSave = !this.persistedIds.has(this.model.doc.documentId);
-      this.persistedIds.add(this.model.doc.documentId);
-      if (firstSave) {
-        const json = JSON.stringify(this.model.doc, null, 2);
-        const blob = new Blob([json], { type: "application/json" });
-        this.download(blob, this.docFileName());
-      }
+      const json = JSON.stringify(this.model.doc, null, 2);
+      const fileWritten = await this.writePortableFile(json);
       this.state.sync = "saved";
-      this.toast(firstSave ? `Saved ${this.docFileName()}` : "Saved");
+      this.toast(fileWritten ? "Saved" : "Saved locally (no file chosen)");
     } catch {
       this.state.sync = "dirty";
       this.toast("Save failed — check storage");
     }
+  }
+
+  /**
+   * Write the portable .rnode.json. Returns true when a file was written or
+   * downloaded; false when the user cancelled the file picker (the document
+   * is still persisted to app storage).
+   */
+  private async writePortableFile(json: string): Promise<boolean> {
+    const docId = this.model.doc.documentId;
+    const key = `r-node.file-handle.${docId}`;
+
+    // 1) Reuse the stored handle → silent overwrite, no dialog, no download.
+    let handle = this.fileHandles.get(docId) ?? null;
+    if (!handle) {
+      handle = await this.loadFileHandle(key);
+      if (handle) this.fileHandles.set(docId, handle);
+    }
+    if (handle) {
+      try {
+        const writable = await handle.createWritable();
+        await writable.write(json);
+        await writable.close();
+        return true;
+      } catch {
+        // Handle stale (file moved/deleted) → drop it and ask again.
+        this.fileHandles.delete(docId);
+        await this.clearFileHandle(key);
+      }
+    }
+
+    // 2) No handle but the API exists → let the user pick where to save.
+    if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
+      try {
+        const picked = await window.showSaveFilePicker({
+          suggestedName: this.docFileName(),
+          types: [{ description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } }],
+        });
+        const writable = await picked.createWritable();
+        await writable.write(json);
+        await writable.close();
+        this.fileHandles.set(docId, picked);
+        await this.storeFileHandle(key, picked);
+        return true;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return false;
+        // picker failed (permission/unsupported) → fall back to download
+      }
+    }
+
+    // 3) Fallback: download the file with the CURRENT content.
+    const blob = new Blob([json], { type: "application/json" });
+    this.download(blob, this.docFileName());
+    return true;
+  }
+
+  private async storeFileHandle(key: string, handle: FileSystemFileHandle): Promise<void> {
+    if (typeof indexedDB === "undefined") return;
+    try {
+      const db = await this.openIdb();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction("file-handles", "readwrite");
+        tx.objectStore("file-handles").put(handle, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch {
+      /* handle persistence is best-effort */
+    }
+  }
+
+  private async loadFileHandle(key: string): Promise<FileSystemFileHandle | null> {
+    if (typeof indexedDB === "undefined") return null;
+    try {
+      const db = await this.openIdb();
+      return await new Promise<FileSystemFileHandle | null>((resolve, reject) => {
+        const tx = db.transaction("file-handles", "readonly");
+        const req = tx.objectStore("file-handles").get(key);
+        req.onsuccess = () => resolve((req.result as FileSystemFileHandle | undefined) ?? null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private async clearFileHandle(key: string): Promise<void> {
+    if (typeof indexedDB === "undefined") return;
+    try {
+      const db = await this.openIdb();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction("file-handles", "readwrite");
+        tx.objectStore("file-handles").delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  private openIdb(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open("r-node", 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains("file-handles")) db.createObjectStore("file-handles");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
   }
 
   /** Open a .rnode.json file from disk (file picker). Legacy .rmind.json files are still accepted. */
@@ -368,7 +495,7 @@ export class EditorStore {
       archived: !!d.archived,
       pinned: !!d.pinned,
       settings: {
-        theme: d.settings?.theme === "dark" ? "dark" : "light",
+        theme: "light",
         showOutliner: !!d.settings?.showOutliner,
         showInspector: d.settings?.showInspector ?? true,
       },
@@ -386,6 +513,9 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   select(id: string, opts?: { additive?: boolean; center?: boolean }): void {
+    // The canvas pointer handler runs before the textarea blur fires. Commit
+    // the in-progress edit here so clicking away never loses typed text.
+    this.commitDraftOnLeave();
     const additive = opts?.additive ?? false;
     let sel: string[];
     if (additive) {
@@ -401,6 +531,7 @@ export class EditorStore {
   }
 
   clearSelection(): void {
+    this.commitDraftOnLeave();
     if (this.state.selection.length === 0) return;
     this.state.selection = [];
     this.state.editingId = null;
@@ -417,9 +548,11 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   startEdit(id: string): void {
+    this.commitDraftOnLeave();
     this.state.selection = [id];
     this.state.editingId = id;
     this.state.pendingInsert = null;
+    this.editingDraft = null; // the editor seeds it from the node title on mount
     this.notify();
   }
 
@@ -429,11 +562,13 @@ export class EditorStore {
    * consumes the pending insert on mount, replacing the previous title.
    */
   typeToEdit(text: string): void {
+    this.commitDraftOnLeave();
     const node = this.selectionNode;
     if (!node) return;
     this.state.selection = [node.id];
     this.state.editingId = node.id;
     this.state.pendingInsert = text;
+    this.editingDraft = null; // the editor seeds it from the pending text on mount
     this.notify();
   }
 
@@ -444,16 +579,42 @@ export class EditorStore {
     return v;
   }
 
-  commitEdit(text: string): void {
+  /**
+   * Buffer an extra character while the type-to-edit editor is still
+   * mounting (pendingInsert not yet consumed). Without this, fast typists
+   * lose the keystrokes between typeToEdit() and the textarea appearing:
+   * the shortcut handler sees editingId set and drops them.
+   */
+  appendPendingInsert(ch: string): boolean {
+    if (this.state.pendingInsert === null) return false;
+    this.state.pendingInsert += ch;
+    this.notify();
+    return true;
+  }
+
+  /** TopicEditor keeps this in sync with the live textarea value. */
+  setEditingDraft(text: string | null): void {
+    this.editingDraft = text;
+  }
+
+  /**
+   * Commit the in-progress edit. Selection changes commit the draft too, so
+   * clicking away (pointerdown runs before blur) never loses typed text.
+   */
+  commitEdit(): void {
     const id = this.state.editingId;
+    const draft = this.editingDraft;
     this.state.editingId = null;
-    if (!id) return;
+    this.editingDraft = null;
+    this.state.pendingInsert = null;
+    if (!id || draft === null) return;
     const node = this.model.node(id);
     if (!node) return;
-    const clean = text.trim();
+    const clean = draft.trim();
     if (clean.length === 0) {
-      // empty new topic -> delete it
+      // empty new topic -> delete it; a topic with children keeps its title
       if (node.childrenIds.length === 0) this.deleteNodes([id]);
+      else this.notify();
       return;
     }
     if (clean !== node.title) {
@@ -462,9 +623,35 @@ export class EditorStore {
     this.notify();
   }
 
+  /**
+   * Apply the in-progress edit (setTitle) WITHOUT closing the editor. Ctrl+S
+   * while typing therefore saves the current text and keeps editing.
+   */
+  private commitDraftKeepEditing(): void {
+    const id = this.state.editingId;
+    const draft = this.editingDraft;
+    if (!id || draft === null) return;
+    const node = this.model.node(id);
+    if (!node) return;
+    const clean = draft.trim();
+    if (clean.length === 0 || clean === node.title) return;
+    this.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id, title: clean, prev: node.title })]);
+  }
+
+  /** Commit the draft when the selection/editing context is about to change. */
+  private commitDraftOnLeave(): void {
+    if (this.state.editingId !== null) this.commitEdit();
+    else {
+      this.editingDraft = null;
+      this.state.pendingInsert = null;
+    }
+  }
+
   cancelEdit(): void {
     const id = this.state.editingId;
     this.state.editingId = null;
+    this.editingDraft = null;
+    this.state.pendingInsert = null;
     if (id) {
       const node = this.model.node(id);
       if (node && node.title === "" && node.childrenIds.length === 0) this.deleteNodes([id]);
@@ -507,8 +694,7 @@ export class EditorStore {
   }
 
   private defaultBranchFill(index: number): string {
-    const palette = THEMES[this.state.theme]?.branch ?? THEMES.light.branch;
-    return palette[index % palette.length];
+    return THEMES.light.branch[index % THEMES.light.branch.length];
   }
 
   private createNodePosition(parent: MindNode): { x: number; y: number; manual: boolean } {
@@ -537,8 +723,7 @@ export class EditorStore {
     const root = this.sheet.nodes[this.sheet.rootNodeId];
     if (!root) return undefined;
     const index = root.childrenIds.indexOf(rootId);
-    const palette = THEMES[this.state.theme]?.branchSoft ?? THEMES.light.branchSoft;
-    return palette[(index >= 0 ? index : 0) % palette.length];
+    return THEMES.light.branchSoft[(index >= 0 ? index : 0) % THEMES.light.branchSoft.length];
   }
 
   private createNodeStyle(type: NodeType, parentId: string | null, index: number): Style | undefined {
@@ -1227,12 +1412,6 @@ export class EditorStore {
   // Theme & UI toggles
   // -------------------------------------------------------------------------
 
-  toggleTheme(): void {
-    this.model.doc.settings.theme = this.model.doc.settings.theme === "dark" ? "light" : "dark";
-    this.state.sync = "dirty";
-    this.notify();
-  }
-
   togglePalette(): void {
     this.state.showPalette = !this.state.showPalette;
     this.notify();
@@ -1298,7 +1477,7 @@ export class EditorStore {
 
   newDocument(): void {
     const doc = DocumentModel.blank("Untitled map");
-    doc.settings.theme = this.model.doc.settings.theme;
+    doc.settings.theme = "light";
     this.state.docs = [...this.state.docs, doc];
     this.state.activeDocId = doc.documentId;
     this.switchToDoc(doc.documentId);
@@ -1310,7 +1489,7 @@ export class EditorStore {
   /** Create a doc from the roadmap template; returns its id. */
   duplicateSample(): string {
     const doc = DocumentModel.sample();
-    doc.settings.theme = this.model.doc.settings.theme;
+    doc.settings.theme = "light";
     this.state.docs = [...this.state.docs, doc];
     this.state.sync = "dirty";
     this.notify();
@@ -1363,6 +1542,7 @@ export class EditorStore {
   }
 
   switchToDoc(id: string): void {
+    this.commitDraftOnLeave();
     const doc = this.state.docs.find((d) => d.documentId === id);
     if (!doc) return;
     this.model = new DocumentModel(doc);

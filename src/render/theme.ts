@@ -1,9 +1,9 @@
 /**
  * Design tokens for the canvas renderer.
- * The same palette drives the CSS chrome (see styles.css) so light/dark
- * switching stays coherent.
+ * The same palette drives the CSS chrome (see styles.css) so the light
+ * theme stays coherent everywhere. (Dark theme was intentionally removed.)
  */
-export type ThemeName = "light" | "dark";
+export type ThemeName = "light";
 
 export interface RenderTheme {
   name: ThemeName;
@@ -45,23 +45,5 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     nodeBorder: "rgba(0,0,0,0.06)",
     shadow: "rgba(28,35,51,0.14)",
   },
-  dark: {
-    name: "dark",
-    background: "#11141c",
-    grid: "#1d2230",
-    text: "#e6e9f0",
-    textMuted: "#8b93a7",
-    selection: "#818cf8",
-    selectionFill: "rgba(129, 140, 248, 0.14)",
-    dropIndicator: "#818cf8",
-    rootFill: "#6366f1",
-    rootText: "#ffffff",
-    branch: ["#60a5fa", "#a78bfa", "#f472b6", "#fb923c", "#4ade80", "#22d3ee", "#facc15", "#2dd4bf"],
-    branchSoft: ["#1e3a5f", "#4a2f1e", "#17404a", "#17453f", "#21452e", "#45224c", "#1f3f5b", "#4b3b1a"],
-    connector: "#39415a",
-    collapsedBadge: "#2a3145",
-    collapsedBadgeText: "#aeb6c8",
-    nodeBorder: "rgba(255,255,255,0.08)",
-    shadow: "rgba(0,0,0,0.4)",
-  },
 };
+// Dark theme intentionally removed — the app is light-only.

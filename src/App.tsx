@@ -22,7 +22,21 @@ export function App(): JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName ?? "";
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
+      const isField = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!target?.isContentEditable;
+      if (isField) {
+        // Save/Open must work even from a text field (Inspector title, doc
+        // title, search…): blur it first so its onBlur commit fires, then run
+        // the shortcut. Otherwise Ctrl+S falls through to the browser's
+        // "Save page" dialog and nothing is saved.
+        const mod = e.ctrlKey || e.metaKey;
+        const key = e.key.toLowerCase();
+        if (mod && (key === "s" || key === "o")) {
+          e.preventDefault();
+          (target as HTMLElement).blur();
+          if (handleShortcut(store, e, viewSize.w, viewSize.h)) e.preventDefault();
+        }
+        return;
+      }
       if (handleShortcut(store, e, viewSize.w, viewSize.h)) e.preventDefault();
     };
     window.addEventListener("keydown", onKey);

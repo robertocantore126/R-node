@@ -95,9 +95,7 @@ export function TopBar(): JSX.Element {
             </div>
           )}
         </div>
-        <button className="btn icon" title="Toggle light/dark theme (Ctrl+T)" onClick={() => store.toggleTheme()}>
-          {state.theme === "dark" ? "☀" : "☾"}
-        </button>
+
       </div>
     </header>
   );

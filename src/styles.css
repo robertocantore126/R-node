@@ -11,19 +11,6 @@
   --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
 }
 
-:root[data-theme="dark"] {
-  --bg: #11141c;
-  --surface: #171b26;
-  --surface-2: #1d2230;
-  --border: #262c3d;
-  --text: #e6e9f0;
-  --text-muted: #8b93a7;
-  --accent: #818cf8;
-  --accent-soft: rgba(129, 140, 248, 0.16);
-  --danger: #f87171;
-  --shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
-}
-
 :root[data-theme="light"] {
   --bg: #ffffff;
   --surface: #ffffff;

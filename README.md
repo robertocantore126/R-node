@@ -71,7 +71,6 @@ main interactions.
 | `Ctrl/Cmd+S` | save now |
 | `Ctrl/Cmd+E` | export JSON |
 | `Ctrl/Cmd+Enter` | toggle task complete |
-| `Ctrl/Cmd+T` | toggle theme (dark/light) |
 | `Ctrl/Cmd+1` / `0` | fit map to view / reset zoom |
 | `Ctrl/Cmd+=` / `-` | zoom in / out |
 | `Ctrl/Cmd+Shift+F` | Zen (focus) mode |
