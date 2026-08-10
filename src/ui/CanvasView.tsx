@@ -7,6 +7,7 @@ import { screenToWorld, worldToScreen } from "../render/viewport";
 import { measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
+import { RichEditor } from "./RichEditor";
 
 /**
  * Paint synchronously on every store change. rAF is unreliable in embedded
@@ -119,6 +120,9 @@ export function CanvasView(): JSX.Element {
     // wheel must be non-passive to preventDefault
     const onWheel = (e: WheelEvent): void => {
       e.preventDefault();
+      // While a topic is being edited the Lexical overlay owns the viewport:
+      // pan/zoom is blocked so the overlay transform never goes stale.
+      if (store.getSnapshot().editingId) return;
       const { w, h } = sizeRef.current;
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
@@ -173,7 +177,7 @@ export function CanvasView(): JSX.Element {
 
     // Panning is right-drag (or middle-drag / pan mode): left-click never
     // pans, it only selects or drags topics.
-    if (e.button === 2 || e.button === 1 || s.mode === "pan") {
+    if ((e.button === 2 || e.button === 1 || s.mode === "pan") && !s.editingId) {
       drag.panning = true;
       drag.dragging = null;
       setPanning(true);
@@ -343,82 +347,14 @@ export function CanvasView(): JSX.Element {
         onContextMenu={onContextMenu}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
-      {editStyle && <TopicEditor key={state.editingId ?? "topic-editor"} style={editStyle} scale={state.camera.scale} />}
+      {editStyle && state.editingId && (
+        <RichEditor
+          key={state.editingId}
+          node={store.doc.node(state.editingId)!}
+          style={editStyle}
+          scale={state.camera.scale}
+        />
+      )}
     </div>
-  );
-}
-
-function TopicEditor({ style, scale }: { style: CSSProperties; scale: number }): JSX.Element {
-  const store = useStore();
-  // The editing node is the one being typed into — with Tab the selection
-  // stays on the source node, so the editor must NOT read selectionNode.
-  const editingId = store.getSnapshot().editingId;
-  const node = editingId ? store.doc.node(editingId) : store.selectionNode;
-  const ref = useRef<HTMLTextAreaElement>(null);
-  const [value, setValue] = useState(node?.title ?? "");
-
-  useEffect(() => {
-    // Type/paste-to-edit: the store may hand us initial content that replaces
-    // the title (XMind-style). Otherwise select the existing text for a fresh edit.
-    const pending = store.consumePendingInsert();
-    if (pending !== null) {
-      setValue(pending);
-      store.setEditingDraft(pending);
-    } else {
-      store.setEditingDraft(value);
-      ref.current?.select();
-    }
-    ref.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store]);
-
-  // Keep the store's editing draft in sync with every keystroke. The canvas
-  // pointer handler clears editingId before the textarea blur fires, so the
-  // draft is what actually gets committed when the user clicks away.
-  useEffect(() => {
-    store.setEditingDraft(value);
-  }, [value, store]);
-
-  // Grow the box to contain the LIVE text (typed or pasted) so nothing is
-  // clipped while editing — after commit the canvas box is sized identically.
-  const live = node ? measureNode({ ...node, title: value }, overlayMeasurer) : { w: 0, h: 0 };
-  const box: CSSProperties = {
-    ...style,
-    width: Math.max(style.width as number, live.w * scale),
-    height: Math.max(style.height as number, live.h * scale),
-  };
-
-  const commit = (): void => {
-    store.commitEdit();
-  };
-
-  return (
-    <textarea
-      ref={ref}
-      className="topic-editor"
-      style={box}
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-          // Save while editing: commit the draft (editor stays open) so the
-          // browser "Save page" dialog never eats the keystroke.
-          e.preventDefault();
-          void store.saveNow();
-        } else if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          commit();
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          store.cancelEdit();
-        } else if (e.key === "Tab") {
-          e.preventDefault();
-          setValue((v) => v + "\t");
-        }
-      }}
-      onBlur={commit}
-      onPointerDown={(e) => e.stopPropagation()}
-    />
   );
 }

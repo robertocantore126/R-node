@@ -7,7 +7,8 @@
  * of the node being edited so the overlay doesn't double-paint.
  */
 import type { MindNode, Sheet, StructureType, Orientation } from "../core/types";
-import { createCanvasTextMeasurer, measureNode, wrapLines, type TextMeasurer } from "../layout/measure";
+import { nodeRuns } from "../core/text";
+import { createCanvasTextMeasurer, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
 import type { Camera } from "./viewport";
 
@@ -43,6 +44,17 @@ export class Renderer {
   private dpr = 1;
   /** Same measurer the layout engine uses — extents always agree. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
+  /** Camera scale of the current frame (used to pick the text-cache resolution). */
+  private curScale = 1;
+  /**
+   * Bitmap cache for node titles: the styled text of a node is rendered once
+   * into an offscreen canvas and blitted with drawImage during pan/zoom — the
+   * text layout is NOT recomputed every frame. The cache key covers the runs,
+   * style, resolved color and a scale bucket, so it is invalidated only when
+   * the title/content actually changes (or the zoom crosses a power-of-two
+   * boundary, where the bitmap is re-rendered sharper).
+   */
+  private textCache = new Map<string, { canvas: HTMLCanvasElement; w: number; h: number }>();
 
   constructor(canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -107,6 +119,7 @@ export class Renderer {
     ctx.fillRect(0, 0, state.viewW, state.viewH);
 
     const s = state.camera.scale;
+    this.curScale = s;
     const ox = state.viewW / 2 - state.camera.x * s;
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
@@ -312,7 +325,8 @@ export class Renderer {
       ctx.fill();
     }
 
-    // text
+    // text (rich, bitmap-cached). The node being edited is skipped: the
+    // HTML overlay owns it, no ghosting.
     if (!editing) this.drawText(theme, p, textColor);
 
     // collapsed badge (mirror to the left when the branch is left-side)
@@ -402,45 +416,84 @@ export class Renderer {
   }
 
   private drawText(_theme: RenderTheme, p: Placed, color: string): void {
-    const ctx = this.ctx;
     const n = p.node;
-    const size = n.style.fontSize ?? 14;
-    const weight = n.style.fontWeight ?? 400;
-    const family = n.style.fontFamily ?? "system-ui, -apple-system, sans-serif";
-    ctx.font = `${n.style.italic ? "italic " : ""}${weight} ${size}px ${family}`;
-    ctx.fillStyle = color;
-    ctx.textAlign = n.style.align === "left" ? "left" : "center";
-    ctx.textBaseline = "middle";
-
     const pad = n.style.padding ?? 10;
-    const maxW = p.w - pad * 2 - 6;
-    const lines = wrapLines(n.title, maxW, this.measurer, n.style);
-    const lineH = size * 1.25;
-    const startY = p.y + p.h / 2 - ((lines.length - 1) * lineH) / 2;
-    const startX = n.style.align === "left" ? p.x + pad : p.x + p.w / 2;
-
-    for (let i = 0; i < lines.length; i++) {
-      const y = startY + i * lineH;
-      const w = ctx.measureText(lines[i]).width;
-      const lineX = n.style.align === "left" ? startX : startX - w / 2;
-      if (n.style.underline) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(lineX, y + size * 0.55);
-        ctx.lineTo(lineX + w, y + size * 0.55);
-        ctx.stroke();
-      }
-      ctx.fillText(lines[i], startX, y);
-      if (n.style.strikethrough) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(lineX, y);
-        ctx.lineTo(lineX + w, y);
-        ctx.stroke();
+    const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
+    // Resolution bucket: re-render the bitmap only when the zoom crosses a
+    // power-of-two boundary; between boundaries pan/zoom just blits.
+    const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
+    const key = this.textCacheKey(n, color, maxW, res);
+    let entry = this.textCache.get(key);
+    if (!entry) {
+      entry = this.renderTextBitmap(n, color, maxW, res);
+      this.textCache.set(key, entry);
+      if (this.textCache.size > 5000) {
+        const first = this.textCache.keys().next().value;
+        if (first !== undefined) this.textCache.delete(first);
       }
     }
+    const totalH = entry.h;
+    const startY = p.y + p.h / 2 - totalH / 2;
+    const startX = p.x + pad;
+    if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, startX, startY, entry.w, entry.h);
+  }
+
+  private textCacheKey(n: MindNode, color: string, maxW: number, res: number): string {
+    const st = n.style;
+    const runs = JSON.stringify(n.titleRuns ?? n.title);
+    return `${n.id}|${runs}|${st.fontSize ?? 14}|${st.fontFamily ?? ""}|${st.fontWeight ?? 400}|${st.italic ? 1 : 0}|${st.align ?? "center"}|${st.padding ?? 10}|${st.underline ? 1 : 0}|${st.strikethrough ? 1 : 0}|${color}|${maxW}|${res}`;
+  }
+
+  /** Render the styled title once into an offscreen canvas (world-unit sized, `res` pixels per unit). */
+  private renderTextBitmap(n: MindNode, color: string, maxW: number, res: number): { canvas: HTMLCanvasElement; w: number; h: number } {
+    const size = n.style.fontSize ?? 14;
+    const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, this.measurer, n.style);
+    let totalH = 0;
+    for (const line of lines) {
+      const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
+      totalH += lh + (line.gapBefore ? lh * 0.6 : 0);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(maxW * res));
+    canvas.height = Math.max(1, Math.ceil(totalH * res));
+    const bctx = canvas.getContext("2d");
+    if (!bctx) return { canvas, w: maxW, h: totalH };
+    bctx.scale(res, res);
+    bctx.textBaseline = "middle";
+
+    const strike = (n.style.strikethrough ?? false);
+    let yCursor = 0;
+
+    for (const line of lines) {
+      const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
+      if (line.gapBefore) yCursor += lh * 0.6;
+      const y = yCursor + lh / 2;
+      // left-aligned: honor the bullet hanging indent; centered: center the line
+      let x = n.style.align === "left" ? (line.indent ?? 0) : (maxW - line.width) / 2;
+      for (const seg of line.segments) {
+        const runSize = seg.run.fontSize ?? size;
+        const bold = (seg.run.bold ?? false) || (n.style.fontWeight ?? 400) >= 700;
+        const italic = (seg.run.italic ?? false) || (n.style.italic ?? false);
+        const family = n.style.fontFamily ?? "system-ui, -apple-system, sans-serif";
+        bctx.font = `${italic ? "italic " : ""}${bold ? 700 : n.style.fontWeight ?? 400} ${runSize}px ${family}`;
+        bctx.fillStyle = seg.run.color ?? color;
+        const w = this.measurer.measure(seg.text, { fontSize: runSize, fontFamily: family, fontWeight: bold ? 700 : n.style.fontWeight ?? 400, italic }).width;
+        bctx.fillText(seg.text, x, y);
+        const underline = (seg.run.underline ?? false) || (n.style.underline ?? false);
+        if (underline || strike) {
+          bctx.strokeStyle = seg.run.color ?? color;
+          bctx.lineWidth = 1;
+          bctx.beginPath();
+          const yy = underline ? y + runSize * 0.55 : y;
+          bctx.moveTo(x, yy);
+          bctx.lineTo(x + w, yy);
+          bctx.stroke();
+        }
+        x += w;
+      }
+      yCursor += lh;
+    }
+    return { canvas, w: maxW, h: totalH };
   }
 
   private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string): void {
@@ -528,6 +581,7 @@ export class Renderer {
       ctx.fillStyle = theme.background;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
+    this.curScale = scale;
     ctx.setTransform(scale, 0, 0, scale, -bounds.minX * scale, -bounds.minY * scale);
     this.paintFull(ctx, state, theme);
     return canvas;

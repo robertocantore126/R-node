@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EditorStore } from "../src/editor/store";
+import { makeOp, type Op } from "../src/core/ops";
 import type { StorageAdapter } from "../src/persist/storage";
 
 const memoryAdapter: StorageAdapter = {
@@ -165,6 +166,77 @@ describe("type-to-edit", () => {
     expect(store.doc.node(main.id)!.title).toBe("Saved while typing");
     expect(store.getSnapshot().editingId).toBe(main.id);
     expect(store.getSnapshot().sync).toBe("saved");
+  });
+
+  it("commits a rich-text draft as a setTitle op with titleRuns", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+    store.startEdit(main.id);
+
+    // The Lexical overlay pushes runs on every keystroke (bold + color here).
+    store.setEditingDraftRuns([
+      { text: "Rich ", bold: true },
+      { text: "text", color: "#ff0000" },
+    ]);
+    store.commitEdit();
+
+    const node = store.doc.node(main.id)!;
+    expect(node.title).toBe("Rich text");
+    expect(node.titleRuns).toEqual([
+      { text: "Rich ", bold: true },
+      { text: "text", color: "#ff0000" },
+    ]);
+    expect(store.getSnapshot().editingId).toBeNull();
+  });
+
+  it("undo restores the exact pre-edit runs; redo reapplies them", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    // Give the node a rich baseline BEFORE editing.
+    store.execOps([
+      makeOp<Op & { type: "setTitle" }>("setTitle", {
+        id: main.id,
+        title: "Baseline",
+        prev: main.title,
+        titleRuns: [{ text: "Base", italic: true }],
+        prevRuns: main.titleRuns,
+      }),
+    ]);
+    const baselineRuns = store.doc.node(main.id)!.titleRuns;
+
+    store.select(main.id);
+    store.startEdit(main.id);
+    store.setEditingDraftRuns([{ text: "Bold new title", bold: true }]);
+    store.commitEdit();
+    expect(store.doc.node(main.id)!.title).toBe("Bold new title");
+
+    store.undo();
+    // the original rich runs come back exactly
+    expect(store.doc.node(main.id)!.title).toBe("Baseline");
+    expect(store.doc.node(main.id)!.titleRuns).toEqual(baselineRuns);
+
+    store.redo();
+    expect(store.doc.node(main.id)!.title).toBe("Bold new title");
+    expect(store.doc.node(main.id)!.titleRuns?.[0]?.bold).toBe(true);
+  });
+
+  it("cancelEdit discards rich runs and restores the original", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+    store.startEdit(main.id);
+    const before = store.doc.node(main.id)!.title;
+    store.setEditingDraftRuns([{ text: "discarded", italic: true }]);
+    store.cancelEdit();
+    expect(store.doc.node(main.id)!.title).toBe(before);
+    expect(store.getSnapshot().editingId).toBeNull();
   });
 
   it("pastes plain text into the selected topic (falls back from map paste)", async () => {

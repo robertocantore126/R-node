@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore } from "../editor/context";
 import type { TaskStatus, Priority, TopicShape } from "../core/types";
 import { makeOp, type Op } from "../core/ops";
+import { plainToRuns } from "../core/text";
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
@@ -42,7 +43,7 @@ export function Inspector(): JSX.Element {
           className="inspector-title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          onBlur={() => { if (title !== node.title) store.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id: node.id, title, prev: node.title })]); }}
+          onBlur={() => { if (title !== node.title) store.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id: node.id, title, prev: node.title, titleRuns: plainToRuns(title), prevRuns: node.titleRuns })]); }}
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
         />
         <div className="inspector-actions">

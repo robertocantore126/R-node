@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { measureNode, MIN_TOPIC_W } from "../src/layout/measure";
+import { measureNode, MIN_TOPIC_W, wrapRunLines, HEURISTIC_MEASURER } from "../src/layout/measure";
 import { DocumentModel } from "../src/core/doc";
-import type { MindNode } from "../src/core/types";
+import type { MindNode, TextRun } from "../src/core/types";
+
+function lineHeights(runs: TextRun[], maxW = 200): number[] {
+  return wrapRunLines(runs, maxW, HEURISTIC_MEASURER, { fontSize: 14 }).map((l) => l.height ?? 14 * 1.25);
+}
 
 function node(overrides: Partial<MindNode>): MindNode {
   const model = new DocumentModel(DocumentModel.blank("m"));
@@ -68,5 +72,35 @@ describe("topic extent (observable model)", () => {
     const wide = measureNode(node({ title }), { measure: (t, s) => ({ width: t.length * s.fontSize * 1.0 }) });
     const narrow = measureNode(node({ title }), { measure: (t, s) => ({ width: t.length * s.fontSize * 0.2 }) });
     expect(wide.w).toBeGreaterThan(narrow.w);
+  });
+
+  it("a paraGap run adds extra vertical height (paragraph spacing)", () => {
+    // same two lines of text: with and without the paragraph gap
+    const plain = measureNode(node({ title: "Line one\nLine two" }));
+    const spaced = measureNode(node({ title: "Line one\nLine two", titleRuns: [{ text: "Line one" }, { text: "\n" }, { text: "Line two", paraGap: true }] }));
+    expect(spaced.h).toBeGreaterThan(plain.h);
+  });
+
+  it("a heading-size run makes its line taller", () => {
+    const sizes = lineHeights([{ text: "Body" }, { text: "Heading", fontSize: 26 }]);
+    // both runs share one line; the tallest run sets the line height
+    expect(sizes[0]).toBeCloseTo(26 * 1.25, 5);
+  });
+
+  it("list items get a bullet glyph on the first line and hanging indent after", () => {
+    const lines = wrapRunLines(
+      [{ text: "A fairly long list item that will wrap onto multiple lines because the budget is small", listIndent: 1 }],
+      80,
+      HEURISTIC_MEASURER,
+      { fontSize: 14 }
+    );
+    expect(lines.length).toBeGreaterThan(1);
+    const first = lines[0];
+    // glyph is part of the first line's segments
+    expect(first.segments[0].text).toContain("•");
+    // continuation lines hang-indent under the bullet
+    for (const line of lines.slice(1)) {
+      expect((line.indent ?? 0)).toBeGreaterThan(0);
+    }
   });
 });

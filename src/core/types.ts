@@ -108,6 +108,34 @@ export const DEFAULT_STYLE: Style = {
 };
 
 // ---------------------------------------------------------------------------
+// Rich text (topic titles)
+// ---------------------------------------------------------------------------
+
+/**
+ * A styled segment of a topic title. The title is rendered as a sequence of
+ * runs: plain text plus per-run emphasis and color. A missing color inherits
+ * the theme/branch text color of the node.
+ *
+ * Block-level semantics (so pasted content keeps its spatial structure,
+ * Draw.io-style): a run may open a paragraph gap, carry its own font size
+ * (headings), or start a bullet-list item at a given nesting depth.
+ */
+export interface TextRun {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  /** CSS color; when absent the node/theme text color is used. */
+  color?: string;
+  /** Per-run font size in px (headings). Absent = node font size. */
+  fontSize?: number;
+  /** Extra vertical gap before this run's paragraph (past  a block boundary). */
+  paraGap?: boolean;
+  /** >0 → this run starts a bullet-list item at this depth (1 = top level). */
+  listIndent?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Task
 // ---------------------------------------------------------------------------
 
@@ -142,7 +170,14 @@ export interface MindNode {
   type: NodeType;
   parentId: string | null;
   childrenIds: string[];
+  /** Plain-text title — always kept in sync with titleRuns (single run). */
   title: string;
+  /**
+   * Styled segments of the title. When absent the title is a single plain
+   * run; every title mutation (styled or not) updates both fields so all
+   * existing consumers (search, export, outliner, tests) keep working.
+   */
+  titleRuns?: TextRun[];
   position: Position;
   style: Style;
   collapsed: boolean;

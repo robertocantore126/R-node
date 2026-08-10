@@ -515,19 +515,84 @@ textarea:focus {
   touch-action: none;
 }
 
-.topic-editor {
+/* Rich-text topic editor (Lexical overlay — exactly one at any time). */
+.topic-rich-editor {
   position: absolute;
   z-index: 20;
   border: 2px solid var(--accent);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
-  padding: 0 6px;
-  resize: none;
-  overflow: hidden;
-  text-align: center;
-  font-weight: inherit;
   box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  min-width: 60px;
+  min-height: 28px;
+  overflow: visible;
+}
+
+.topic-rich-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 4px 4px 0 0;
+  user-select: none;
+}
+
+.topic-rich-toolbar button {
+  background: none;
+  border: none;
+  border-radius: 3px;
+  padding: 1px 6px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.topic-rich-toolbar button:hover {
+  background: var(--hover);
+}
+
+.topic-rich-toolbar input[type="color"] {
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+}
+
+.topic-rich-editable {
+  flex: 1;
+  outline: none;
+  padding: 4px 6px;
+  overflow-y: auto;
+  font-family: inherit;
+}
+
+.topic-rich-editable p {
+  margin: 0;
+}
+
+.rnode-text-bold {
+  font-weight: 700;
+}
+
+.rnode-text-italic {
+  font-style: italic;
+}
+
+.rnode-text-underline {
+  text-decoration: underline;
+}
+
+.rnode-text-strike {
+  text-decoration: line-through;
 }
 
 .rel-pending {
