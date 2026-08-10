@@ -14,7 +14,7 @@ import { applyWithInverse, makeOp, type Op } from "../core/ops";
 import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RnodeDocument, type Sheet, type Style, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
-import { createCanvasTextMeasurer, measureNode, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
@@ -112,6 +112,15 @@ export class EditorStore {
    * restore the node when the edit is cancelled (Escape).
    */
   private editOriginal: { title: string; titleRuns?: TextRun[] } | null = null;
+  /**
+   * Canvas resize drag (Xmind-style handles on the selected node's edges).
+   * setResizeDraft mutates the node's width (and, for a left-edge drag, its
+   * position.x with a transient manual flag) ephemerally — no op, no history
+   * — so the layout re-wraps the text live during the drag. commitResize
+   * emits ONE batch op (setStyle + optional setPosition), so undo restores
+   * the exact pre-drag state.
+   */
+  private resizeState: { nodeId: string; original: Style; origPos: Position } | null = null;
   /** Canvas-backed measurer: layout and renderer agree on every topic size. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
 
@@ -1169,6 +1178,83 @@ export class EditorStore {
     const node = this.model.node(id);
     if (!node) return;
     this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Canvas resize drag (Xmind-style handle) — ephemeral draft, single commit
+  // -------------------------------------------------------------------------
+
+  /** A resize drag started on this node: capture the pre-drag style + position. */
+  beginResize(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    this.resizeState = { nodeId, original: { ...node.style }, origPos: { ...node.position } };
+  }
+
+  /**
+   * Live width during the drag: ephemeral mutation, no op, no history.
+   * For a left-edge drag the right edge is the anchor: position.x follows
+   * the cursor with a TRANSIENT manual flag — applyLayout skips manual
+   * nodes and would otherwise snap the position back every 30ms. The flag
+   * is restored to its original value by commitResize.
+   */
+  setResizeDraft(nodeId: string, width: number, opts?: { anchorRight?: boolean; x?: number }): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const w = Math.round(Math.min(640, Math.max(MIN_TOPIC_W, width)));
+    node.style = { ...node.style, width: w };
+    if (opts?.anchorRight && typeof opts.x === "number") {
+      node.position = { ...node.position, x: opts.x, manual: true };
+    }
+    this.scheduleLayout(false);
+    this.notify();
+  }
+
+  /** End of the drag: one batch op (setStyle + optional setPosition); undo restores it all. */
+  commitResize(): void {
+    const r = this.resizeState;
+    this.resizeState = null;
+    if (!r) return;
+    const node = this.model.node(r.nodeId);
+    if (!node) return;
+    const w = node.style.width;
+    const xChanged = node.position.x !== r.origPos.x;
+    // A left-edge drag moves position.x. It persists only for floating or
+    // already-manual nodes; auto-layout nodes return to the layout's slot
+    // (the width is what survives there — the next applyLayout re-pins x).
+    const keepX = xChanged && (node.type === "floating" || r.origPos.manual);
+    const ops: Op[] = [];
+    if (w !== undefined && w !== r.original.width) {
+      ops.push(
+        makeOp<Op & { type: "setStyle" }>("setStyle", {
+          id: r.nodeId,
+          style: { ...node.style, width: w },
+          prev: r.original,
+        })
+      );
+    }
+    if (keepX) {
+      ops.push(
+        makeOp<Op & { type: "setPosition" }>("setPosition", {
+          id: r.nodeId,
+          x: node.position.x,
+          y: node.position.y,
+          manual: true,
+          prev: r.origPos,
+        })
+      );
+    } else if (xChanged) {
+      node.position = { ...r.origPos };
+    }
+    if (ops.length > 0) {
+      this.execOps(ops);
+    } else {
+      // click without a real change — restore the pre-drag state, no op
+      node.style = r.original;
+      node.position = { ...r.origPos };
+      this.scheduleLayout(false);
+      this.notify();
+    }
   }
 
   setBranchFreePosition(id: string, enabled: boolean): void {

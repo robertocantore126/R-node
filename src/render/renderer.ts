@@ -6,9 +6,9 @@
  * HTML overlay (allowed by the architecture) — the renderer skips the title
  * of the node being edited so the overlay doesn't double-paint.
  */
-import type { MindNode, Sheet, StructureType, Orientation } from "../core/types";
+import type { MindNode, Sheet, StructureType, Orientation, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { createCanvasTextMeasurer, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { BLOCK_GAP_FACTOR, createCanvasTextMeasurer, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
 import type { Camera } from "./viewport";
 
@@ -305,6 +305,24 @@ export class Renderer {
       ctx.setLineDash([]);
       const pad = 3;
       ctx.strokeRect(p.x - pad, p.y - pad, p.w + pad * 2, p.h + pad * 2);
+
+      // Xmind-style resize handles on BOTH edges (hidden while editing — the
+      // HTML overlay owns the node then). Dragging changes the width and the
+      // text re-wraps; see hitTestResize + store.setResizeDraft. Outline only
+      // (a filled square reads as a purple blob on the node); a white
+      // under-stroke keeps them visible on dark/same-colored fills (e.g. the
+      // indigo central topic) without adding a fill.
+      const hs = 9;
+      const hy = p.y + p.h / 2 - hs / 2;
+      for (const hx of [p.x - hs / 2, p.x + p.w - hs / 2]) {
+        this.roundRect(ctx, hx, hy, hs, hs, 2);
+        ctx.strokeStyle = theme.background;
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
     }
     if (state.hoverId === n.id && !selected) {
       ctx.strokeStyle = theme.selection;
@@ -451,7 +469,7 @@ export class Renderer {
     let totalH = 0;
     for (const line of lines) {
       const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
-      totalH += lh + (line.gapBefore ? lh * 0.6 : 0);
+      totalH += lh + (line.gapBefore ? lh * BLOCK_GAP_FACTOR : 0);
     }
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.ceil(maxW * res));
@@ -459,32 +477,64 @@ export class Renderer {
     const bctx = canvas.getContext("2d");
     if (!bctx) return { canvas, w: maxW, h: totalH };
     bctx.scale(res, res);
-    bctx.textBaseline = "middle";
+    bctx.textBaseline = "alphabetic";
 
+    const family = n.style.fontFamily ?? "system-ui, -apple-system, sans-serif";
+    const baseWeight = n.style.fontWeight ?? 400;
     const strike = (n.style.strikethrough ?? false);
-    let yCursor = 0;
+    const fontOf = (seg: { run: TextRun }): string => {
+      const runSize = seg.run.fontSize ?? size;
+      const bold = (seg.run.bold ?? false) || baseWeight >= 700;
+      const italic = (seg.run.italic ?? false) || (n.style.italic ?? false);
+      return `${italic ? "italic " : ""}${bold ? 700 : baseWeight} ${runSize}px ${family}`;
+    };
+    /** Real font metrics (per run) — the browser positions glyphs on the
+     * baseline with half-leading around the font's content area; the canvas
+     * must replicate that instead of centering the em box, or the node view
+     * drifts vertically from the editor's rendered text. */
+    const metricsOf = (runSize: number, font: string): { ascent: number; descent: number } => {
+      bctx.font = font;
+      const m = bctx.measureText("M");
+      const fallbackA = runSize * 0.8;
+      const fallbackD = runSize * 0.2;
+      const ascent = m.fontBoundingBoxAscent ?? fallbackA;
+      const descent = m.fontBoundingBoxDescent ?? fallbackD;
+      return { ascent: ascent > 0 ? ascent : fallbackA, descent: descent > 0 ? descent : fallbackD };
+    };
 
+    let yCursor = 0;
     for (const line of lines) {
       const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
-      if (line.gapBefore) yCursor += lh * 0.6;
-      const y = yCursor + lh / 2;
-      // left-aligned: honor the bullet hanging indent; centered: center the line
+      if (line.gapBefore) yCursor += lh * BLOCK_GAP_FACTOR;
+
+      // 1) line box: baseline = half-leading + max ascent (CSS line-box math)
+      let maxAscent = 0;
+      let maxDescent = 0;
+      for (const seg of line.segments) {
+        const runSize = seg.run.fontSize ?? size;
+        const m = metricsOf(runSize, fontOf(seg));
+        maxAscent = Math.max(maxAscent, m.ascent);
+        maxDescent = Math.max(maxDescent, m.descent);
+      }
+      const halfLeading = Math.max(0, (lh - (maxAscent + maxDescent)) / 2);
+      const baselineY = yCursor + halfLeading + maxAscent;
+
+      // 2) draw: left-aligned honors the bullet hanging indent; centered centers the line
       let x = n.style.align === "left" ? (line.indent ?? 0) : (maxW - line.width) / 2;
       for (const seg of line.segments) {
         const runSize = seg.run.fontSize ?? size;
-        const bold = (seg.run.bold ?? false) || (n.style.fontWeight ?? 400) >= 700;
-        const italic = (seg.run.italic ?? false) || (n.style.italic ?? false);
-        const family = n.style.fontFamily ?? "system-ui, -apple-system, sans-serif";
-        bctx.font = `${italic ? "italic " : ""}${bold ? 700 : n.style.fontWeight ?? 400} ${runSize}px ${family}`;
+        const bold = (seg.run.bold ?? false) || baseWeight >= 700;
+        bctx.font = fontOf(seg);
         bctx.fillStyle = seg.run.color ?? color;
-        const w = this.measurer.measure(seg.text, { fontSize: runSize, fontFamily: family, fontWeight: bold ? 700 : n.style.fontWeight ?? 400, italic }).width;
-        bctx.fillText(seg.text, x, y);
+        const w = this.measurer.measure(seg.text, { fontSize: runSize, fontFamily: family, fontWeight: bold ? 700 : baseWeight, italic: (seg.run.italic ?? false) || (n.style.italic ?? false) }).width;
+        bctx.fillText(seg.text, x, baselineY);
         const underline = (seg.run.underline ?? false) || (n.style.underline ?? false);
         if (underline || strike) {
           bctx.strokeStyle = seg.run.color ?? color;
           bctx.lineWidth = 1;
           bctx.beginPath();
-          const yy = underline ? y + runSize * 0.55 : y;
+          // underline ~0.1em below the baseline, strikethrough ~0.28em above
+          const yy = underline ? baselineY + runSize * 0.1 : baselineY - runSize * 0.28;
           bctx.moveTo(x, yy);
           bctx.lineTo(x + w, yy);
           bctx.stroke();
@@ -555,6 +605,27 @@ export class Renderer {
     const ox = state.viewW / 2 - state.camera.x * s;
     const oy = state.viewH / 2 - state.camera.y * s;
     return { x: p.x * s + ox, y: p.y * s + oy, w: p.w * s, h: p.h * s };
+  }
+
+  /**
+   * Hit test for the resize handles: small squares centered on the left and
+   * right edges of any SELECTED node (the node being edited is excluded).
+   * Returns { id, side } or null. Checked before the body hit test so the
+   * handles win even where they overlap the node edge.
+   */
+  hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {
+    const hs = 12; // grab box slightly larger than the drawn 9px handle
+    for (const id of state.selection) {
+      if (state.editingId === id) continue;
+      const rect = this.nodeWorldRect(state, id);
+      if (!rect) continue;
+      const hy = rect.y + rect.h / 2 - hs / 2;
+      for (const side of ["left", "right"] as const) {
+        const hx = (side === "left" ? rect.x : rect.x + rect.w) - hs / 2;
+        if (worldX >= hx && worldX <= hx + hs && worldY >= hy && worldY <= hy + hs) return { id, side };
+      }
+    }
+    return null;
   }
 
   nodeWorldRect(state: RenderState, id: string): { x: number; y: number; w: number; h: number } | null {

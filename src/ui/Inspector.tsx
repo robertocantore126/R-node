@@ -85,6 +85,22 @@ export function Inspector(): JSX.Element {
           <input type="number" min={10} max={48} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
         </div>
         <div className="field">
+          <span>Node width</span>
+          <input
+            type="range"
+            min={90}
+            max={640}
+            step={5}
+            value={node.style.width ?? 280}
+            onChange={(e) => store.setNodeStyle(node.id, { width: Number(e.target.value) })}
+            title="Fixed node width — the text re-wraps and the height follows"
+          />
+          <span className="muted">{node.style.width ? `${node.style.width}px` : "auto"}</span>
+          <button className="btn small" title="Fit the box to the text again" onClick={() => store.setNodeStyle(node.id, { width: undefined })}>
+            Auto
+          </button>
+        </div>
+        <div className="field">
           <span>Bold</span>
           <input type="checkbox" checked={(node.style.fontWeight ?? 400) >= 600} onChange={(e) => store.setNodeStyle(node.id, { fontWeight: e.target.checked ? 600 : 400 })} />
         </div>

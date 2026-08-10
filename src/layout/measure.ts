@@ -69,6 +69,14 @@ export function createCanvasTextMeasurer(): TextMeasurer {
 
 export const TEXT_INSET = 6; // horizontal inset inside the topic box (both sides)
 export const LINE_HEIGHT_FACTOR = 1.25;
+/**
+ * Block gap shared by BOTH renderers (single source of truth): every block
+ * boundary (paragraph end, list item end) advances by this fraction of the
+ * line height. The Lexical overlay mirrors it via --rnode-block-gap
+ * (calc(BLOCK_GAP_FACTOR * LINE_HEIGHT_FACTOR em)) so the editor and the
+ * canvas keep the same vertical rhythm.
+ */
+export const BLOCK_GAP_FACTOR = 0.6;
 export const MIN_TOPIC_W = 84;
 export const MAX_TOPIC_W = 280;
 
@@ -130,13 +138,17 @@ export function wrapRunLines(runs: TextRun[], maxW: number, measurer: TextMeasur
   }
 
   const out: TextRunLine[] = [];
+  let emittedParas = 0;
   for (const para of paragraphs) {
     // Bullet metadata for this paragraph (first listIndent run wins).
     let bulletRun: TextRun | null = null;
     for (const seg of para) if (seg.run.listIndent) { bulletRun = seg.run; break; }
     const glyph = bulletRun ? listGlyph(bulletRun.listIndent!) : null;
     const glyphW = glyph && bulletRun ? widthOf(glyph, bulletRun) : 0;
-    const gapBefore = para.length > 0 && para[0].paraGap;
+    // Block boundary → fixed gap. A paragraph flagged paraGap OR a list item
+    // (bulletRun) starts a new block; the very first block of the topic has
+    // no leading gap. The overlay applies the same rule with --rnode-block-gap.
+    const gapBefore = (para.length > 0 && (para[0].paraGap || !!bulletRun)) && emittedParas > 0;
 
     // 2) Tokenize the paragraph into whitespace-separated fragments (whitespace
     //    kept). A word may span runs (bold "he" + plain "llo" stays one token)
@@ -148,6 +160,7 @@ export function wrapRunLines(runs: TextRun[], maxW: number, measurer: TextMeasur
       }
     }
 
+    const startOutLen = out.length;
     let line: { text: string; run: TextRun }[] = [];
     let lineWidth = 0;
     let firstLine = true; // the glyph lives on the first line only
@@ -186,6 +199,7 @@ export function wrapRunLines(runs: TextRun[], maxW: number, measurer: TextMeasur
       lineMaxSize = Math.max(lineMaxSize, tok.run.fontSize ?? style.fontSize ?? 14);
     }
     push();
+    if (out.length > startOutLen) emittedParas++;
   }
   if (out.length === 0) out.push({ segments: [], width: 0, height: (style.fontSize ?? 14) * LINE_HEIGHT_FACTOR });
   return out;
@@ -220,14 +234,16 @@ export function measureTopic(n: MindNode, measurer: TextMeasurer = HEURISTIC_MEA
 
   const fontSize = style.fontSize ?? 14;
   const pad = style.padding ?? 10;
-  const maxW = style.width ?? MAX_TOPIC_W;
+  // An explicit width fixes the box and re-wraps the text at it (Xmind-style
+  // resize); the height always follows the wrapped content.
+  const maxW = style.width ? Math.max(MIN_TOPIC_W, style.width) : MAX_TOPIC_W;
   const textW = Math.max(24, maxW - pad * 2 - TEXT_INSET);
   const runs = nodeRuns(n.title, n.titleRuns);
   const lines = wrapRunLines(runs, textW, measurer, style);
   const maxLineW = lines.reduce((acc, l) => Math.max(acc, l.width), 0);
 
-  let w = style.width ?? Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET));
-  let h = style.height ?? Math.max(28, lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR), 0) + (lines.filter((l) => l.gapBefore).length * fontSize * LINE_HEIGHT_FACTOR * 0.6) + pad * 2 + 4);
+  let w = style.width ? Math.max(MIN_TOPIC_W, style.width) : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET));
+  let h = style.height ?? Math.max(28, lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapBefore ? (l.height ?? fontSize * LINE_HEIGHT_FACTOR) * BLOCK_GAP_FACTOR : 0), 0) + pad * 2 + 4);
 
   const shape = style.shape ?? "rounded";
   if (shape === "circle") {

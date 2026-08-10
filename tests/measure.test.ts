@@ -60,6 +60,24 @@ describe("topic extent (observable model)", () => {
     expect(e).toEqual({ w: 400, h: 90 });
   });
 
+  it("a fixed width re-wraps the text and the height follows (Xmind resize)", () => {
+    const title = "word word word word word word word word word word";
+    const narrow = measureNode(node({ title, style: { width: 120 } }));
+    const wide = measureNode(node({ title, style: { width: 400 } }));
+    expect(narrow.w).toBe(120);
+    expect(wide.w).toBe(400);
+    // fewer chars fit per line at 120px → more lines → taller box
+    expect(narrow.h).toBeGreaterThan(wide.h);
+    // clearing the width returns to auto-fit (capped at MAX_TOPIC_W)
+    const auto = measureNode(node({ title }));
+    expect(auto.w).toBeLessThanOrEqual(280);
+  });
+
+  it("explicit widths below the minimum are clamped up", () => {
+    const e = measureNode(node({ title: "T", style: { width: 40 } }));
+    expect(e.w).toBe(MIN_TOPIC_W);
+  });
+
   it("font size scales the extent", () => {
     const s = measureNode(node({ title: "Scale", style: { fontSize: 12 } }));
     const l = measureNode(node({ title: "Scale", style: { fontSize: 28 } }));

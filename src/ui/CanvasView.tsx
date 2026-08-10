@@ -5,8 +5,9 @@ import { setExportPngHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
+import type { MindNode } from "../core/types";
 import { RichEditor } from "./RichEditor";
 
 /**
@@ -29,6 +30,18 @@ interface DragState {
   lastY: number;
   grabOffsetX: number;
   grabOffsetY: number;
+  resizing: string | null;
+  resizeSide: "left" | "right" | null;
+  resizeStartWorldX: number;
+  resizeStartWidth: number;
+  resizeStartX: number;
+}
+
+/** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
+function shapeWidthAllowance(n: MindNode): number {
+  const shape = n.style.shape ?? "rounded";
+  const fs = n.style.fontSize ?? 14;
+  return shape === "diamond" ? fs : shape === "hexagon" ? 14 : 0;
 }
 
 const overlayMeasurer = createCanvasTextMeasurer();
@@ -39,9 +52,26 @@ export function CanvasView(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sizeRef = useRef({ w: viewSize.w, h: viewSize.h });
-  const dragRef = useRef<DragState>({ dragging: null, moved: false, panning: false, startX: 0, startY: 0, lastX: 0, lastY: 0, grabOffsetX: 0, grabOffsetY: 0 });
+  const dragRef = useRef<DragState>({
+    dragging: null,
+    moved: false,
+    panning: false,
+    startX: 0,
+    startY: 0,
+    lastX: 0,
+    lastY: 0,
+    grabOffsetX: 0,
+    grabOffsetY: 0,
+    resizing: null,
+    resizeSide: null,
+    resizeStartWorldX: 0,
+    resizeStartWidth: 0,
+    resizeStartX: 0,
+  });
   const [, force] = useState(0);
   const [panning, setPanning] = useState(false);
+  const [resizing, setResizing] = useState(false);
+  const [resizeHover, setResizeHover] = useState(false);
 
   const paint = useCallback(() => {
     const renderer = rendererRef.current;
@@ -189,6 +219,26 @@ export function CanvasView(): JSX.Element {
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
+
+    // Xmind-style width resize: grab the handle on the selected node's edge.
+    // Checked BEFORE the body hit test so the handle wins on the edge line
+    // (skipped while a relationship target is being picked).
+    const resizeHit = s.relFrom ? null : renderer.hitTestResize(rs, world.x, world.y);
+    if (resizeHit) {
+      const rect = renderer.nodeWorldRect(rs, resizeHit.id)!;
+      const n = store.doc.node(resizeHit.id)!;
+      drag.resizing = resizeHit.id;
+      drag.resizeSide = resizeHit.side;
+      drag.resizeStartWorldX = world.x;
+      drag.resizeStartWidth = n.style.width ?? Math.max(MIN_TOPIC_W, rect.w - shapeWidthAllowance(n));
+      drag.resizeStartX = rect.x;
+      store.beginResize(resizeHit.id);
+      store.select(resizeHit.id, { additive: false });
+      setResizing(true);
+      setResizeHover(false);
+      return;
+    }
+
     const hit = renderer.hitTest(rs, world.x, world.y);
 
     if (s.relFrom) {
@@ -214,11 +264,6 @@ export function CanvasView(): JSX.Element {
 
   const onPointerMove = (e: RPointerEvent): void => {
     const s0 = store.getSnapshot();
-    if (!dragRef.current.panning && !dragRef.current.dragging) {
-      const p = localPoint(e);
-      const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, p.x, p.y);
-      store.setHover(rendererRef.current?.hitTest(currentRenderState(), w.x, w.y) ?? null);
-    }
     const drag = dragRef.current;
     const { x, y } = localPoint(e);
     const dx = x - drag.lastX;
@@ -226,9 +271,34 @@ export function CanvasView(): JSX.Element {
     drag.lastX = x;
     drag.lastY = y;
 
+    if (drag.resizing) {
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const dx = world.x - drag.resizeStartWorldX;
+      if (drag.resizeSide === "left") {
+        // Right edge stays anchored; the left edge (position.x) follows the cursor.
+        store.setResizeDraft(drag.resizing, drag.resizeStartWidth - dx, {
+          anchorRight: true,
+          x: drag.resizeStartX + dx,
+        });
+      } else {
+        store.setResizeDraft(drag.resizing, drag.resizeStartWidth + dx);
+      }
+      drag.moved = true;
+      return;
+    }
     if (drag.panning) {
       store.panBy(dx, dy);
       return;
+    }
+    if (!drag.dragging) {
+      const p = localPoint(e);
+      const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, p.x, p.y);
+      const renderer = rendererRef.current;
+      const rs = currentRenderState();
+      const rh = renderer?.hitTestResize(rs, w.x, w.y) ?? null;
+      setResizeHover(!!rh);
+      store.setHover(rh ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
     }
     if (!drag.dragging) return;
     if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
@@ -254,6 +324,14 @@ export function CanvasView(): JSX.Element {
 
   const onPointerUp = (e: RPointerEvent): void => {
     const drag = dragRef.current;
+    if (drag.resizing) {
+      store.commitResize();
+      drag.resizing = null;
+      drag.resizeSide = null;
+      drag.moved = false;
+      setResizing(false);
+      return;
+    }
     if (drag.panning) {
       drag.panning = false;
       drag.dragging = null;
@@ -338,11 +416,16 @@ export function CanvasView(): JSX.Element {
       <canvas
         ref={canvasRef}
         className="canvas"
-        style={{ cursor: panning ? "grabbing" : state.mode === "pan" ? "grab" : "default" }}
+        style={{
+          cursor: resizing || resizeHover ? "ew-resize" : panning ? "grabbing" : state.mode === "pan" ? "grab" : "default",
+        }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={() => store.setHover(null)}
+        onPointerLeave={() => {
+          store.setHover(null);
+          setResizeHover(false);
+        }}
         onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}
       />

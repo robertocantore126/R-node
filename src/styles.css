@@ -515,10 +515,19 @@ textarea:focus {
   touch-action: none;
 }
 
-/* Rich-text topic editor (Lexical overlay — exactly one at any time). */
+/* Rich-text topic editor (Lexical overlay — exactly one at any time).
+   The OUTER box only positions; the INNER box is laid out in world units and
+   scaled with a transform, so fonts, paddings, border and gaps match the
+   canvas pixel-for-pixel at every zoom. */
 .topic-rich-editor {
   position: absolute;
   z-index: 20;
+  overflow: visible;
+}
+
+.topic-rich-inner {
+  position: relative;
+  transform-origin: 0 0;
   border: 2px solid var(--accent);
   border-radius: 6px;
   background: var(--surface);
@@ -531,15 +540,23 @@ textarea:focus {
   overflow: visible;
 }
 
+/* Floating above the box (Xmind-style): the box height is measured for the
+   TEXT only, so the toolbar must not consume any of it — otherwise the text
+   area shrinks and the content scrolls/clips while the node view fits it. */
 .topic-rich-toolbar {
+  position: absolute;
+  top: -30px;
+  left: -2px;
   display: flex;
   align-items: center;
   gap: 2px;
   padding: 2px 4px;
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
   background: var(--surface);
-  border-radius: 4px 4px 0 0;
+  border-radius: 6px;
+  box-shadow: var(--shadow);
   user-select: none;
+  white-space: nowrap;
 }
 
 .topic-rich-toolbar button {
@@ -570,13 +587,33 @@ textarea:focus {
 .topic-rich-editable {
   flex: 1;
   outline: none;
-  padding: 4px 6px;
   overflow-y: auto;
   font-family: inherit;
 }
 
 .topic-rich-editable p {
   margin: 0;
+}
+
+/* WYSIWYG with the canvas: the same vertical rhythm the renderer uses.
+   Every block boundary (paragraph end AND list item end) gets the shared
+   --rnode-block-gap (BLOCK_GAP_FACTOR × line-height, set by RichEditor from
+   the same constants the canvas uses), and lists are compact — no
+   browser-default ul/ol margins or 40px indentation. */
+.topic-rich-editable ul,
+.topic-rich-editable ol {
+  margin: 0;
+  padding-left: 0;
+  list-style-position: inside;
+}
+
+.topic-rich-editable li {
+  margin: 0;
+}
+
+.topic-rich-editable > :not(:first-child),
+.topic-rich-editable li + li {
+  margin-top: var(--rnode-block-gap, 0.75em);
 }
 
 .rnode-text-bold {

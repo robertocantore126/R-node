@@ -28,6 +28,7 @@ import { useStore } from "../editor/context";
 import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
 import { nodeRuns, plainToRuns } from "../core/text";
+import { BLOCK_GAP_FACTOR, LINE_HEIGHT_FACTOR, TEXT_INSET } from "../layout/measure";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
 import { htmlToRuns, sanitizeHtml } from "./pasteSanitizer";
 
@@ -46,27 +47,59 @@ export function RichEditor({ node, style, scale }: { node: MindNode; style: CSSP
     theme: editorTheme,
     onError: (err: Error) => console.error("rich editor error", err),
   };
-  const box: CSSProperties = {
-    ...style,
-    fontSize: (node.style.fontSize ?? 14) * scale,
-    lineHeight: 1.25,
+  // The overlay is laid out in WORLD units and scaled as a whole with a CSS
+  // transform: fonts, paddings, the border and the block gaps then match the
+  // canvas pixel-for-pixel at every zoom. (Scaling each property separately
+  // broke the WYSIWYG: heading font-size was absolute px and the padding was
+  // screen px, so the editor text inflated and wrapped elsewhere.)
+  const inner: CSSProperties = {
+    width: Math.max(1, ((style.width as number) ?? 60) / scale),
+    height: Math.max(1, ((style.height as number) ?? 28) / scale),
+    fontSize: node.style.fontSize ?? 14,
+    lineHeight: LINE_HEIGHT_FACTOR,
     textAlign: (node.style.align === "left" ? "left" : "center") as CSSProperties["textAlign"],
+    transform: `scale(${scale})`,
+    transformOrigin: "0 0",
+  };
+  // Shared block gap: the canvas advances BLOCK_GAP_FACTOR × line-height at
+  // every block boundary (paragraph end, list item end) — the overlay applies
+  // the identical rule via this CSS variable (see .topic-rich-editable).
+  (inner as Record<string, string | number>)["--rnode-block-gap"] = `calc(${BLOCK_GAP_FACTOR} * ${LINE_HEIGHT_FACTOR}em)`;
+  // The editable overlays the node's box EXACTLY like the canvas draws the
+  // text: same wrap width (boxW − pad·2 − TEXT_INSET) and the text block
+  // vertically centered (pad + 2 top/bottom, inside the 2px border).
+  const pad = node.style.padding ?? 10;
+  const editablePad: CSSProperties = {
+    paddingTop: pad + 2,
+    paddingBottom: pad + 2,
+    paddingLeft: pad - 2,
+    paddingRight: pad + TEXT_INSET - 2,
   };
 
   return (
-    <div className="topic-rich-editor" style={box}>
-      <LexicalComposer initialConfig={config}>
-        <Toolbar />
-        <RichTextPlugin
-          contentEditable={<ContentEditable className="topic-rich-editable" ariaLabel="Edit topic" spellCheck={false} onBlur={() => store.commitEdit()} />}
-          placeholder={null}
-          ErrorBoundary={LexicalErrorBoundary}
-        />
-        <ListPlugin />
-        <DraftSyncPlugin store={store} node={node} />
-        <PasteSanitizerPlugin />
-        <KeysPlugin store={store} />
-      </LexicalComposer>
+    <div className="topic-rich-editor" style={{ left: style.left, top: style.top }}>
+      <div className="topic-rich-inner" style={inner}>
+        <LexicalComposer initialConfig={config}>
+          <Toolbar />
+          <RichTextPlugin
+            contentEditable={
+              <ContentEditable
+                className="topic-rich-editable"
+                style={editablePad}
+                ariaLabel="Edit topic"
+                spellCheck={false}
+                onBlur={() => store.commitEdit()}
+              />
+            }
+            placeholder={null}
+            ErrorBoundary={LexicalErrorBoundary}
+          />
+          <ListPlugin />
+          <DraftSyncPlugin store={store} node={node} />
+          <PasteSanitizerPlugin />
+          <KeysPlugin store={store} />
+        </LexicalComposer>
+      </div>
     </div>
   );
 }
