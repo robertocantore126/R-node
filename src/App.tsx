@@ -69,11 +69,11 @@ function StatusBar(): JSX.Element {
       <span className="sep">·</span>
       <span>{state.selection.length > 0 ? `${state.selection.length} selected` : `${store.doc.visibleNodeCount} topics`}</span>
       <span className="sep">·</span>
-      <span className={state.sync}>{state.sync === "saved" ? "Saved locally" : "Saving…"}</span>
+      <span className={state.sync}>{state.sync === "saved" ? "Saved" : "Unsaved changes"}</span>
       <span className="spacer" />
       {state.relFrom && <span className="status-hint">Link mode: click a target</span>}
       <span className="sep">·</span>
-      <span>Enter/Tab create · drag to move · scroll to pan · Ctrl+scroll to zoom</span>
+      <span>Enter/Tab create · drag to move · right-drag to pan · Ctrl+scroll to zoom</span>
     </footer>
   );
 }

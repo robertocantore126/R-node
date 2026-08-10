@@ -28,6 +28,8 @@ export function Palette(): JSX.Element | null {
   const items = useMemo<PaletteItem[]>(() => {
     const base: PaletteItem[] = [
       { label: "New document", hint: "", run: () => store.newDocument() },
+      { label: "Save document", hint: "Ctrl+S", run: () => void store.saveNow() },
+      { label: "Open file…", hint: "Ctrl+O", run: () => void store.loadFile() },
       { label: "Export as JSON", hint: "Ctrl+E", run: () => store.exportJson() },
       { label: "Export as Markdown", hint: "", run: () => store.exportMarkdown() },
       { label: "Export as PNG", hint: "", run: () => runExportPng() },

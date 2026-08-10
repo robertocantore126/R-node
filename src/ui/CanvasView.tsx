@@ -40,6 +40,7 @@ export function CanvasView(): JSX.Element {
   const sizeRef = useRef({ w: viewSize.w, h: viewSize.h });
   const dragRef = useRef<DragState>({ dragging: null, moved: false, panning: false, startX: 0, startY: 0, lastX: 0, lastY: 0, grabOffsetX: 0, grabOffsetY: 0 });
   const [, force] = useState(0);
+  const [panning, setPanning] = useState(false);
 
   const paint = useCallback(() => {
     const renderer = rendererRef.current;
@@ -165,9 +166,12 @@ export function CanvasView(): JSX.Element {
     drag.lastY = y;
     drag.moved = false;
 
-    if (e.button === 1 || s.mode === "pan" || (e.button === 0 && e.shiftKey && !s.relFrom)) {
+    // Panning is right-drag (or middle-drag / pan mode): left-click never
+    // pans, it only selects or drags topics.
+    if (e.button === 2 || e.button === 1 || s.mode === "pan") {
       drag.panning = true;
       drag.dragging = null;
+      setPanning(true);
       return;
     }
     if (e.button !== 0) return;
@@ -196,7 +200,6 @@ export function CanvasView(): JSX.Element {
       drag.dragging = hit;
     } else {
       store.clearSelection();
-      drag.panning = true; // drag on empty space pans the canvas
     }
   };
 
@@ -245,6 +248,7 @@ export function CanvasView(): JSX.Element {
     if (drag.panning) {
       drag.panning = false;
       drag.dragging = null;
+      setPanning(false);
       return;
     }
     if (drag.dragging && drag.moved) {
@@ -325,7 +329,7 @@ export function CanvasView(): JSX.Element {
       <canvas
         ref={canvasRef}
         className="canvas"
-        style={{ cursor: state.mode === "pan" ? "grab" : "default" }}
+        style={{ cursor: panning ? "grabbing" : state.mode === "pan" ? "grab" : "default" }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -341,7 +345,10 @@ export function CanvasView(): JSX.Element {
 
 function TopicEditor({ style }: { style: CSSProperties }): JSX.Element {
   const store = useStore();
-  const node = store.selectionNode;
+  // The editing node is the one being typed into — with Tab the selection
+  // stays on the source node, so the editor must NOT read selectionNode.
+  const editingId = store.getSnapshot().editingId;
+  const node = editingId ? store.doc.node(editingId) : store.selectionNode;
   const ref = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState(node?.title ?? "");
 

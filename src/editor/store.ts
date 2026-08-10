@@ -11,7 +11,7 @@
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
-import type { MindNode, NodeType, RmindDocument, Sheet, Style, TaskInfo } from "../core/types";
+import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RmindDocument, type Sheet, type Style, type TaskInfo } from "../core/types";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, measureNode, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
@@ -35,7 +35,7 @@ export interface EditorState {
   search: string;
   searchResults: string[];
   searchIndex: number;
-  sync: "saved" | "saving";
+  sync: "saved" | "dirty";
   message: string | null;
   canUndo: boolean;
   canRedo: boolean;
@@ -47,8 +47,6 @@ export interface EditorState {
   relFrom: string | null;
 }
 
-const MAX_AUTOSAVE_MS = 400;
-
 export class EditorStore {
   private state: EditorState;
   private snap: EditorState;
@@ -56,7 +54,8 @@ export class EditorStore {
   private model: DocumentModel;
   private history = new History();
   private adapter: StorageAdapter;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Document ids already persisted to the storage adapter this session. */
+  private persistedIds = new Set<string>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
   /** Canvas-backed measurer: layout and renderer agree on every topic size. */
@@ -149,15 +148,20 @@ export class EditorStore {
 
   async init(): Promise<void> {
     const docs = await this.adapter.load();
+    // Docs found in storage are already saved — their next Save only
+    // overwrites, it must not re-download the .rmind.json file.
+    for (const d of docs) this.persistedIds.add(d.documentId);
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
     } else {
+      // First run: start from the sample map. Nothing is persisted until the
+      // user presses Save / Ctrl+S — the sample acts as an in-memory draft.
       this.model = new DocumentModel(DocumentModel.sample());
-      await this.adapter.save([this.model.doc]);
     }
     this.normalizeBranchColors(this.model.sheet);
     this.state = this.makeState();
     if (docs.length > 0) this.state.docs = docs;
+    if (docs.length === 0) this.state.sync = "dirty";
     // Loading a document must respect positions explicitly placed by the
     // user. Forced layout is reserved for the explicit "Auto layout" command.
     this.scheduleLayout(false);
@@ -168,7 +172,7 @@ export class EditorStore {
   // Op execution
   // -------------------------------------------------------------------------
 
-  /** Apply ops, record them in history, mark dirty, schedule layout+save. */
+  /** Apply ops, record them in history, mark dirty, schedule layout. */
   execOps(ops: Op[], opts?: { skipHistory?: boolean }): void {
     if (ops.length === 0) return;
     const inverses: Op[][] = [];
@@ -196,7 +200,7 @@ export class EditorStore {
   private touch(): void {
     this.model.doc.updatedAt = nowIso();
     this.scheduleLayout(false);
-    this.scheduleSave();
+    this.state.sync = "dirty";
     this.notify();
   }
 
@@ -213,26 +217,165 @@ export class EditorStore {
   }
 
   // -------------------------------------------------------------------------
-  // Autosave
+  // Save / Load (manual — the user decides when to persist)
   // -------------------------------------------------------------------------
 
-  private scheduleSave(): void {
-    this.state.sync = "saving";
-    if (this.saveTimer) clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => {
-      void this.saveNow();
-    }, MAX_AUTOSAVE_MS);
-  }
-
+  /**
+   * Save the workspace: persist all docs to the storage adapter. The portable
+   * .rmind.json file is written once, on the FIRST save of a document — a map
+   * that is already saved locally is only overwritten in storage, never
+   * re-downloaded.
+   */
   async saveNow(): Promise<void> {
     try {
       await this.adapter.save(this.state.docs);
+      const firstSave = !this.persistedIds.has(this.model.doc.documentId);
+      this.persistedIds.add(this.model.doc.documentId);
+      if (firstSave) {
+        const json = JSON.stringify(this.model.doc, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        this.download(blob, this.docFileName());
+      }
       this.state.sync = "saved";
-      this.notify();
+      this.toast(firstSave ? `Saved ${this.docFileName()}` : "Saved");
     } catch {
-      this.state.sync = "saving";
+      this.state.sync = "dirty";
       this.toast("Save failed — check storage");
     }
+  }
+
+  /** Open a .rmind.json file from disk (file picker). */
+  async loadFile(): Promise<void> {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".rmind.json,application/json,.json";
+    const file: File | null = await new Promise((resolve) => {
+      input.onchange = (): void => resolve(input.files?.[0] ?? null);
+      input.click();
+    });
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const id = this.importDocumentFromJson(text);
+      if (id) this.toast(`Opened ${file.name}`);
+      else this.toast("Not a valid R-mind file");
+    } catch {
+      this.toast("Could not read the file");
+    }
+  }
+
+  /**
+   * Parse, validate and open a .rmind.json document. Returns the imported
+   * document id, or null if the text is not a valid R-mind document.
+   */
+  importDocumentFromJson(text: string): string | null {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    const doc = this.validateImportedDoc(raw);
+    if (!doc) return null;
+    const existing = this.state.docs.findIndex((d) => d.documentId === doc.documentId);
+    if (existing >= 0) this.state.docs[existing] = doc;
+    else this.state.docs = [...this.state.docs, doc];
+    this.switchToDoc(doc.documentId);
+    this.state.sync = "dirty"; // loaded from disk — not yet in app storage
+    this.normalizeBranchColors(this.sheet);
+    this.notify();
+    return doc.documentId;
+  }
+
+  /** Structural validation + sanitization of an imported document. */
+  private validateImportedDoc(raw: unknown): RmindDocument | null {
+    if (!raw || typeof raw !== "object") return null;
+    const d = raw as Partial<RmindDocument>;
+    if (typeof d.documentId !== "string" || d.documentId.length === 0) return null;
+    if (!Array.isArray(d.sheets) || d.sheets.length === 0) return null;
+    const s = d.sheets[0] as Partial<Sheet> | undefined;
+    if (!s || typeof s.rootNodeId !== "string" || !s.nodes || typeof s.nodes !== "object") return null;
+    const rawNodes = s.nodes as Record<string, unknown>;
+    const root = rawNodes[s.rootNodeId];
+    if (!root || typeof root !== "object") return null;
+
+    const nodes: Record<string, MindNode> = {};
+    for (const [id, n] of Object.entries(rawNodes)) {
+      if (!n || typeof n !== "object") continue;
+      const node = n as Partial<MindNode>;
+      const position = (typeof node.position === "object" && node.position ? node.position : {}) as Partial<Position>;
+      nodes[id] = {
+        id,
+        type: typeof node.type === "string" ? node.type : "subtopic",
+        parentId: typeof node.parentId === "string" || node.parentId === null ? node.parentId : null,
+        childrenIds: Array.isArray(node.childrenIds) ? node.childrenIds.filter((c): c is string => typeof c === "string") : [],
+        title: typeof node.title === "string" ? node.title : "",
+        position: {
+          x: typeof position.x === "number" ? position.x : 0,
+          y: typeof position.y === "number" ? position.y : 0,
+          manual: !!position.manual,
+        },
+        style: (typeof node.style === "object" && node.style ? node.style : {}) as Style,
+        collapsed: !!node.collapsed,
+        labels: Array.isArray(node.labels) ? node.labels.filter((l): l is string => typeof l === "string") : [],
+        markers: Array.isArray(node.markers) ? node.markers.filter((m): m is string => typeof m === "string") : [],
+        notes: typeof node.notes === "string" ? node.notes : "",
+        task: typeof node.task === "object" && node.task ? (node.task as TaskInfo) : null,
+        metadata: {
+          createdAt: typeof node.metadata?.createdAt === "string" ? node.metadata.createdAt : nowIso(),
+          updatedAt: typeof node.metadata?.updatedAt === "string" ? node.metadata.updatedAt : nowIso(),
+        },
+      };
+    }
+
+    const sheet: Sheet = {
+      sheetId: typeof s.sheetId === "string" ? s.sheetId : uid("s"),
+      title: typeof s.title === "string" ? s.title : "Map 1",
+      structure: {
+        structureType: s.structure?.structureType ?? "mindmap",
+        orientation: s.structure?.orientation ?? "horizontal",
+        spacing: typeof s.structure?.spacing === "number" ? s.structure.spacing : 180,
+        branchSpacing: typeof s.structure?.branchSpacing === "number" ? s.structure.branchSpacing : 14,
+        padding: typeof s.structure?.padding === "number" ? s.structure.padding : 18,
+        compactMode: !!s.structure?.compactMode,
+        autoBalance: s.structure?.autoBalance ?? true,
+        freePositioningBranches: !!s.structure?.freePositioningBranches,
+        allowManualPositioning: s.structure?.allowManualPositioning ?? true,
+        connectorStyle: s.structure?.connectorStyle ?? "curved",
+      },
+      rootNodeId: s.rootNodeId,
+      nodes,
+      relationships: Array.isArray(s.relationships) ? s.relationships : [],
+      boundaries: Array.isArray(s.boundaries) ? s.boundaries : [],
+      summaries: Array.isArray(s.summaries) ? s.summaries : [],
+      callouts: Array.isArray(s.callouts) ? s.callouts : [],
+      labels: Array.isArray(s.labels) ? s.labels : [],
+      zones: Array.isArray(s.zones) ? s.zones : [],
+      attachments: Array.isArray(s.attachments) ? s.attachments : [],
+      comments: Array.isArray(s.comments) ? s.comments : [],
+      presentation: typeof s.presentation === "object" && s.presentation ? s.presentation : {},
+    };
+
+    return {
+      schemaVersion: typeof d.schemaVersion === "string" ? d.schemaVersion : SCHEMA_VERSION,
+      documentId: d.documentId,
+      title: typeof d.title === "string" ? d.title : "Imported map",
+      createdAt: typeof d.createdAt === "string" ? d.createdAt : nowIso(),
+      updatedAt: nowIso(),
+      archived: !!d.archived,
+      pinned: !!d.pinned,
+      settings: {
+        theme: d.settings?.theme === "dark" ? "dark" : "light",
+        showOutliner: !!d.settings?.showOutliner,
+        showInspector: d.settings?.showInspector ?? true,
+      },
+      themeId: typeof d.themeId === "string" ? d.themeId : "r-mind-light",
+      sheets: [sheet],
+    };
+  }
+
+  private docFileName(): string {
+    return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rmind.json`;
   }
 
   // -------------------------------------------------------------------------
@@ -408,7 +551,10 @@ export class EditorStore {
     const position = this.createNodePosition(node);
     const style = this.createNodeStyle(type, node.id, node.childrenIds.length);
     this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(type, node.id), position, style })]);
-    this.startEdit(id);
+    // Tab spawns the child without entering edit mode: the selection stays on
+    // the source node, so repeated Tab keeps adding siblings under the same
+    // parent instead of nesting (or stealing the selection).
+    this.notify();
   }
 
   createParent(): void {
@@ -1049,7 +1195,7 @@ export class EditorStore {
 
   toggleTheme(): void {
     this.model.doc.settings.theme = this.model.doc.settings.theme === "dark" ? "light" : "dark";
-    this.scheduleSave();
+    this.state.sync = "dirty";
     this.notify();
   }
 
@@ -1122,6 +1268,8 @@ export class EditorStore {
     this.state.docs = [...this.state.docs, doc];
     this.state.activeDocId = doc.documentId;
     this.switchToDoc(doc.documentId);
+    this.state.sync = "dirty"; // new doc not persisted until the user saves
+    this.notify();
     this.toast("New document created");
   }
 
@@ -1130,6 +1278,7 @@ export class EditorStore {
     const doc = DocumentModel.sample();
     doc.settings.theme = this.model.doc.settings.theme;
     this.state.docs = [...this.state.docs, doc];
+    this.state.sync = "dirty";
     this.notify();
     return doc.documentId;
   }
@@ -1143,6 +1292,7 @@ export class EditorStore {
     copy.createdAt = nowIso();
     copy.updatedAt = nowIso();
     this.state.docs = [...this.state.docs, copy];
+    this.state.sync = "dirty";
     this.notify();
     this.toast("Document duplicated");
   }
@@ -1152,7 +1302,7 @@ export class EditorStore {
     if (!doc) return;
     doc.title = title;
     doc.updatedAt = nowIso();
-    this.scheduleSave();
+    this.state.sync = "dirty";
     this.notify();
   }
 
@@ -1160,7 +1310,7 @@ export class EditorStore {
     const doc = this.state.docs.find((d) => d.documentId === id);
     if (!doc) return;
     doc.archived = !doc.archived;
-    this.scheduleSave();
+    this.state.sync = "dirty";
     this.notify();
   }
 
@@ -1174,7 +1324,7 @@ export class EditorStore {
         this.state = this.makeState();
       }
     }
-    this.scheduleSave();
+    this.state.sync = "dirty";
     this.notify();
   }
 
@@ -1188,6 +1338,7 @@ export class EditorStore {
     this.state.editingId = null;
     this.state.search = "";
     this.state.searchResults = [];
+    this.state.sync = "saved"; // the loaded doc is its persisted version
     this.notify();
     this.scheduleLayout(false);
   }
@@ -1204,7 +1355,7 @@ export class EditorStore {
   exportJson(): void {
     const json = JSON.stringify(this.model.doc, null, 2);
     const blob = new Blob([json], { type: "application/json" });
-    this.download(blob, `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rmind.json`);
+    this.download(blob, this.docFileName());
     this.toast("Document exported as JSON");
   }
 

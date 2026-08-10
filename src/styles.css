@@ -325,7 +325,11 @@ textarea:focus {
   margin-left: 6px;
 }
 
-.save-status.saving {
+.save-status.dirty {
+  color: #f59e0b;
+}
+
+.statusbar .dirty {
   color: #f59e0b;
 }
 

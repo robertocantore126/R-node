@@ -39,6 +39,9 @@ export function Sidebar(): JSX.Element {
         <button className="btn primary" onClick={() => store.newDocument()}>
           + New document
         </button>
+        <button className="btn" onClick={() => void store.loadFile()} title="Open a .rmind.json file">
+          Open file…
+        </button>
         <button className="btn" onClick={() => store.switchToDoc(store.duplicateSample())} title="Create a doc from the roadmap template">
           From template
         </button>

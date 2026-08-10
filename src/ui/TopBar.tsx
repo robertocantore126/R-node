@@ -42,8 +42,14 @@ export function TopBar(): JSX.Element {
         <button className="btn icon" title="Redo (Ctrl+Shift+Z)" disabled={!state.canRedo} onClick={() => store.redo()}>
           ↷
         </button>
-        <span className={`save-status ${state.sync}`} title="Local autosave status">
-          {state.sync === "saved" ? "Saved" : "Saving…"}
+        <button className="btn primary" title="Save (Ctrl+S)" onClick={() => void store.saveNow()}>
+          Save
+        </button>
+        <button className="btn" title="Open a .rmind.json file (Ctrl+O)" onClick={() => void store.loadFile()}>
+          Open
+        </button>
+        <span className={`save-status ${state.sync}`} title="Changes are saved only when you press Save or Ctrl+S">
+          {state.sync === "saved" ? "Saved" : "Unsaved"}
         </span>
       </div>
 

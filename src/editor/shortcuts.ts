@@ -32,6 +32,7 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
   "Mod+k": "palette",
   "Mod+f": "search",
   "Mod+s": "save",
+  "Mod+o": "open",
   "Mod+e": "export-json",
   "Mod+d": "duplicate",
   "Mod+Enter": "task-complete",
@@ -139,6 +140,10 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
     case "save":
       e.preventDefault();
       void store.saveNow();
+      return true;
+    case "open":
+      e.preventDefault();
+      void store.loadFile();
       return true;
     case "export-json":
       e.preventDefault();

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EditorStore } from "../src/editor/store";
 import type { StorageAdapter } from "../src/persist/storage";
 
@@ -11,34 +11,136 @@ const memoryAdapter: StorageAdapter = {
 describe("new topic defaults", () => {
   it("gives every newly created topic a useful editable title", () => {
     const store = new EditorStore(memoryAdapter);
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const rootKidsBefore = root.childrenIds.length;
 
+    // No selection → the child is created under the root as a main topic.
     store.createChild();
-    expect(store.selectionNode?.type).toBe("main");
-    expect(store.selectionNode?.title).toMatch(/^Main Topic \d+$/);
+    expect(root.childrenIds.length).toBe(rootKidsBefore + 1);
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    expect(main.type).toBe("main");
+    expect(main.title).toMatch(/^Main Topic \d+$/);
 
+    // Tab keeps the source selected: with the main topic selected, the next
+    // child is a subtopic of it — created under the same parent, no nesting.
+    store.select(main.id);
     store.createChild();
-    expect(store.selectionNode?.type).toBe("subtopic");
-    expect(store.selectionNode?.title).toBe("Subtopic 1");
+    expect(main.childrenIds.length).toBe(1);
+    const child = store.doc.node(main.childrenIds[0])!;
+    expect(child.type).toBe("subtopic");
+    expect(child.title).toBe("Subtopic 1");
   });
 
   it("keeps a manually pinned main topic pinned when reordered among root children", () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();
-    const first = store.selectionNode;
-    expect(first).toBeTruthy();
-    if (!first) return;
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const first = store.doc.node(root.childrenIds[0])!;
 
+    // select the root so the next createChild makes a sibling main topic
+    store.select(store.sheet.rootNodeId);
     store.createChild();
-    const second = store.selectionNode;
+    const second = root.childrenIds.find((id) => id !== first.id);
     expect(second).toBeTruthy();
     if (!second) return;
 
     store.doc.node(first.id)!.position = { x: 200, y: 100, manual: true };
-    store.dropAt(first.id, second.id, "after", 250, 100);
+    store.dropAt(first.id, second, "after", 250, 100);
 
     const moved = store.doc.node(first.id)!;
     expect(moved.position.manual).toBe(true);
     expect(moved.position.x).toBe(200);
     expect(moved.position.y).toBe(100);
+  });
+
+  it("Tab adds children under the same parent without selecting or editing", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const parent = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(parent.id);
+
+    // Tab 1: child created, selection stays on parent, editor NOT opened.
+    store.createChild();
+    expect(parent.childrenIds.length).toBe(1);
+    expect(store.getSnapshot().selection).toEqual([parent.id]);
+    expect(store.getSnapshot().editingId).toBeNull();
+
+    // Tab 2: another child under the SAME parent (no nesting, no stealing).
+    store.createChild();
+    expect(parent.childrenIds.length).toBe(2);
+    expect(store.getSnapshot().selection).toEqual([parent.id]);
+    expect(store.sheet.nodes[parent.childrenIds[1]].parentId).toBe(parent.id);
+  });
+});
+
+describe("save / load file", () => {
+  it("round-trips a document through the .rmind.json format", () => {
+    const store = new EditorStore(memoryAdapter);
+    const original = store.doc.doc;
+
+    const json = JSON.stringify(original);
+    const id = store.importDocumentFromJson(json);
+
+    expect(id).toBe(original.documentId);
+    // the same documentId replaces the existing entry instead of duplicating
+    expect(store.getSnapshot().docs.length).toBe(1);
+    expect(store.sheet.nodes[store.sheet.rootNodeId].title).toBe(original.sheets[0].nodes[original.sheets[0].rootNodeId].title);
+  });
+
+  it("imports a second document as an additional entry and switches to it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const second = JSON.parse(JSON.stringify(store.doc.doc));
+    second.documentId = "d_other";
+    second.title = "Imported map";
+    const id = store.importDocumentFromJson(JSON.stringify(second));
+
+    expect(id).toBe("d_other");
+    expect(store.getSnapshot().docs.length).toBe(2);
+    expect(store.getSnapshot().activeDocId).toBe("d_other");
+    expect(store.getSnapshot().docTitle).toBe("Imported map");
+    // loaded from disk → needs a save to persist in app storage
+    expect(store.getSnapshot().sync).toBe("dirty");
+  });
+
+  it("rejects malformed files", () => {
+    const store = new EditorStore(memoryAdapter);
+    expect(store.importDocumentFromJson("not json")).toBeNull();
+    expect(store.importDocumentFromJson("{}")).toBeNull();
+    expect(store.importDocumentFromJson(JSON.stringify({ foo: 1 }))).toBeNull();
+    expect(store.importDocumentFromJson(JSON.stringify({ documentId: "d_x" }))).toBeNull();
+    expect(store.importDocumentFromJson(JSON.stringify({ documentId: "d_x", sheets: [] }))).toBeNull();
+    expect(store.importDocumentFromJson(JSON.stringify({ documentId: "d_x", sheets: [{ rootNodeId: "r" }] }))).toBeNull();
+    expect(store.importDocumentFromJson(JSON.stringify({ documentId: "d_x", sheets: [{ rootNodeId: "r", nodes: {} }] }))).toBeNull();
+  });
+
+  it("downloads the .rmind.json only on the first save, then overwrites silently", async () => {
+    const store = new EditorStore(memoryAdapter);
+    const download = vi.spyOn(store as unknown as { download: () => void }, "download").mockImplementation(() => {});
+
+    await store.saveNow();
+    expect(download).toHaveBeenCalledTimes(1); // first save → file written
+    expect(store.getSnapshot().sync).toBe("saved");
+
+    await store.saveNow();
+    expect(download).toHaveBeenCalledTimes(1); // already saved → overwrite only
+    expect(store.getSnapshot().sync).toBe("saved");
+  });
+
+  it("does not re-download a document that was already in storage on load", async () => {
+    const stored: StorageAdapter = {
+      label: "test",
+      async load() {
+        return [new EditorStore(memoryAdapter).doc.doc];
+      },
+      async save() { /* no-op */ },
+    };
+    const store = new EditorStore(stored);
+    await store.init();
+    const download = vi.spyOn(store as unknown as { download: () => void }, "download").mockImplementation(() => {});
+
+    await store.saveNow();
+    expect(download).not.toHaveBeenCalled(); // loaded from storage → already saved
+    expect(store.getSnapshot().sync).toBe("saved");
   });
 });
