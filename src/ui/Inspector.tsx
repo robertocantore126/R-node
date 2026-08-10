@@ -14,10 +14,13 @@ export function Inspector(): JSX.Element {
   const [title, setTitle] = useState(node?.title ?? "");
   const [notes, setNotes] = useState(node?.notes ?? "");
 
+  // Sync when the selection changes OR the same node's title/notes change
+  // from elsewhere (canvas editing, undo/redo, Tab defaults). While the user
+  // types here, node.title is untouched, so this does not fight the input.
   useEffect(() => {
     setTitle(node?.title ?? "");
     setNotes(node?.notes ?? "");
-  }, [node?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [node?.id, node?.title, node?.notes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!node) {
     return (

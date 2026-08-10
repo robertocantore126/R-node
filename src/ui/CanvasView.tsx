@@ -338,12 +338,12 @@ export function CanvasView(): JSX.Element {
         onContextMenu={onContextMenu}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
-      {editStyle && <TopicEditor key={state.editingId ?? "topic-editor"} style={editStyle} />}
+      {editStyle && <TopicEditor key={state.editingId ?? "topic-editor"} style={editStyle} scale={state.camera.scale} />}
     </div>
   );
 }
 
-function TopicEditor({ style }: { style: CSSProperties }): JSX.Element {
+function TopicEditor({ style, scale }: { style: CSSProperties; scale: number }): JSX.Element {
   const store = useStore();
   // The editing node is the one being typed into — with Tab the selection
   // stays on the source node, so the editor must NOT read selectionNode.
@@ -353,9 +353,22 @@ function TopicEditor({ style }: { style: CSSProperties }): JSX.Element {
   const [value, setValue] = useState(node?.title ?? "");
 
   useEffect(() => {
+    // Type/paste-to-edit: the store may hand us initial content that replaces
+    // the title (XMind-style). Otherwise select the existing text for a fresh edit.
+    const pending = store.consumePendingInsert();
+    if (pending !== null) setValue(pending);
     ref.current?.focus();
-    ref.current?.select();
-  }, []);
+    if (pending === null) ref.current?.select();
+  }, [store]);
+
+  // Grow the box to contain the LIVE text (typed or pasted) so nothing is
+  // clipped while editing — after commit the canvas box is sized identically.
+  const live = node ? measureNode({ ...node, title: value }, overlayMeasurer) : { w: 0, h: 0 };
+  const box: CSSProperties = {
+    ...style,
+    width: Math.max(style.width as number, live.w * scale),
+    height: Math.max(style.height as number, live.h * scale),
+  };
 
   const commit = (): void => {
     store.commitEdit(value);
@@ -365,7 +378,7 @@ function TopicEditor({ style }: { style: CSSProperties }): JSX.Element {
     <textarea
       ref={ref}
       className="topic-editor"
-      style={style}
+      style={box}
       value={value}
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {

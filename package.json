@@ -1,8 +1,8 @@
 {
-  "name": "r-mind",
+  "name": "r-node",
   "private": true,
   "version": "0.1.0",
-  "description": "R-mind — a cross-platform visual thinking and mind-mapping workspace",
+  "description": "R-node — a cross-platform visual thinking and mind-mapping workspace",
   "type": "module",
   "scripts": {
     "dev": "vite",

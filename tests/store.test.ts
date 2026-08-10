@@ -74,8 +74,44 @@ describe("new topic defaults", () => {
   });
 });
 
+describe("type-to-edit", () => {
+  it("starts editing the selected topic with the typed character", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+
+    store.typeToEdit("H");
+    const s = store.getSnapshot();
+    expect(s.editingId).toBe(main.id);
+    expect(s.selection).toEqual([main.id]);
+    expect(s.pendingInsert).toBe("H");
+
+    // TopicEditor consumes the pending insert once, then it is gone.
+    expect(store.consumePendingInsert()).toBe("H");
+    expect(store.consumePendingInsert()).toBeNull();
+  });
+
+  it("pastes plain text into the selected topic (falls back from map paste)", async () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+
+    vi.stubGlobal("navigator", { clipboard: { readText: async () => "plain pasted text" } });
+    await store.paste();
+    vi.unstubAllGlobals();
+
+    const s = store.getSnapshot();
+    expect(s.editingId).toBe(main.id);
+    expect(s.pendingInsert).toBe("plain pasted text");
+  });
+});
+
 describe("save / load file", () => {
-  it("round-trips a document through the .rmind.json format", () => {
+  it("round-trips a document through the .rnode.json format", () => {
     const store = new EditorStore(memoryAdapter);
     const original = store.doc.doc;
 
@@ -114,7 +150,7 @@ describe("save / load file", () => {
     expect(store.importDocumentFromJson(JSON.stringify({ documentId: "d_x", sheets: [{ rootNodeId: "r", nodes: {} }] }))).toBeNull();
   });
 
-  it("downloads the .rmind.json only on the first save, then overwrites silently", async () => {
+  it("downloads the .rnode.json only on the first save, then overwrites silently", async () => {
     const store = new EditorStore(memoryAdapter);
     const download = vi.spyOn(store as unknown as { download: () => void }, "download").mockImplementation(() => {});
 

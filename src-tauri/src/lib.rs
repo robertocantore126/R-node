@@ -1,4 +1,4 @@
-//! R-mind desktop backend.
+//! R-node desktop backend.
 //!
 //! Phase 1 of the Rust side: SQLite persistence for the same JSON document
 //! schema the TS core uses, exposed as Tauri commands. The frontend keeps
@@ -29,7 +29,7 @@ fn open_db(app: &AppHandle) -> Result<Connection, String> {
         .app_data_dir()
         .map_err(|e| format!("no app data dir: {e}"))?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create data dir: {e}"))?;
-    let conn = Connection::open(dir.join("r-mind.sqlite3")).map_err(|e| e.to_string())?;
+    let conn = Connection::open(dir.join("r-node.sqlite3")).map_err(|e| e.to_string())?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS documents (
             document_id TEXT PRIMARY KEY,
@@ -109,5 +109,5 @@ pub fn run() {
             delete_document
         ])
         .run(tauri::generate_context!())
-        .expect("error while running r-mind");
+        .expect("error while running r-node");
 }

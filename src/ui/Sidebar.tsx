@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
-import type { RmindDocument } from "../core/types";
+import type { RnodeDocument } from "../core/types";
 
 export function Sidebar(): JSX.Element {
   const store = useStore();
@@ -12,8 +12,8 @@ export function Sidebar(): JSX.Element {
 
   useEffect(() => {
     const onFocus = (): void => searchRef.current?.focus();
-    window.addEventListener("r-mind:focus-search", onFocus);
-    return () => window.removeEventListener("r-mind:focus-search", onFocus);
+    window.addEventListener("r-node:focus-search", onFocus);
+    return () => window.removeEventListener("r-node:focus-search", onFocus);
   }, []);
 
   const docs = state.docs.filter((d) => !d.archived && (query === "" || d.title.toLowerCase().includes(query.toLowerCase())));
@@ -23,7 +23,7 @@ export function Sidebar(): JSX.Element {
     <aside className="sidebar">
       <div className="brand">
         <span className="brand-dot" />
-        <span className="brand-name">R-mind</span>
+        <span className="brand-name">R-node</span>
       </div>
 
       <div className="sidebar-search">
@@ -39,7 +39,7 @@ export function Sidebar(): JSX.Element {
         <button className="btn primary" onClick={() => store.newDocument()}>
           + New document
         </button>
-        <button className="btn" onClick={() => void store.loadFile()} title="Open a .rmind.json file">
+        <button className="btn" onClick={() => void store.loadFile()} title="Open a .rnode.json file">
           Open file…
         </button>
         <button className="btn" onClick={() => store.switchToDoc(store.duplicateSample())} title="Create a doc from the roadmap template">
@@ -71,7 +71,7 @@ export function Sidebar(): JSX.Element {
   );
 }
 
-function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { doc: RmindDocument; active: boolean; renaming: boolean; onRename: (t: string) => void; onStartRename: () => void; archived?: boolean }): JSX.Element {
+function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { doc: RnodeDocument; active: boolean; renaming: boolean; onRename: (t: string) => void; onStartRename: () => void; archived?: boolean }): JSX.Element {
   const store = useStore();
   const [text, setText] = useState(doc.title);
 

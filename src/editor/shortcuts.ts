@@ -70,7 +70,16 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
   const key = e.key === " " ? "Space" : e.key;
 
   const action = DEFAULT_SHORTCUTS[combo] ?? (mod ? undefined : DEFAULT_SHORTCUTS[key]);
-  if (!action) return false;
+  if (!action) {
+    // XMind-style type-to-edit: any printable character with a topic selected
+    // starts editing it with that character. Modifier keys, Space (collapse)
+    // and special keys never reach this branch.
+    if (!mod && !e.altKey && e.key.length === 1 && !e.key.match(/\s/)) {
+      store.typeToEdit(e.key);
+      return true;
+    }
+    return false;
+  }
 
   // Tab is special: never let it move focus out of the canvas.
   if (e.key === "Tab" || e.key === "Enter") e.preventDefault();
@@ -135,7 +144,7 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       return true;
     case "search":
       e.preventDefault();
-      window.dispatchEvent(new CustomEvent("r-mind:focus-search"));
+      window.dispatchEvent(new CustomEvent("r-node:focus-search"));
       return true;
     case "save":
       e.preventDefault();

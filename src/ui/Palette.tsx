@@ -43,7 +43,7 @@ export function Palette(): JSX.Element | null {
       { label: "Create child topic", hint: "Tab", run: () => store.createChild() },
       { label: "Create sibling topic", hint: "Enter", run: () => store.createSibling() },
       { label: "Promote topic", hint: "Shift+Tab", run: () => store.promote() },
-      { label: "Search documents…", hint: "Ctrl+F", run: () => window.dispatchEvent(new CustomEvent("r-mind:focus-search")) },
+      { label: "Search documents…", hint: "Ctrl+F", run: () => window.dispatchEvent(new CustomEvent("r-node:focus-search")) },
       ...state.docs.filter((d) => !d.archived).map<PaletteItem>((d) => ({ label: `Open: ${d.title}`, hint: "document", run: () => store.switchToDoc(d.documentId) })),
     ];
     const q = query.trim().toLowerCase();

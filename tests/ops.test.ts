@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { DocumentModel, uid } from "../src/core/doc";
 import { applyOp, applyWithInverse, makeOp, type Op } from "../src/core/ops";
 import { History } from "../src/core/history";
-import type { MindNode, RmindDocument } from "../src/core/types";
+import type { MindNode, RnodeDocument } from "../src/core/types";
 
-function freshDoc(): { doc: RmindDocument; model: DocumentModel; root: MindNode } {
+function freshDoc(): { doc: RnodeDocument; model: DocumentModel; root: MindNode } {
   const model = new DocumentModel(DocumentModel.blank("Test"));
   return { doc: model.doc, model, root: model.rootNode };
 }
@@ -281,7 +281,7 @@ describe("schema", () => {
   it("round-trips through JSON without losing structure", () => {
     const model = new DocumentModel(DocumentModel.sample());
     const json = JSON.stringify(model.doc);
-    const restored = new DocumentModel(JSON.parse(json) as RmindDocument);
+    const restored = new DocumentModel(JSON.parse(json) as RnodeDocument);
     expect(restored.doc.sheets[0].rootNodeId).toBe(model.doc.sheets[0].rootNodeId);
     expect(Object.keys(restored.doc.sheets[0].nodes).length).toBe(Object.keys(model.doc.sheets[0].nodes).length);
     expect(restored.doc.schemaVersion).toBe("0.1.0");

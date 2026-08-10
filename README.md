@@ -1,8 +1,8 @@
-# R-mind
+# R-node
 
 **A cross-platform visual thinking and mind-mapping workspace.**
 
-R-mind is a keyboard-first mind-mapping application designed for brainstorming,
+R-node is a keyboard-first mind-mapping application designed for brainstorming,
 knowledge organization, project planning and presentations. It is built
 original from the ground up — brand, design system and code are our own, and
 nothing is copied from other mind-mapping products.
@@ -11,7 +11,7 @@ nothing is copied from other mind-mapping products.
   at 10,000+ topics.
 - **Keyboard-first** — Enter/Tab/Shift+Tab to create and structure topics,
   arrows to navigate, every action undoable.
-- **Local-first** — documents autosave to your browser; a desktop build with
+- **Local-first** — documents save when you decide (Ctrl+S, no hidden autosave); a desktop build with
   SQLite persistence is scaffolded and ready.
 - **Extensible by design** — a pure, framework-free core (document model,
   operation system, layout engine) that web, desktop and mobile clients share.
@@ -20,7 +20,7 @@ nothing is copied from other mind-mapping products.
 
 ## Status
 
-**Phase 1 (core editor) — implemented and tested.** 45 unit tests passing,
+**Phase 1 (core editor) — implemented and tested.** 53 unit tests passing,
 typecheck clean, performance-verified at 10k topics.
 
 | | |
@@ -31,7 +31,7 @@ typecheck clean, performance-verified at 10k topics.
 | Layout | mind map with balanced branches, exact measured extents, no overlap by construction |
 | Editing | create / sibling / child / promote, rename, delete, duplicate, copy/paste/cut, drag-and-drop reparenting |
 | Structure ops | collapse/expand, sort siblings, tasks, notes, styles, relationships |
-| Workspace | outliner, inspector, command palette, search, themes, Zen mode, autosave |
+| Workspace | outliner, inspector, command palette, search, themes, Zen mode, manual save |
 | Import/export | JSON, Markdown, PNG |
 
 ---
@@ -160,14 +160,15 @@ To enable it:
 rustup default stable
 # 2. Install the Tauri CLI
 cargo install tauri-cli --locked
-# 3. From r-mind/:
+# 3. From r-node/:
 npm install
 cargo tauri dev
 ```
 
 Then swap in `TauriStorageAdapter` (in `src/persist/storage.ts`) to persist
-through SQLite instead of localStorage. Bundle icons for `tauri build` still
-need to be added (`bundle.active` is false until then).
+through SQLite instead of localStorage. Bundle icons and `bundle.active` are
+already configured, so `cargo tauri build` can produce an installer once Rust
+is installed.
 
 ---
 
@@ -177,7 +178,7 @@ need to be added (`bundle.active` is false until then).
 npm test
 ```
 
-45 tests across 6 suites: document operations, undo/redo round-trips,
+53 tests across 6 suites: document operations, undo/redo round-trips,
 reparenting and subtree moves, layout geometry (no-overlap, straddle,
 size-aware balance, upward propagation), measurement math, viewport math,
 and performance ceilings at 1k/5k/10k topics.

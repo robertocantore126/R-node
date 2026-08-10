@@ -9,7 +9,7 @@ import {
   SCHEMA_VERSION,
   type MindNode,
   type NodeType,
-  type RmindDocument,
+  type RnodeDocument,
   type Sheet,
   type Style,
   type TaskInfo,
@@ -24,9 +24,9 @@ export function nowIso(): string {
 }
 
 export class DocumentModel {
-  readonly doc: RmindDocument;
+  readonly doc: RnodeDocument;
 
-  constructor(doc: RmindDocument) {
+  constructor(doc: RnodeDocument) {
     this.doc = doc;
     if (doc.sheets.length === 0) throw new Error("document must contain at least one sheet");
   }
@@ -121,7 +121,7 @@ export class DocumentModel {
 
   // -- factories ----------------------------------------------------------
 
-  static blank(title = "Untitled map"): RmindDocument {
+  static blank(title = "Untitled map"): RnodeDocument {
     const central: MindNode = DocumentModel.makeNode("central", null, "Central topic", {
       fontSize: 22,
       fontWeight: 700,
@@ -152,18 +152,18 @@ export class DocumentModel {
       archived: false,
       pinned: false,
       settings: { theme: "light", showOutliner: false, showInspector: true },
-      themeId: "r-mind-light",
+      themeId: "r-node-light",
       sheets: [sheet],
     };
   }
 
   /** Demo document so the first launch is not a blank canvas. */
-  static sample(): RmindDocument {
-    const doc = DocumentModel.blank("R-mind — Roadmap");
+  static sample(): RnodeDocument {
+    const doc = DocumentModel.blank("R-node — Roadmap");
     doc.settings.theme = "light";
     const sheet = doc.sheets[0];
     const root = sheet.nodes[sheet.rootNodeId];
-    root.title = "R-mind";
+    root.title = "R-node";
 
     const add = (parentId: string, title: string, type: NodeType = "main", task?: TaskInfo, style?: Style): MindNode => {
       const n = DocumentModel.makeNode(type, parentId, title, style);

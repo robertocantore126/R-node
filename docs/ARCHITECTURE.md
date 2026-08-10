@@ -1,4 +1,4 @@
-# R-mind — Architecture
+# R-node — Architecture
 
 Status: **Phase 1 (core editor) in progress.** AI services and the full
 security model are explicitly deferred per the product owner; the seams for

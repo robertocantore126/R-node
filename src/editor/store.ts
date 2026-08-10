@@ -11,7 +11,7 @@
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
-import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RmindDocument, type Sheet, type Style, type TaskInfo } from "../core/types";
+import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RnodeDocument, type Sheet, type Style, type TaskInfo } from "../core/types";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, measureNode, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
@@ -22,7 +22,7 @@ import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
 export type NavDir = "up" | "down" | "left" | "right";
 
 export interface EditorState {
-  docs: RmindDocument[];
+  docs: RnodeDocument[];
   activeDocId: string;
   selection: string[];
   camera: Camera;
@@ -35,6 +35,8 @@ export interface EditorState {
   search: string;
   searchResults: string[];
   searchIndex: number;
+  /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
+  pendingInsert: string | null;
   sync: "saved" | "dirty";
   message: string | null;
   canUndo: boolean;
@@ -104,6 +106,7 @@ export class EditorStore {
       search: "",
       searchResults: [],
       searchIndex: 0,
+      pendingInsert: null,
       sync: "saved",
       message: null,
       canUndo: false,
@@ -149,7 +152,7 @@ export class EditorStore {
   async init(): Promise<void> {
     const docs = await this.adapter.load();
     // Docs found in storage are already saved — their next Save only
-    // overwrites, it must not re-download the .rmind.json file.
+    // overwrites, it must not re-download the .rnode.json file.
     for (const d of docs) this.persistedIds.add(d.documentId);
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
@@ -222,7 +225,7 @@ export class EditorStore {
 
   /**
    * Save the workspace: persist all docs to the storage adapter. The portable
-   * .rmind.json file is written once, on the FIRST save of a document — a map
+   * .rnode.json file is written once, on the FIRST save of a document — a map
    * that is already saved locally is only overwritten in storage, never
    * re-downloaded.
    */
@@ -244,11 +247,11 @@ export class EditorStore {
     }
   }
 
-  /** Open a .rmind.json file from disk (file picker). */
+  /** Open a .rnode.json file from disk (file picker). Legacy .rmind.json files are still accepted. */
   async loadFile(): Promise<void> {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".rmind.json,application/json,.json";
+    input.accept = ".rnode.json,.rmind.json,application/json,.json";
     const file: File | null = await new Promise((resolve) => {
       input.onchange = (): void => resolve(input.files?.[0] ?? null);
       input.click();
@@ -258,15 +261,15 @@ export class EditorStore {
       const text = await file.text();
       const id = this.importDocumentFromJson(text);
       if (id) this.toast(`Opened ${file.name}`);
-      else this.toast("Not a valid R-mind file");
+      else this.toast("Not a valid R-node file");
     } catch {
       this.toast("Could not read the file");
     }
   }
 
   /**
-   * Parse, validate and open a .rmind.json document. Returns the imported
-   * document id, or null if the text is not a valid R-mind document.
+   * Parse, validate and open a .rnode.json document. Returns the imported
+   * document id, or null if the text is not a valid R-node document.
    */
   importDocumentFromJson(text: string): string | null {
     let raw: unknown;
@@ -288,9 +291,9 @@ export class EditorStore {
   }
 
   /** Structural validation + sanitization of an imported document. */
-  private validateImportedDoc(raw: unknown): RmindDocument | null {
+  private validateImportedDoc(raw: unknown): RnodeDocument | null {
     if (!raw || typeof raw !== "object") return null;
-    const d = raw as Partial<RmindDocument>;
+    const d = raw as Partial<RnodeDocument>;
     if (typeof d.documentId !== "string" || d.documentId.length === 0) return null;
     if (!Array.isArray(d.sheets) || d.sheets.length === 0) return null;
     const s = d.sheets[0] as Partial<Sheet> | undefined;
@@ -369,13 +372,13 @@ export class EditorStore {
         showOutliner: !!d.settings?.showOutliner,
         showInspector: d.settings?.showInspector ?? true,
       },
-      themeId: typeof d.themeId === "string" ? d.themeId : "r-mind-light",
+      themeId: typeof d.themeId === "string" ? d.themeId : "r-node-light",
       sheets: [sheet],
     };
   }
 
   private docFileName(): string {
-    return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rmind.json`;
+    return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rnode.json`;
   }
 
   // -------------------------------------------------------------------------
@@ -392,6 +395,7 @@ export class EditorStore {
     }
     this.state.selection = sel;
     this.state.editingId = null;
+    this.state.pendingInsert = null;
     if (opts?.center) this.centerOnNode(id);
     this.notify();
   }
@@ -415,7 +419,29 @@ export class EditorStore {
   startEdit(id: string): void {
     this.state.selection = [id];
     this.state.editingId = id;
+    this.state.pendingInsert = null;
     this.notify();
+  }
+
+  /**
+   * XMind-style type/paste-to-edit: a printable character (or pasted text)
+   * with a topic selected starts editing it with that content. TopicEditor
+   * consumes the pending insert on mount, replacing the previous title.
+   */
+  typeToEdit(text: string): void {
+    const node = this.selectionNode;
+    if (!node) return;
+    this.state.selection = [node.id];
+    this.state.editingId = node.id;
+    this.state.pendingInsert = text;
+    this.notify();
+  }
+
+  /** TopicEditor calls this on mount to pick up the pending type/paste text. */
+  consumePendingInsert(): string | null {
+    const v = this.state.pendingInsert;
+    this.state.pendingInsert = null;
+    return v;
   }
 
   commitEdit(text: string): void {
@@ -895,7 +921,7 @@ export class EditorStore {
     const subtreeIds = this.model.subtreeIds(rootId);
     const nodes = subtreeIds.map((id) => this.model.node(id)!).filter(Boolean);
     const rels = this.sheet.relationships.filter((r) => subtreeIds.includes(r.fromId) && subtreeIds.includes(r.toId));
-    const payload = JSON.stringify({ app: "r-mind", payload: { rootId, nodes, relationships: rels } });
+    const payload = JSON.stringify({ app: "r-node", payload: { rootId, nodes, relationships: rels } });
     try {
       await navigator.clipboard.writeText(payload);
     } catch {
@@ -912,14 +938,22 @@ export class EditorStore {
   async paste(anchorId?: string | null): Promise<void> {
     const text = await navigator.clipboard.readText().catch(() => null);
     if (!text) return;
-    let parsed: { app?: string; payload?: { rootId: string; nodes: MindNode[]; relationships: { fromId: string; toId: string; label?: string }[] } };
+    let parsed: { app?: string; payload?: { rootId: string; nodes: MindNode[]; relationships: { fromId: string; toId: string; label?: string }[] } } | null = null;
     try {
       parsed = JSON.parse(text);
     } catch {
-      return;
+      parsed = null;
     }
-    if (parsed.app !== "r-mind" || !parsed.payload) {
-      this.toast("Clipboard does not contain a map");
+    if (!parsed || parsed.app !== "r-node" || !parsed.payload) {
+      // Plain text on the clipboard: XMind-style, paste it straight into the
+      // selected topic instead of rejecting it as "not a map".
+      const target = this.selectionNode;
+      if (target) {
+        this.typeToEdit(text);
+        this.toast("Pasted into topic");
+      } else {
+        this.toast("Clipboard does not contain a map");
+      }
       return;
     }
     const payload = parsed.payload;
@@ -1226,7 +1260,7 @@ export class EditorStore {
 
   /**
    * Dev-only (perf spike): bulk-generate a balanced tree of `count` topics
-   * under the root as a single op batch. Exposed via window.__rmind.
+   * under the root as a single op batch. Exposed via window.__rnode.
    */
   debugGenerateBalancedTree(count: number): { opsMs: number; totalNodes: number } {
     const sheet = this.sheet;
@@ -1286,7 +1320,7 @@ export class EditorStore {
   duplicateDocument(id: string): void {
     const src = this.state.docs.find((d) => d.documentId === id);
     if (!src) return;
-    const copy: RmindDocument = structuredClone(src);
+    const copy: RnodeDocument = structuredClone(src);
     copy.documentId = uid("d");
     copy.title = src.title + " (copy)";
     copy.createdAt = nowIso();

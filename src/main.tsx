@@ -8,7 +8,7 @@ import "./styles.css";
 const store = new EditorStore();
 
 // Dev-only debug handle for performance spikes / automated testing.
-(window as unknown as Record<string, unknown>).__rmind = { store };
+(window as unknown as Record<string, unknown>).__rnode = { store };
 
 void store.init().then(() => {
   createRoot(document.getElementById("root")!).render(

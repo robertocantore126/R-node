@@ -45,7 +45,7 @@ export function TopBar(): JSX.Element {
         <button className="btn primary" title="Save (Ctrl+S)" onClick={() => void store.saveNow()}>
           Save
         </button>
-        <button className="btn" title="Open a .rmind.json file (Ctrl+O)" onClick={() => void store.loadFile()}>
+        <button className="btn" title="Open a .rnode.json file (Ctrl+O)" onClick={() => void store.loadFile()}>
           Open
         </button>
         <span className={`save-status ${state.sync}`} title="Changes are saved only when you press Save or Ctrl+S">
@@ -87,7 +87,7 @@ export function TopBar(): JSX.Element {
           </button>
           {exportOpen && (
             <div className="menu">
-              <button onClick={() => { store.exportJson(); setExportOpen(false); }}>JSON (.rmind.json)</button>
+              <button onClick={() => { store.exportJson(); setExportOpen(false); }}>JSON (.rnode.json)</button>
               <button onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
               <button onClick={() => { runExportPng(); setExportOpen(false); }}>PNG image</button>
               <div className="menu-sep" />

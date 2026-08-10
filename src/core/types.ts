@@ -1,5 +1,5 @@
 /**
- * R-mind — document schema (version 0.1).
+ * R-node — document schema (version 0.1).
  *
  * The schema is the single source of truth shared by every client (desktop,
  * web, mobile) and by the Rust document engine that will take over
@@ -220,7 +220,7 @@ export interface Sheet {
   presentation: Record<string, unknown>;
 }
 
-export interface RmindDocument {
+export interface RnodeDocument {
   schemaVersion: string;
   documentId: string;
   title: string;
