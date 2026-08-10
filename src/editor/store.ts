@@ -1,0 +1,1236 @@
+/**
+ * EditorStore — the editor interaction layer.
+ *
+ * Owns all editor state (documents, selection, camera, editing, drop target,
+ * UI flags) and exposes commands. Every mutation that touches the document
+ * goes through the operation system + history, so undo/redo and (later) the
+ * collaboration layer get a single consistent stream of ops.
+ *
+ * The store is framework-free: React subscribes via useSyncExternalStore.
+ */
+import { DocumentModel, nowIso, uid } from "../core/doc";
+import { History } from "../core/history";
+import { applyWithInverse, makeOp, type Op } from "../core/ops";
+import type { MindNode, NodeType, RmindDocument, Sheet, Style, TaskInfo } from "../core/types";
+import { applyLayout, layoutSheet } from "../layout/mindmap";
+import { createCanvasTextMeasurer, measureNode, type TextMeasurer } from "../layout/measure";
+import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
+import { THEMES } from "../render/theme";
+import type { DropIndicator } from "../render/renderer";
+import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
+
+export type NavDir = "up" | "down" | "left" | "right";
+
+export interface EditorState {
+  docs: RmindDocument[];
+  activeDocId: string;
+  selection: string[];
+  camera: Camera;
+  editingId: string | null;
+  drop: DropIndicator | null;
+  hoverId: string | null;
+  showPalette: boolean;
+  showOutliner: boolean;
+  showInspector: boolean;
+  search: string;
+  searchResults: string[];
+  searchIndex: number;
+  sync: "saved" | "saving";
+  message: string | null;
+  canUndo: boolean;
+  canRedo: boolean;
+  docTitle: string;
+  theme: "light" | "dark";
+  structureType: string;
+  mode: "select" | "pan";
+  zen: boolean;
+  relFrom: string | null;
+}
+
+const MAX_AUTOSAVE_MS = 400;
+
+export class EditorStore {
+  private state: EditorState;
+  private snap: EditorState;
+  private listeners = new Set<() => void>();
+  private model: DocumentModel;
+  private history = new History();
+  private adapter: StorageAdapter;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private layoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private msgTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Canvas-backed measurer: layout and renderer agree on every topic size. */
+  private measurer: TextMeasurer = createCanvasTextMeasurer();
+
+  constructor(adapter: StorageAdapter = new LocalStorageAdapter()) {
+    this.adapter = adapter;
+    this.model = new DocumentModel(DocumentModel.sample());
+    this.state = this.makeState();
+    this.snap = this.state;
+    this.normalizeBranchColors(this.model.sheet);
+  }
+
+  // -------------------------------------------------------------------------
+  // React binding
+  // -------------------------------------------------------------------------
+
+  subscribe = (cb: () => void): (() => void) => {
+    this.listeners.add(cb);
+    return () => this.listeners.delete(cb);
+  };
+
+  getSnapshot = (): EditorState => this.snap;
+
+  get doc(): DocumentModel {
+    return this.model;
+  }
+
+  get sheet(): Sheet {
+    return this.model.sheet;
+  }
+
+  private makeState(): EditorState {
+    const d = this.model.doc;
+    return {
+      docs: [d],
+      activeDocId: d.documentId,
+      selection: [],
+      camera: { x: 0, y: 0, scale: 1 },
+      editingId: null,
+      drop: null,
+      hoverId: null,
+      showPalette: false,
+      showOutliner: false,
+      showInspector: true,
+      search: "",
+      searchResults: [],
+      searchIndex: 0,
+      sync: "saved",
+      message: null,
+      canUndo: false,
+      canRedo: false,
+      docTitle: d.title,
+      theme: d.settings.theme,
+      structureType: d.sheets[0].structure.structureType,
+      mode: "select",
+      zen: false,
+      relFrom: null,
+    };
+  }
+
+  private notify(): void {
+    const d = this.model.doc;
+    this.state = {
+      ...this.state,
+      docs: this.state.docs,
+      canUndo: this.history.canUndo,
+      canRedo: this.history.canRedo,
+      docTitle: d.title,
+      theme: d.settings.theme,
+      structureType: d.sheets[0].structure.structureType,
+    };
+    this.snap = { ...this.state, selection: [...this.state.selection], searchResults: [...this.state.searchResults] };
+    for (const l of this.listeners) l();
+  }
+
+  toast(msg: string): void {
+    this.state.message = msg;
+    this.notify();
+    if (this.msgTimer) clearTimeout(this.msgTimer);
+    this.msgTimer = setTimeout(() => {
+      this.state.message = null;
+      this.notify();
+    }, 2200);
+  }
+
+  // -------------------------------------------------------------------------
+  // Init
+  // -------------------------------------------------------------------------
+
+  async init(): Promise<void> {
+    const docs = await this.adapter.load();
+    if (docs.length > 0) {
+      this.model = new DocumentModel(docs[0]);
+    } else {
+      this.model = new DocumentModel(DocumentModel.sample());
+      await this.adapter.save([this.model.doc]);
+    }
+    this.normalizeBranchColors(this.model.sheet);
+    this.state = this.makeState();
+    if (docs.length > 0) this.state.docs = docs;
+    // Loading a document must respect positions explicitly placed by the
+    // user. Forced layout is reserved for the explicit "Auto layout" command.
+    this.scheduleLayout(false);
+    this.notify();
+  }
+
+  // -------------------------------------------------------------------------
+  // Op execution
+  // -------------------------------------------------------------------------
+
+  /** Apply ops, record them in history, mark dirty, schedule layout+save. */
+  execOps(ops: Op[], opts?: { skipHistory?: boolean }): void {
+    if (ops.length === 0) return;
+    const inverses: Op[][] = [];
+    for (const op of ops) inverses.push(applyWithInverse(this.sheet, op));
+    if (!opts?.skipHistory) this.history.push(ops, inverses);
+    this.touch();
+  }
+
+  undo(): void {
+    const ops = this.history.undo();
+    if (!ops) return;
+    for (const op of ops) applyWithInverse(this.sheet, op);
+    this.clearSelection();
+    this.touch();
+  }
+
+  redo(): void {
+    const ops = this.history.redo();
+    if (!ops) return;
+    for (const op of ops) applyWithInverse(this.sheet, op);
+    this.clearSelection();
+    this.touch();
+  }
+
+  private touch(): void {
+    this.model.doc.updatedAt = nowIso();
+    this.scheduleLayout(false);
+    this.scheduleSave();
+    this.notify();
+  }
+
+  // -------------------------------------------------------------------------
+  // Layout (derived data — never in history)
+  // -------------------------------------------------------------------------
+
+  private scheduleLayout(force: boolean, clearManual = false): void {
+    if (this.layoutTimer) clearTimeout(this.layoutTimer);
+    this.layoutTimer = setTimeout(() => {
+      applyLayout(this.sheet, force, this.measurer, clearManual);
+      this.notify();
+    }, 30);
+  }
+
+  // -------------------------------------------------------------------------
+  // Autosave
+  // -------------------------------------------------------------------------
+
+  private scheduleSave(): void {
+    this.state.sync = "saving";
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(() => {
+      void this.saveNow();
+    }, MAX_AUTOSAVE_MS);
+  }
+
+  async saveNow(): Promise<void> {
+    try {
+      await this.adapter.save(this.state.docs);
+      this.state.sync = "saved";
+      this.notify();
+    } catch {
+      this.state.sync = "saving";
+      this.toast("Save failed — check storage");
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Selection
+  // -------------------------------------------------------------------------
+
+  select(id: string, opts?: { additive?: boolean; center?: boolean }): void {
+    const additive = opts?.additive ?? false;
+    let sel: string[];
+    if (additive) {
+      sel = this.state.selection.includes(id) ? this.state.selection.filter((s) => s !== id) : [...this.state.selection, id];
+    } else {
+      sel = [id];
+    }
+    this.state.selection = sel;
+    this.state.editingId = null;
+    if (opts?.center) this.centerOnNode(id);
+    this.notify();
+  }
+
+  clearSelection(): void {
+    if (this.state.selection.length === 0) return;
+    this.state.selection = [];
+    this.state.editingId = null;
+    this.notify();
+  }
+
+  get selectionNode(): MindNode | null {
+    const id = this.state.selection[this.state.selection.length - 1];
+    return id ? this.model.node(id) ?? null : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Text editing
+  // -------------------------------------------------------------------------
+
+  startEdit(id: string): void {
+    this.state.selection = [id];
+    this.state.editingId = id;
+    this.notify();
+  }
+
+  commitEdit(text: string): void {
+    const id = this.state.editingId;
+    this.state.editingId = null;
+    if (!id) return;
+    const node = this.model.node(id);
+    if (!node) return;
+    const clean = text.trim();
+    if (clean.length === 0) {
+      // empty new topic -> delete it
+      if (node.childrenIds.length === 0) this.deleteNodes([id]);
+      return;
+    }
+    if (clean !== node.title) {
+      this.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id, title: clean, prev: node.title })]);
+    }
+    this.notify();
+  }
+
+  cancelEdit(): void {
+    const id = this.state.editingId;
+    this.state.editingId = null;
+    if (id) {
+      const node = this.model.node(id);
+      if (node && node.title === "" && node.childrenIds.length === 0) this.deleteNodes([id]);
+      this.notify();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Structure commands (Enter / Tab / Shift+Tab ...)
+  // -------------------------------------------------------------------------
+
+  private defaultTopicTitle(type: NodeType, parentId: string | null): string {
+    if (type === "central") return "Central Topic";
+    if (type === "floating") return "New Idea";
+    const label = type === "main" ? "Main Topic" : "Subtopic";
+    const parent = parentId ? this.model.node(parentId) : undefined;
+    const siblingCount = parent?.childrenIds.reduce((count, id) => {
+      return count + (this.model.node(id)?.type === type ? 1 : 0);
+    }, 0) ?? Object.values(this.sheet.nodes).filter((n) => n.type === type).length;
+    return `${label} ${siblingCount + 1}`;
+  }
+
+  private normalizeBranchColors(sheet: Sheet): void {
+    const root = sheet.nodes[sheet.rootNodeId];
+    if (!root) return;
+    for (const [index, childId] of root.childrenIds.entries()) {
+      const child = sheet.nodes[childId];
+      if (!child) continue;
+      if (!child.style.fill) child.style.fill = this.defaultBranchFill(index);
+      const softFill = this.defaultBranchSoftFill(childId);
+      const stack = [childId];
+      while (stack.length > 0) {
+        const currentId = stack.pop()!;
+        const current = sheet.nodes[currentId];
+        if (!current) continue;
+        if (currentId !== childId && !current.style.fill) current.style.fill = softFill;
+        stack.push(...current.childrenIds);
+      }
+    }
+  }
+
+  private defaultBranchFill(index: number): string {
+    const palette = THEMES[this.state.theme]?.branch ?? THEMES.light.branch;
+    return palette[index % palette.length];
+  }
+
+  private createNodePosition(parent: MindNode): { x: number; y: number; manual: boolean } {
+    const base = parent.position;
+    const st = this.sheet.structure;
+    const pSize = measureNode(parent, this.measurer);
+    const estimatedW = 140;
+    const offsetX = parent.type === "central" ? pSize.w / 2 + st.spacing + estimatedW / 2 + 20 : pSize.w / 2 + st.spacing + estimatedW / 2 + 10;
+    const offsetY = parent.type === "central" ? parent.childrenIds.length * (pSize.h + st.branchSpacing) - (parent.childrenIds.length > 0 ? pSize.h / 2 : 0) : parent.childrenIds.length * (pSize.h + st.branchSpacing);
+    return { x: base.x + offsetX, y: base.y + offsetY, manual: false };
+  }
+
+  private branchRootId(parentId: string | null): string | null {
+    if (!parentId) return null;
+    let cur: string | null = parentId;
+    let prev: string | null = parentId;
+    while (cur && cur !== this.sheet.rootNodeId) {
+      prev = cur;
+      cur = this.sheet.nodes[cur]?.parentId ?? null;
+    }
+    return prev;
+  }
+
+  private defaultBranchSoftFill(rootId: string | null): string | undefined {
+    if (!rootId) return undefined;
+    const root = this.sheet.nodes[this.sheet.rootNodeId];
+    if (!root) return undefined;
+    const index = root.childrenIds.indexOf(rootId);
+    const palette = THEMES[this.state.theme]?.branchSoft ?? THEMES.light.branchSoft;
+    return palette[(index >= 0 ? index : 0) % palette.length];
+  }
+
+  private createNodeStyle(type: NodeType, parentId: string | null, index: number): Style | undefined {
+    if (type === "main" && parentId === this.sheet.rootNodeId) {
+      return { fill: this.defaultBranchFill(index) };
+    }
+    if (type === "subtopic") {
+      const branchRootId = this.branchRootId(parentId);
+      return { fill: this.defaultBranchSoftFill(branchRootId) };
+    }
+    return undefined;
+  }
+
+  createSibling(): void {
+    const node = this.selectionNode;
+    if (!node) return;
+    if (node.type === "central") return this.createChild();
+    if (!node.parentId) {
+      this.toast("Floating topics have no siblings");
+      return;
+    }
+    const parent = this.model.requireNode(node.parentId);
+    const index = parent.childrenIds.indexOf(node.id) + 1;
+    const type: NodeType = parent.type === "central" ? "main" : "subtopic";
+    const id = uid("n");
+    const position = this.createNodePosition(type === "main" ? parent : node);
+    const style = this.createNodeStyle(type, parent.id, index);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: parent.id, index, title: this.defaultTopicTitle(type, parent.id), position, style })]);
+    this.startEdit(id);
+  }
+
+  createChild(): void {
+    const node = this.selectionNode ?? this.model.rootNode;
+    const type: NodeType = node.type === "central" ? "main" : "subtopic";
+    const id = uid("n");
+    const position = this.createNodePosition(node);
+    const style = this.createNodeStyle(type, node.id, node.childrenIds.length);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(type, node.id), position, style })]);
+    this.startEdit(id);
+  }
+
+  createParent(): void {
+    const node = this.selectionNode;
+    if (!node || !node.parentId) return;
+    const parent = this.model.requireNode(node.parentId);
+    const type: NodeType = parent.type === "central" ? "main" : "subtopic";
+    const newId = uid("n");
+    const idx = parent.childrenIds.indexOf(node.id);
+    const style = this.createNodeStyle(type, parent.id, idx);
+    const ops: Op[] = [
+      makeOp<Op & { type: "createNode" }>("createNode", { id: newId, nodeType: type, parentId: parent.id, index: idx, title: this.defaultTopicTitle(type, parent.id), style }),
+      makeOp<Op & { type: "moveNode" }>("moveNode", {
+        id: node.id,
+        fromParentId: parent.id,
+        fromIndex: idx + 1,
+        toParentId: newId,
+        toIndex: 0,
+      }),
+    ];
+    if (node.position.manual) {
+      ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", {
+        id: node.id,
+        x: node.position.x,
+        y: node.position.y,
+        manual: false,
+        prev: { ...node.position },
+      }));
+    }
+    this.execOps(ops);
+    this.select(newId);
+  }
+
+  createFloatingAt(x: number, y: number): void {
+    const id = uid("n");
+    this.execOps([
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id,
+        nodeType: "floating",
+        parentId: null,
+        index: 0,
+        title: this.defaultTopicTitle("floating", null),
+        position: { x, y, manual: true },
+      }),
+    ]);
+    this.startEdit(id);
+  }
+
+  promote(): void {
+    const node = this.selectionNode;
+    if (!node || !node.parentId) return;
+    const parent = this.model.requireNode(node.parentId);
+    if (!parent.parentId) {
+      this.toast("Already at top level");
+      return;
+    }
+    const grand = this.model.requireNode(parent.parentId);
+    const fromIndex = parent.childrenIds.indexOf(node.id);
+    const toIndex = grand.childrenIds.indexOf(parent.id) + 1;
+    const ops: Op[] = [makeOp<Op & { type: "moveNode" }>("moveNode", { id: node.id, fromParentId: parent.id, fromIndex, toParentId: grand.id, toIndex })];
+    if (node.position.manual) {
+      ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", {
+        id: node.id,
+        x: node.position.x,
+        y: node.position.y,
+        manual: false,
+        prev: { ...node.position },
+      }));
+    }
+    this.execOps(ops);
+  }
+
+  demote(): void {
+    const node = this.selectionNode;
+    if (!node || !node.parentId) return;
+    const parent = this.model.requireNode(node.parentId);
+    const idx = parent.childrenIds.indexOf(node.id);
+    if (idx <= 0) return;
+    const prev = this.model.requireNode(parent.childrenIds[idx - 1]);
+    const ops: Op[] = [makeOp<Op & { type: "moveNode" }>("moveNode", { id: node.id, fromParentId: parent.id, fromIndex: idx, toParentId: prev.id, toIndex: prev.childrenIds.length })];
+    if (node.position.manual) {
+      ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", {
+        id: node.id,
+        x: node.position.x,
+        y: node.position.y,
+        manual: false,
+        prev: { ...node.position },
+      }));
+    }
+    this.execOps(ops);
+  }
+
+  toggleCollapsed(id: string): void {
+    const node = this.model.node(id);
+    if (!node) return;
+    this.execOps([makeOp<Op & { type: "setCollapsed" }>("setCollapsed", { id, collapsed: !node.collapsed, prev: node.collapsed })]);
+  }
+
+  expandAll(id: string): void {
+    const ops: Op[] = [];
+    for (const sid of this.model.subtreeIds(id)) {
+      const n = this.model.node(sid);
+      if (n?.collapsed) ops.push(makeOp<Op & { type: "setCollapsed" }>("setCollapsed", { id: sid, collapsed: false, prev: true }));
+    }
+    if (ops.length) this.execOps(ops);
+  }
+
+  deleteSelection(): void {
+    this.deleteNodes([...this.state.selection]);
+  }
+
+  /** Delete nodes (and descendants); central topic is protected. */
+  deleteNodes(ids: string[]): void {
+    const pruned = ids.filter((id) => id !== this.sheet.rootNodeId);
+    const toDelete: string[] = [];
+    for (const id of pruned) {
+      if (toDelete.some((d) => this.isDescendant(d, id))) continue;
+      toDelete.push(id);
+    }
+    const ops: Op[] = [];
+    for (const id of toDelete) {
+      const node = this.model.node(id);
+      if (!node) continue;
+      const subtree = this.model.subtreeIds(id).map((sid) => this.model.node(sid)!).filter(Boolean);
+      const subtreeSet = new Set(subtree.map((s) => s.id));
+      const removedRelationships = this.sheet.relationships.filter((r) => subtreeSet.has(r.fromId) || subtreeSet.has(r.toId));
+      const parentId = node.parentId;
+      const index = parentId ? this.model.requireNode(parentId).childrenIds.indexOf(id) : 0;
+      ops.push(makeOp<Op & { type: "deleteNode" }>("deleteNode", { id, parentId, index, subtree, removedRelationships }));
+    }
+    if (ops.length) {
+      this.execOps(ops);
+      this.state.selection = [];
+      this.notify();
+    }
+  }
+
+  private isDescendant(ancestorId: string, id: string): boolean {
+    let cur = this.model.node(id)?.parentId ?? null;
+    while (cur) {
+      if (cur === ancestorId) return true;
+      cur = this.model.node(cur)?.parentId ?? null;
+    }
+    return false;
+  }
+
+  sortSiblings(parentId: string, compare: (a: MindNode, b: MindNode) => number): void {
+    const parent = this.model.node(parentId);
+    if (!parent || parent.childrenIds.length < 2) return;
+    const prevOrder = [...parent.childrenIds];
+    const order = [...prevOrder].sort((a, b) => compare(this.model.node(a)!, this.model.node(b)!));
+    if (order.every((v, i) => v === prevOrder[i])) return;
+    this.execOps([makeOp<Op & { type: "sortSiblings" }>("sortSiblings", { parentId, order, prevOrder })]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Drag & drop
+  // -------------------------------------------------------------------------
+
+  setDrop(drop: DropIndicator | null): void {
+    this.state.drop = drop;
+    this.notify();
+  }
+
+  setHover(id: string | null): void {
+    if (this.state.hoverId === id) return;
+    this.state.hoverId = id;
+    this.notify();
+  }
+
+  /** Reparenting hands the topic back to the automatic layout engine. */
+  private releaseManualPosition(node: MindNode): Op | null {
+    if (!node.position.manual) return null;
+    return makeOp<Op & { type: "setPosition" }>("setPosition", {
+      id: node.id,
+      x: node.position.x,
+      y: node.position.y,
+      manual: false,
+      prev: { ...node.position },
+    });
+  }
+
+  /** Resolve a drop of `draggedId` over `targetId`/empty space. */
+  dropAt(draggedId: string, targetId: string | null, mode: "child" | "before" | "after" | "floating", worldX: number, worldY: number): void {
+    const node = this.model.node(draggedId);
+    if (!node || draggedId === targetId) {
+      this.setDrop(null);
+      return;
+    }
+    if (targetId) {
+      const target = this.model.node(targetId);
+      if (!target || this.isDescendant(draggedId, targetId)) {
+        this.setDrop(null);
+        return;
+      }
+      if (mode === "child") {
+        const ops: Op[] = [makeOp<Op & { type: "moveNode" }>("moveNode", {
+          id: draggedId,
+          fromParentId: node.parentId,
+          fromIndex: node.parentId ? this.model.requireNode(node.parentId).childrenIds.indexOf(draggedId) : 0,
+          toParentId: targetId,
+          toIndex: target.childrenIds.length,
+        })];
+        const release = this.releaseManualPosition(node);
+        if (release) ops.push(release);
+        this.execOps(ops);
+      } else if (mode === "before" || mode === "after") {
+        if (!target.parentId) {
+          this.setDrop(null);
+          return;
+        }
+        const targetParent = this.model.requireNode(target.parentId);
+        const targetIdx = targetParent.childrenIds.indexOf(targetId);
+        const desired = mode === "after" ? targetIdx + 1 : targetIdx;
+        // final index after removing the dragged node (if same parent)
+        let finalIdx = desired;
+        if (node.parentId === target.parentId) {
+          const curIdx = targetParent.childrenIds.indexOf(draggedId);
+          if (curIdx >= 0 && curIdx < desired) finalIdx = desired - 1;
+        }
+        const ops: Op[] = [makeOp<Op & { type: "moveNode" }>("moveNode", {
+          id: draggedId,
+          fromParentId: node.parentId,
+          fromIndex: node.parentId ? this.model.requireNode(node.parentId).childrenIds.indexOf(draggedId) : 0,
+          toParentId: target.parentId,
+          toIndex: finalIdx,
+        })];
+        const release = node.parentId !== target.parentId ? this.releaseManualPosition(node) : null;
+        if (release) ops.push(release);
+        this.execOps(ops);
+      }
+    } else if (mode === "floating") {
+      // allow floating drops generally; respect sheet setting if manual positioning disabled
+      if (!this.sheet.structure.allowManualPositioning) {
+        this.setDrop(null);
+        return;
+      }
+      // If dragging a direct child of root, allow swapping sides by reordering
+      if (node.parentId === this.sheet.rootNodeId) {
+        const parent = this.model.requireNode(this.sheet.rootNodeId);
+        const layout = layoutSheet(this.sheet, false, this.measurer);
+        const rootCx = layout.positions.get(this.sheet.rootNodeId)?.x ?? parent.position.x;
+        let desiredIndex = worldX < (rootCx + measureNode(parent, this.measurer).w / 2) ? parent.childrenIds.length : 0;
+        // adjust for current index
+        const curIdx = parent.childrenIds.indexOf(draggedId);
+        if (curIdx >= 0 && curIdx < desiredIndex) desiredIndex = desiredIndex - 1;
+        const moveOp = makeOp<Op & { type: "moveNode" }>("moveNode", {
+          id: draggedId,
+          fromParentId: node.parentId,
+          fromIndex: curIdx >= 0 ? curIdx : 0,
+          toParentId: parent.id,
+          toIndex: desiredIndex,
+        });
+        this.execOps([
+          moveOp,
+          makeOp<Op & { type: "setPosition" }>("setPosition", {
+            id: draggedId,
+            x: worldX,
+            y: worldY,
+            manual: true,
+            prev: node.position,
+          }),
+        ]);
+      } else {
+        this.execOps([
+          makeOp<Op & { type: "setPosition" }>("setPosition", {
+            id: draggedId,
+            x: worldX,
+            y: worldY,
+            manual: true,
+            prev: node.position,
+          }),
+        ]);
+      }
+    }
+    this.setDrop(null);
+    this.select(draggedId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Style / tasks
+  // -------------------------------------------------------------------------
+
+  setNodeStyle(id: string, patch: Partial<Style>): void {
+    const node = this.model.node(id);
+    if (!node) return;
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
+  }
+
+  setBranchFreePosition(id: string, enabled: boolean): void {
+    const node = this.model.node(id);
+    if (!node || node.type !== "main") return;
+    this.execOps([
+      makeOp<Op & { type: "setPosition" }>("setPosition", {
+        id,
+        x: node.position.x,
+        y: node.position.y,
+        manual: enabled,
+        prev: { ...node.position },
+      }),
+    ]);
+  }
+
+  setTask(id: string, patch: Partial<TaskInfo>): void {
+    const node = this.model.node(id);
+    if (!node) return;
+    const current = node.task ?? { status: "not-started", priority: "none", progress: 0 };
+    this.execOps([makeOp<Op & { type: "setTask" }>("setTask", { id, task: { ...current, ...patch }, prev: node.task })]);
+  }
+
+  toggleTaskComplete(id: string): void {
+    const node = this.model.node(id);
+    if (!node) return;
+    const current = node.task ?? { status: "not-started", priority: "none", progress: 0 };
+    const next: TaskInfo = { ...current, status: current.status === "completed" ? "not-started" : "completed", progress: current.status === "completed" ? 0 : 100 };
+    this.execOps([makeOp<Op & { type: "setTask" }>("setTask", { id, task: next, prev: node.task })]);
+  }
+
+  duplicateTopic(): void {
+    const node = this.selectionNode;
+    if (!node || !node.parentId) return;
+    if (node.id === this.sheet.rootNodeId) {
+      this.toast("Cannot duplicate the central topic");
+      return;
+    }
+    const parent = this.model.requireNode(node.parentId);
+    const index = parent.childrenIds.indexOf(node.id) + 1;
+    const source = this.model.subtreeIds(node.id).map((id) => this.model.node(id)!).filter(Boolean);
+    const ops = this.remapOps(source, parent.id, index, node.type);
+    if (ops.length) this.execOps(ops);
+  }
+
+  async copySelection(): Promise<void> {
+    const ids = this.state.selection;
+    const pruned = ids.filter((id) => !ids.some((other) => other !== id && this.isDescendant(other, id)));
+    const rootId = pruned[0];
+    if (!rootId) return;
+    const subtreeIds = this.model.subtreeIds(rootId);
+    const nodes = subtreeIds.map((id) => this.model.node(id)!).filter(Boolean);
+    const rels = this.sheet.relationships.filter((r) => subtreeIds.includes(r.fromId) && subtreeIds.includes(r.toId));
+    const payload = JSON.stringify({ app: "r-mind", payload: { rootId, nodes, relationships: rels } });
+    try {
+      await navigator.clipboard.writeText(payload);
+    } catch {
+      /* clipboard may be blocked; copying still succeeded in-memory */
+    }
+    this.toast(`Copied ${nodes.length} topic${nodes.length > 1 ? "s" : ""}`);
+  }
+
+  async cutSelection(): Promise<void> {
+    await this.copySelection();
+    this.deleteSelection();
+  }
+
+  async paste(anchorId?: string | null): Promise<void> {
+    const text = await navigator.clipboard.readText().catch(() => null);
+    if (!text) return;
+    let parsed: { app?: string; payload?: { rootId: string; nodes: MindNode[]; relationships: { fromId: string; toId: string; label?: string }[] } };
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (parsed.app !== "r-mind" || !parsed.payload) {
+      this.toast("Clipboard does not contain a map");
+      return;
+    }
+    const payload = parsed.payload;
+    const anchor = anchorId ?? this.state.selection[this.state.selection.length - 1] ?? this.sheet.rootNodeId;
+    const anchorNode = this.model.node(anchor);
+    const srcRoot = payload.nodes.find((n) => n.id === payload.rootId);
+    if (!anchorNode || !srcRoot) return;
+    const type: NodeType = anchorNode.type === "central" ? "main" : "subtopic";
+    const ops = this.remapOps(payload.nodes, anchor, anchorNode.childrenIds.length, type);
+    if (ops.length === 0) return;
+    for (const rel of payload.relationships ?? []) {
+      const from = this.lastRemap.get(rel.fromId);
+      const to = this.lastRemap.get(rel.toId);
+      if (from && to) {
+        ops.push(
+          makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+            relationship: { id: uid("rel"), fromId: from, toId: to, label: rel.label },
+          })
+        );
+      }
+    }
+    this.execOps(ops);
+    this.select(this.lastRemap.get(srcRoot.id)!);
+    this.toast("Pasted");
+  }
+
+  private lastRemap = new Map<string, string>();
+
+  /** Build createNode ops that clone a subtree under a new parent, remapping ids. */
+  private remapOps(source: MindNode[], parentId: string, index: number, rootType: NodeType): Op[] {
+    const idMap = new Map<string, string>();
+    this.lastRemap = idMap;
+    const ops: Op[] = [];
+    const srcRoot = source.find((n) => !source.some((o) => o.childrenIds.includes(n.id)));
+    if (!srcRoot) return [];
+    const newRoot = uid("n");
+    idMap.set(srcRoot.id, newRoot);
+    ops.push(
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id: newRoot,
+        nodeType: rootType,
+        parentId,
+        index,
+        title: srcRoot.title,
+        style: srcRoot.style,
+        task: srcRoot.task,
+      })
+    );
+    const queue = [srcRoot];
+    while (queue.length > 0) {
+      const src = queue.shift()!;
+      for (const cid of src.childrenIds) {
+        const c = source.find((n) => n.id === cid);
+        if (!c) continue;
+        const newId = uid("n");
+        idMap.set(cid, newId);
+        ops.push(
+          makeOp<Op & { type: "createNode" }>("createNode", {
+            id: newId,
+            nodeType: "subtopic",
+            parentId: idMap.get(src.id)!,
+            index: src.childrenIds.indexOf(cid),
+            title: c.title,
+            style: c.style,
+            task: c.task,
+          })
+        );
+        queue.push(c);
+      }
+    }
+    return ops;
+  }
+
+  beginRelationship(fromId: string): void {
+    this.state.relFrom = fromId;
+    this.state.message = "Click another topic to link it — Escape to cancel";
+    this.notify();
+  }
+
+  clearRelFrom(): void {
+    this.state.relFrom = null;
+    this.state.message = null;
+    this.notify();
+  }
+
+  createRelationship(fromId: string, toId: string): void {
+    if (fromId === toId) return;
+    const exists = this.sheet.relationships.some((r) => (r.fromId === fromId && r.toId === toId) || (r.fromId === toId && r.toId === fromId));
+    if (exists) {
+      this.toast("Relationship already exists");
+      return;
+    }
+    this.execOps([
+      makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+        relationship: { id: uid("rel"), fromId, toId },
+      }),
+    ]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Structure / layout controls
+  // -------------------------------------------------------------------------
+
+  setStructure(patch: Partial<Sheet["structure"]>): void {
+    const cur = this.sheet.structure;
+    this.execOps([makeOp<Op & { type: "setStructure" }>("setStructure", { config: { ...cur, ...patch }, prev: cur })]);
+    // Changing the structure is an explicit global reflow. Clear manual
+    // overrides so the new structure does not immediately fight old ones.
+    this.scheduleLayout(true, true);
+  }
+
+  autoLayoutAll(): void {
+    // Run immediately and clear manual flags so auto-layout takes over
+    applyLayout(this.sheet, true, this.measurer, true);
+    this.notify();
+    this.toast("Layout recalculated");
+  }
+
+  // -------------------------------------------------------------------------
+  // Camera
+  // -------------------------------------------------------------------------
+
+  zoomAt(sx: number, sy: number, factor: number, vw: number, vh: number): void {
+    this.state.camera = zoomAt(this.state.camera, vw, vh, sx, sy, factor);
+    this.notify();
+  }
+
+  panBy(dx: number, dy: number): void {
+    this.state.camera = panBy(this.state.camera, dx, dy);
+    this.notify();
+  }
+
+  fitView(vw: number, vh: number): void {
+    this.state.camera = fitBounds(this.state.camera, vw, vh, this.mapBounds());
+    this.state.camera = { ...this.state.camera, scale: Math.max(this.state.camera.scale, 0.4) };
+    this.notify();
+  }
+
+  centerOnNode(id: string): void {
+    const node = this.model.node(id);
+    if (!node) return;
+    const m = measureNode(node, this.measurer);
+    this.state.camera = centerOn(this.state.camera, node.position.x + m.w / 2, node.position.y + m.h / 2);
+    this.notify();
+  }
+
+  zoomStep(factor: number, vw: number, vh: number): void {
+    this.zoomAt(vw / 2, vh / 2, factor, vw, vh);
+  }
+
+  private mapBounds(): { minX: number; minY: number; maxX: number; maxY: number } {
+    const res = layoutSheet(this.sheet, false, this.measurer);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [id, p] of res.positions) {
+      const n = this.model.node(id);
+      if (!n) continue;
+       const m = measureNode(n, this.measurer);
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x + m.w > maxX) maxX = p.x + m.w;
+      if (p.y + m.h > maxY) maxY = p.y + m.h;
+    }
+    if (!isFinite(minX)) return { minX: -200, minY: -200, maxX: 200, maxY: 200 };
+    return { minX, minY, maxX, maxY };
+  }
+
+  // -------------------------------------------------------------------------
+  // Keyboard navigation
+  // -------------------------------------------------------------------------
+
+  navigate(dir: NavDir): void {
+    const node = this.selectionNode ?? this.model.rootNode;
+    const sheet = this.sheet;
+    const rootId = sheet.rootNodeId;
+
+    // build a center X map from layout positions + manual positions
+    const layout = layoutSheet(this.sheet, false, this.measurer);
+    const centerX = (id: string): number => {
+      const n = this.model.node(id);
+      if (!n) return 0;
+      const measured = measureNode(n, this.measurer);
+      const p = layout.positions.get(id);
+      if (p) return p.x + measured.w / 2;
+      return n.position.x + measured.w / 2;
+    };
+
+    if (dir === "left" || dir === "right") {
+      if (node.type === "central") {
+        const kids = node.childrenIds.map((id) => this.model.node(id)).filter((k): k is any => !!k);
+        const rootCx = centerX(rootId);
+        const rightKids = kids.filter((k) => centerX(k.id) >= rootCx);
+        const leftKids = kids.filter((k) => centerX(k.id) < rootCx);
+        if (dir === "right" && rightKids.length) this.select(rightKids[0].id, { center: true });
+        if (dir === "left" && leftKids.length) this.select(leftKids[0].id, { center: true });
+        return;
+      }
+
+      const branchRootId = this.model.branchRootId(node.id);
+      const rootCx = centerX(rootId);
+      const branchCx = centerX(branchRootId);
+      const isLeftWing = branchCx < rootCx;
+
+      if (dir === "right") {
+        if (isLeftWing) {
+          if (node.parentId) this.select(node.parentId, { center: true });
+        } else {
+          if (node.childrenIds.length && !node.collapsed) this.select(node.childrenIds[0], { center: true });
+        }
+        return;
+      }
+
+      if (dir === "left") {
+        if (isLeftWing) {
+          if (node.childrenIds.length && !node.collapsed) this.select(node.childrenIds[0], { center: true });
+        } else {
+          if (node.parentId) this.select(node.parentId, { center: true });
+        }
+        return;
+      }
+    }
+
+    if (dir === "up") {
+      if (!node.parentId) return;
+      const parent = this.model.requireNode(node.parentId);
+      const idx = parent.childrenIds.indexOf(node.id);
+      if (idx > 0) this.select(parent.childrenIds[idx - 1], { center: true });
+      else this.select(parent.id, { center: true });
+      return;
+    }
+
+    // down
+    if (!node.parentId) return;
+    const parent = this.model.requireNode(node.parentId);
+    const idx = parent.childrenIds.indexOf(node.id);
+    if (idx >= 0 && idx < parent.childrenIds.length - 1) this.select(parent.childrenIds[idx + 1], { center: true });
+    else if (node.parentId !== rootId) this.select(parent.id, { center: true });
+  }
+
+  // -------------------------------------------------------------------------
+  // Search
+  // -------------------------------------------------------------------------
+
+  setSearch(q: string): void {
+    this.state.search = q;
+    const query = q.trim().toLowerCase();
+    let results: string[] = [];
+    if (query) {
+      results = this.model
+        .visibleIds(this.sheet.rootNodeId)
+        .filter((id) => {
+          const n = this.model.node(id);
+          return !!n && (n.title.toLowerCase().includes(query) || n.notes.toLowerCase().includes(query));
+        });
+    }
+    this.state.searchResults = results;
+    this.state.searchIndex = results.length > 0 ? 0 : 0;
+    this.notify();
+    if (results.length > 0) this.jumpToSearch(0);
+  }
+
+  jumpToSearch(offset: number): void {
+    const results = this.state.searchResults;
+    if (results.length === 0) return;
+    const next = (this.state.searchIndex + offset + results.length) % results.length;
+    this.state.searchIndex = next;
+    this.select(results[next], { center: true });
+    this.notify();
+  }
+
+  // -------------------------------------------------------------------------
+  // Theme & UI toggles
+  // -------------------------------------------------------------------------
+
+  toggleTheme(): void {
+    this.model.doc.settings.theme = this.model.doc.settings.theme === "dark" ? "light" : "dark";
+    this.scheduleSave();
+    this.notify();
+  }
+
+  togglePalette(): void {
+    this.state.showPalette = !this.state.showPalette;
+    this.notify();
+  }
+
+  toggleOutliner(): void {
+    this.state.showOutliner = !this.state.showOutliner;
+    this.notify();
+  }
+
+  toggleInspector(): void {
+    this.state.showInspector = !this.state.showInspector;
+    this.notify();
+  }
+
+  toggleZen(): void {
+    this.state.zen = !this.state.zen;
+    this.notify();
+  }
+
+  setMode(mode: "select" | "pan"): void {
+    this.state.mode = mode;
+    this.notify();
+  }
+
+  /**
+   * Dev-only (perf spike): bulk-generate a balanced tree of `count` topics
+   * under the root as a single op batch. Exposed via window.__rmind.
+   */
+  debugGenerateBalancedTree(count: number): { opsMs: number; totalNodes: number } {
+    const sheet = this.sheet;
+    const ops: Op[] = [];
+    const queue: string[] = [sheet.rootNodeId];
+    const BRANCH = 8;
+    let created = 0;
+    const t0 = performance.now();
+    while (created < count && queue.length > 0) {
+      const parentId = queue.shift()!;
+      const isRoot = parentId === sheet.rootNodeId;
+      for (let i = 0; i < BRANCH && created < count; i++) {
+        const id = uid("n");
+        ops.push(
+          makeOp<Op & { type: "createNode" }>("createNode", {
+            id,
+            nodeType: isRoot ? "main" : "subtopic",
+            parentId,
+            index: 0,
+            title: `Topic ${created}`,
+          })
+        );
+        queue.push(id);
+        created++;
+      }
+    }
+    const opsMs = performance.now() - t0;
+    this.execOps(ops);
+    return { opsMs, totalNodes: Object.keys(sheet.nodes).length };
+  }
+
+  // -------------------------------------------------------------------------
+  // Document management
+  // -------------------------------------------------------------------------
+
+  newDocument(): void {
+    const doc = DocumentModel.blank("Untitled map");
+    doc.settings.theme = this.model.doc.settings.theme;
+    this.state.docs = [...this.state.docs, doc];
+    this.state.activeDocId = doc.documentId;
+    this.switchToDoc(doc.documentId);
+    this.toast("New document created");
+  }
+
+  /** Create a doc from the roadmap template; returns its id. */
+  duplicateSample(): string {
+    const doc = DocumentModel.sample();
+    doc.settings.theme = this.model.doc.settings.theme;
+    this.state.docs = [...this.state.docs, doc];
+    this.notify();
+    return doc.documentId;
+  }
+
+  duplicateDocument(id: string): void {
+    const src = this.state.docs.find((d) => d.documentId === id);
+    if (!src) return;
+    const copy: RmindDocument = structuredClone(src);
+    copy.documentId = uid("d");
+    copy.title = src.title + " (copy)";
+    copy.createdAt = nowIso();
+    copy.updatedAt = nowIso();
+    this.state.docs = [...this.state.docs, copy];
+    this.notify();
+    this.toast("Document duplicated");
+  }
+
+  renameDocument(id: string, title: string): void {
+    const doc = this.state.docs.find((d) => d.documentId === id);
+    if (!doc) return;
+    doc.title = title;
+    doc.updatedAt = nowIso();
+    this.scheduleSave();
+    this.notify();
+  }
+
+  toggleArchive(id: string): void {
+    const doc = this.state.docs.find((d) => d.documentId === id);
+    if (!doc) return;
+    doc.archived = !doc.archived;
+    this.scheduleSave();
+    this.notify();
+  }
+
+  deleteDocument(id: string): void {
+    this.state.docs = this.state.docs.filter((d) => d.documentId !== id);
+    if (this.state.activeDocId === id) {
+      const next = this.state.docs[0];
+      if (next) this.switchToDoc(next.documentId);
+      else {
+        this.model = new DocumentModel(DocumentModel.blank());
+        this.state = this.makeState();
+      }
+    }
+    this.scheduleSave();
+    this.notify();
+  }
+
+  switchToDoc(id: string): void {
+    const doc = this.state.docs.find((d) => d.documentId === id);
+    if (!doc) return;
+    this.model = new DocumentModel(doc);
+    this.history.clear();
+    this.state.activeDocId = id;
+    this.state.selection = [];
+    this.state.editingId = null;
+    this.state.search = "";
+    this.state.searchResults = [];
+    this.notify();
+    this.scheduleLayout(false);
+  }
+
+  setSheetTitle(title: string): void {
+    const sheet = this.sheet;
+    this.execOps([makeOp<Op & { type: "setSheetTitle" }>("setSheetTitle", { title, prev: sheet.title })]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Export
+  // -------------------------------------------------------------------------
+
+  exportJson(): void {
+    const json = JSON.stringify(this.model.doc, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    this.download(blob, `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rmind.json`);
+    this.toast("Document exported as JSON");
+  }
+
+  exportMarkdown(): void {
+    const md = this.toMarkdown(this.sheet, this.sheet.rootNodeId, 0);
+    const blob = new Blob([md], { type: "text/markdown" });
+    this.download(blob, `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.md`);
+    this.toast("Document exported as Markdown");
+  }
+
+  private toMarkdown(sheet: Sheet, id: string, depth: number): string {
+    const node = sheet.nodes[id];
+    if (!node) return "";
+    const bullet = depth === 0 ? `# ${node.title}` : `${"-".repeat(1)} ${node.title}`;
+    const prefix = depth === 0 ? "" : "  ".repeat(depth - 1);
+    let out = depth === 0 ? `${bullet}\n` : `${prefix}- ${node.title}\n`;
+    for (const c of node.childrenIds) out += this.toMarkdown(sheet, c, depth + 1);
+    return out;
+  }
+
+  private download(blob: Blob, filename: string): void {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+}
