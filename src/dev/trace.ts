@@ -254,6 +254,11 @@ export function installTrace(): () => void {
       e.preventDefault();
       const note = window.prompt("What did you expect to happen? (optional)") ?? undefined;
       trace.download(note);
+      // Reset after capturing, never before: the bug has already happened by
+      // the time anyone reaches for this, so clearing first would discard the
+      // very evidence being asked for. Each capture is scoped to what came
+      // after the previous one.
+      trace.clear();
     }
   };
   const onError = (e: ErrorEvent): void => trace.error(e.message, e.error?.stack);

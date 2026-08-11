@@ -240,23 +240,23 @@ because it has no layout engine. Automating it is task T2 in
 Don't describe the symptom — capture it. While running `npm run dev` the app
 records its own decisions in a rolling buffer.
 
-**When something looks wrong, press `Ctrl+Shift+D`.** You are asked what you
-expected (optional, one line), and a `rnode-trace-*.json` file downloads.
-Attach that file. It carries the last few hundred events: which inputs were
-acted on, which were deliberately ignored *and why*, what the renderer
-actually drew each frame, how long layout took, and any errors — with the
-events that preceded them.
+**When something looks wrong, press the ⏺ button in the toolbar** (or
+`Ctrl+Shift+D`, which also asks what you expected). A `rnode-trace-*.json`
+file downloads. Attach that file. It carries the last few hundred events:
+which inputs were acted on, which were deliberately ignored *and why*, what
+the renderer actually drew each frame, how long layout took, and any errors —
+with the events that preceded them.
 
-For a clean capture of one specific problem, open the console and clear the
-buffer immediately before reproducing:
+Both capture **and then reset**, in that order: by the time you reach for the
+button the bug has already happened, so clearing first would throw away the
+evidence. Because the buffer restarts, each capture covers only what happened
+since the previous one — hit it once to get a clean slate, reproduce, hit it
+again, and the second file contains the repro and nothing else.
 
-```js
-__rnodeTrace.clear()   // then reproduce the bug, then press Ctrl+Shift+D
-```
-
-Other console entry points: `__rnodeTrace.capture()` returns the same bundle
-as an object (handy for inspecting in place), `__rnodeTrace.download()` skips
-the prompt, `__rnodeTrace.enabled` tells you whether recording is on.
+Console entry points: `__rnodeTrace.capture()` returns the same bundle as an
+object (handy for inspecting in place), `__rnodeTrace.download()` skips the
+prompt, `__rnodeTrace.clear()` resets, `__rnodeTrace.enabled` tells you
+whether recording is on.
 
 The tracer is **development-only** — it is compiled out of production builds,
 so a `npm run build` bundle records nothing.

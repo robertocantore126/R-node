@@ -170,9 +170,11 @@ Non re-derivarle. Costano ore ciascuna.
 ## 4bis. Segnalare un bug: il tracer
 
 Non descrivere i sintomi a parole. In dev l'app registra le proprie
-**decisioni** in un ring buffer (`src/dev/trace.ts`): premi **Ctrl+Shift+D**
-nell'istante in cui vedi il problema e scarichi un JSON con gli ultimi ~500
-eventi. Quello si allega, non la descrizione.
+**decisioni** in un ring buffer (`src/dev/trace.ts`): premi il bottone **⏺**
+nella toolbar (o **Ctrl+Shift+D**) nell'istante in cui vedi il problema e
+scarichi un JSON con gli ultimi ~500 eventi. Quello si allega, non la
+descrizione. Entrambi catturano **e poi** azzerano — mai prima: quando ci
+arrivi il baco è già successo.
 
 Cosa contiene, e perché conta:
 
