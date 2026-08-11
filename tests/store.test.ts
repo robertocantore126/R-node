@@ -425,4 +425,61 @@ describe("canvas resize drag", () => {
     store.undo();
     expect(store.doc.node(main.id)!.style.width).toBeUndefined();
   });
+
+  it("dragging a subtopic onto empty canvas does not pin an absolute position", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+    store.createChild();
+    const sub = store.doc.node(main.childrenIds[0])!;
+    const orig = { ...sub.position };
+
+    store.dropAt(sub.id, null, "floating", 999, 888);
+
+    const after = store.doc.node(sub.id)!;
+    expect(after.position.manual).toBe(false);
+    expect(after.position.x).toBe(orig.x);
+    expect(after.position.y).toBe(orig.y);
+  });
+
+  it("dragging a main topic pins it and releases manual pins on its descendants so they follow", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+    store.createChild();
+    const sub = store.doc.node(main.childrenIds[0])!;
+    // a legacy/previous manual pin on the subtopic
+    store.doc.node(sub.id)!.position = { x: 300, y: 200, manual: true };
+
+    store.dropAt(main.id, null, "floating", 700, 350);
+
+    const moved = store.doc.node(main.id)!;
+    const child = store.doc.node(sub.id)!;
+    expect(moved.position.manual).toBe(true);
+    expect(moved.position.x).toBe(700);
+    expect(child.position.manual).toBe(false);
+    // one undo restores the whole batch (main back to auto, child pinned again)
+    store.undo();
+    expect(store.doc.node(main.id)!.position.manual).toBe(false);
+    expect(store.doc.node(sub.id)!.position.manual).toBe(true);
+    expect(store.doc.node(sub.id)!.position.x).toBe(300);
+  });
+
+  it("floating topics keep being freely movable to an absolute position", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createFloatingAt(500, 200);
+    store.cancelEdit(); // leave the auto-opened editor
+    const f = Object.values(store.sheet.nodes).find((n) => n.type === "floating")!;
+
+    store.dropAt(f.id, null, "floating", 400, 300);
+
+    const after = store.doc.node(f.id)!;
+    expect(after.position.manual).toBe(true);
+    expect(after.position.x).toBe(400);
+    expect(after.position.y).toBe(300);
+  });
 });

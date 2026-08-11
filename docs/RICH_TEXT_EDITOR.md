@@ -28,8 +28,9 @@ Scelte architetturali esplicite (non ridiscutibili):
 - **Lexical non ha la propria history**: è un puro generatore di draft.
 - **Mai più di un overlay** montato: CanvasView lo chiava con `key={editingId}`.
 - Il nodo in editing **non viene disegnato** dal canvas (niente ghosting).
-- Il pan/zoom è **bloccato durante l'editing** (l'overlay non deve andare fuori
-  sincrono).
+- La rotella **funziona anche durante l'editing**: l'overlay deriva la sua
+  posizione dalla camera dello store a ogni render, quindi pan/zoom resta
+  incollato al nodo (il guard `editing` sul wheel è stato rimosso).
 
 ---
 
@@ -332,7 +333,11 @@ lunghezza che anche il CSS può esprimere.
 - **Ctrl/Cmd+S** → `saveNow()` con commit del draft, editor aperto.
 - **Tab** → inserisce un carattere tab letterale nel titolo.
 - **B / I / colore / barrato / clear** → toolbar.
-- Pan/zoom (rotella e drag) → bloccati mentre `editingId` è attivo.
+- Rotella → pan/zoom **sempre attivi**, anche durante l'editing (l'overlay
+  segue la camera). Anche il drag-pan (tasto destro o medio) funziona mentre
+  si edita: sopra l'overlay lo intercettano gli handler in capture phase sul
+  wrapper (`onWrapPointerDown*`), che catturano il puntatore e panano senza
+  rubare il click sinistro all'editor (selezione testo intatta).
 
 ---
 
@@ -404,7 +409,7 @@ src/ui/lexicalRuns.ts      bridge editor <-> runs
 src/ui/pasteSanitizer.ts   sanitizeHtml / htmlToRuns (Word, Draw.io, web)
 src/layout/measure.ts      wrapRunLines condiviso, line box CSS, costanti
 src/render/renderer.ts     drawNode, renderTextBitmap (cache), nodeColors
-src/ui/CanvasView.tsx      overlay positioning, pan bloccato, resize handle
+src/ui/CanvasView.tsx      overlay positioning (segue la camera), resize handle
 dev/parity.html · dev/parity.ts   harness di parità editor ↔ canvas (§7bis)
 tests/pasteSanitizer.test.ts · lexicalRuns.test.ts · measure.test.ts · store.test.ts
 ```

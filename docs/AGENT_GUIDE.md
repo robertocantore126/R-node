@@ -204,20 +204,24 @@ Ordine di lettura consigliato:
    Lo stesso vale per `relsDrawn/rels` e `visible/nodes`.
 4. **`op` e `layout`** con le durate, se il sintomo è lentezza.
 
-Esempio reale — la rotella che non funzionava in editing:
+Esempio — un gesto scartato da una guardia (forma del log):
 
 ```
 INPUT wheel:pan applied x1
-EDIT  start
-INPUT wheel ignored(editing) x1     ← la risposta
+INPUT wheel:zoom applied x1
+INPUT wheel ignored(reason) x1     ← la risposta
 ```
+
+Nota: la rotella NON è più bloccata durante l'editing — il guard `editing` sul
+wheel è stato rimosso (l'overlay deriva la sua posizione dalla camera dello
+store a ogni render, quindi pan/zoom resta incollato al nodo).
 
 ### Regola per chi scrive codice
 
 **Ogni `return` anticipato in un handler di input deve dire perché.**
 
 ```ts
-if (this.state.editingId) return trace.ignored("wheel", "editing");
+if (someGuard) return trace.ignored("pointerdown", "some-guard");
 ```
 
 Un `return` muto rende un comportamento voluto indistinguibile da un difetto,

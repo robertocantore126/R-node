@@ -1045,6 +1045,20 @@ export class EditorStore {
     return false;
   }
 
+  /** Descendant ids whose position is manually pinned (must follow their parent). */
+  private collectManualDescendants(id: string): string[] {
+    const out: string[] = [];
+    const stack = [...(this.model.node(id)?.childrenIds ?? [])];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      const n = this.model.node(cur);
+      if (!n) continue;
+      if (n.position.manual) out.push(cur);
+      stack.push(...n.childrenIds);
+    }
+    return out;
+  }
+
   sortSiblings(parentId: string, compare: (a: MindNode, b: MindNode) => number): void {
     const parent = this.model.node(parentId);
     if (!parent || parent.childrenIds.length < 2) return;
@@ -1136,8 +1150,18 @@ export class EditorStore {
         this.setDrop(null);
         return;
       }
+      // Only main topics (direct children of root) and floating topics (no
+      // parent) may be pinned to an absolute position. Deeper hierarchical
+      // nodes stay in the auto layout and follow their parent — dropping one
+      // on empty canvas does nothing.
+      const isRootChild = node.parentId === this.sheet.rootNodeId;
+      const isFloatingTopic = !node.parentId;
+      if (!isRootChild && !isFloatingTopic) {
+        this.setDrop(null);
+        return;
+      }
       // If dragging a direct child of root, allow swapping sides by reordering
-      if (node.parentId === this.sheet.rootNodeId) {
+      if (isRootChild) {
         const parent = this.model.requireNode(this.sheet.rootNodeId);
         const layout = layoutSheet(this.sheet, false, this.measurer);
         const rootCx = layout.positions.get(this.sheet.rootNodeId)?.x ?? parent.position.x;
@@ -1145,15 +1169,14 @@ export class EditorStore {
         // adjust for current index
         const curIdx = parent.childrenIds.indexOf(draggedId);
         if (curIdx >= 0 && curIdx < desiredIndex) desiredIndex = desiredIndex - 1;
-        const moveOp = makeOp<Op & { type: "moveNode" }>("moveNode", {
-          id: draggedId,
-          fromParentId: node.parentId,
-          fromIndex: curIdx >= 0 ? curIdx : 0,
-          toParentId: parent.id,
-          toIndex: desiredIndex,
-        });
-        this.execOps([
-          moveOp,
+        const ops: Op[] = [
+          makeOp<Op & { type: "moveNode" }>("moveNode", {
+            id: draggedId,
+            fromParentId: node.parentId,
+            fromIndex: curIdx >= 0 ? curIdx : 0,
+            toParentId: parent.id,
+            toIndex: desiredIndex,
+          }),
           makeOp<Op & { type: "setPosition" }>("setPosition", {
             id: draggedId,
             x: worldX,
@@ -1161,7 +1184,22 @@ export class EditorStore {
             manual: true,
             prev: node.position,
           }),
-        ]);
+        ];
+        // Children must follow the main keeping their relative layout: drop any
+        // leftover manual pin on descendants so the whole subtree re-flows
+        // around the main's new position.
+        for (const descId of this.collectManualDescendants(draggedId)) {
+          const d = this.model.node(descId);
+          if (!d) continue;
+          ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", {
+            id: descId,
+            x: d.position.x,
+            y: d.position.y,
+            manual: false,
+            prev: { ...d.position },
+          }));
+        }
+        this.execOps(ops);
       } else {
         this.execOps([
           makeOp<Op & { type: "setPosition" }>("setPosition", {

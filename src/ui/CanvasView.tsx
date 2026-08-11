@@ -69,6 +69,12 @@ export function CanvasView(): JSX.Element {
     resizeStartWidth: 0,
     resizeStartX: 0,
   });
+  // Right/middle-drag pan started over the Lexical overlay (the overlay is a
+  // sibling of the canvas, so the canvas pointer handlers never see it).
+  const overlayPanRef = useRef<{ pointerId: number } | null>(null);
+  // True when an overlay pan actually moved (so a right-drag doesn't leave a
+  // browser context menu behind; a plain right-click keeps the native menu).
+  const panMovedRef = useRef(false);
   const [, force] = useState(0);
   const [panning, setPanning] = useState(false);
   const [resizing, setResizing] = useState(false);
@@ -156,18 +162,15 @@ export function CanvasView(): JSX.Element {
       // div, not the canvas — so a listener bound to the canvas never saw the
       // event at all: the browser handled it instead and ctrl+wheel zoomed the
       // whole page. Hence binding to the wrapper, which contains both.
+      // Wheel is NOT blocked while editing: the overlay's position is derived
+      // from the store camera on every render (see editStyle below), so a
+      // pan/zoom here keeps the overlay glued to the node.
       e.preventDefault();
       const { w, h } = sizeRef.current;
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       const zoom = e.ctrlKey || e.metaKey;
-      // While a topic is being edited the Lexical overlay owns the viewport:
-      // pan/zoom is blocked so the overlay transform never goes stale.
-      if (store.getSnapshot().editingId) {
-        trace.ignored("wheel", "editing", { zoom, deltaY: Math.round(e.deltaY) });
-        return;
-      }
       if (zoom) {
         // Wheel-up zooms in (deltaY < 0). Flipped alongside pan so ctrl+scroll
         // stays coherent for users with inverted/natural-scroll deltas.
@@ -210,7 +213,14 @@ export function CanvasView(): JSX.Element {
   };
 
   const onPointerDown = (e: RPointerEvent): void => {
-    canvasRef.current!.setPointerCapture(e.pointerId);
+    // Best-effort: capture keeps move/up events coming if the pointer leaves
+    // the element mid-gesture. Untrusted/synthetic events have no active
+    // pointer and throw here — never let that kill the handler.
+    try {
+      canvasRef.current!.setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unavailable (e.g. synthetic event) */
+    }
     const s = store.getSnapshot();
     const { x, y } = localPoint(e);
     const drag = dragRef.current;
@@ -221,8 +231,11 @@ export function CanvasView(): JSX.Element {
     drag.moved = false;
 
     // Panning is right-drag (or middle-drag / pan mode): left-click never
-    // pans, it only selects or drags topics.
-    if ((e.button === 2 || e.button === 1 || s.mode === "pan") && !s.editingId) {
+    // pans, it only selects or drags topics. Works while editing too — over
+    // the canvas here, over the Lexical overlay via the wrapper handlers
+    // (onWrapPointerDown), which capture the pointer because the overlay is a
+    // sibling of the canvas and its events never reach this handler.
+    if (e.button === 2 || e.button === 1 || s.mode === "pan") {
       drag.panning = true;
       drag.dragging = null;
       setPanning(true);
@@ -333,7 +346,11 @@ export function CanvasView(): JSX.Element {
         store.setDrop({ mode, nodeId: hit });
       }
     } else {
-      store.setDrop({ mode: "floating", nodeId: drag.dragging });
+      // Only main topics (root children) and floating topics can be pinned to
+      // a free position — deeper hierarchical nodes stay in the auto layout.
+      const dragged = store.doc.node(drag.dragging);
+      const canFloat = !!dragged && (!dragged.parentId || dragged.parentId === store.sheet.rootNodeId);
+      store.setDrop(canFloat ? { mode: "floating", nodeId: drag.dragging } : { mode: "none", nodeId: drag.dragging });
     }
   };
 
@@ -390,6 +407,75 @@ export function CanvasView(): JSX.Element {
     e.preventDefault();
   };
 
+  // -------------------------------------------------------------------------
+  // Wrapper-level pan over the editing overlay
+  // -------------------------------------------------------------------------
+  // Bound in CAPTURE phase on .canvas-wrap (see the main effect): capture runs
+  // before any stopPropagation an inner element could do, so right/middle-drag
+  // over the Lexical overlay pans the map even while editing. The left button
+  // is never touched here — it stays with the editor (text selection/caret).
+
+  const onWrapPointerDown = (e: RPointerEvent): void => {
+    if (e.target === canvasRef.current) return; // the canvas path handles it
+    if (e.button !== 2 && e.button !== 1) return; // never steal left-click
+    if (!store.getSnapshot().editingId) return;
+    e.preventDefault();
+    const { x, y } = localPoint(e);
+    const drag = dragRef.current;
+    drag.panning = true;
+    drag.dragging = null;
+    drag.startX = x;
+    drag.startY = y;
+    drag.lastX = x;
+    drag.lastY = y;
+    overlayPanRef.current = { pointerId: e.pointerId };
+    panMovedRef.current = false;
+    setPanning(true);
+    try {
+      canvasRef.current!.parentElement!.setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unavailable (e.g. synthetic event) */
+    }
+  };
+
+  const onWrapPointerMove = (e: RPointerEvent): void => {
+    if (!overlayPanRef.current) return;
+    const drag = dragRef.current;
+    const { x, y } = localPoint(e);
+    const dx = x - drag.lastX;
+    const dy = y - drag.lastY;
+    drag.lastX = x;
+    drag.lastY = y;
+    if (Math.hypot(x - drag.startX, y - drag.startY) > 3) panMovedRef.current = true;
+    store.panBy(dx, dy);
+  };
+
+  const onWrapPointerUp = (e: RPointerEvent): void => {
+    if (!overlayPanRef.current) return;
+    const drag = dragRef.current;
+    drag.panning = false;
+    drag.dragging = null;
+    setPanning(false);
+    const wrap = canvasRef.current?.parentElement;
+    if (wrap?.hasPointerCapture(e.pointerId)) {
+      try {
+        wrap.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+    }
+    overlayPanRef.current = null;
+  };
+
+  const onWrapContextMenu = (e: RMouseEvent): void => {
+    // A real right-drag pan must not leave a browser context menu behind;
+    // a plain right-click on the editor keeps the native menu (paste etc.).
+    if (panMovedRef.current) {
+      e.preventDefault();
+      panMovedRef.current = false;
+    }
+  };
+
   const currentRenderState = (): RenderState => {
     const s = store.getSnapshot();
     return {
@@ -429,7 +515,13 @@ export function CanvasView(): JSX.Element {
   }
 
   return (
-    <div className="canvas-wrap">
+    <div
+      className="canvas-wrap"
+      onPointerDownCapture={onWrapPointerDown}
+      onPointerMoveCapture={onWrapPointerMove}
+      onPointerUpCapture={onWrapPointerUp}
+      onContextMenuCapture={onWrapContextMenu}
+    >
       <canvas
         ref={canvasRef}
         className="canvas"

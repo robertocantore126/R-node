@@ -9,12 +9,13 @@
  * re-derive all of that by reading code.
  *
  * So this records the DECISIONS, not just the actions. Every guard that drops
- * an input logs why it dropped it:
+ * an input logs why it dropped it (example shape):
  *
- *   [INPUT] wheel ctrl=true → ignored (editing)
+ *   [INPUT] wheel ctrl=true → ignored (reason)
  *
- * That single line answers "why doesn't the wheel work while editing", which
- * no amount of prose from the user ever could.
+ * That single line answers "why did this gesture do nothing", which no amount
+ * of prose from the user ever could. Applied gestures are traced too, so a
+ * dead input is distinguishable from a handled one.
  *
  * Usage: press Ctrl+Shift+D at the moment the bug happens; a JSON bundle of
  * the last few hundred events downloads. Paste it to whoever (or whatever) is

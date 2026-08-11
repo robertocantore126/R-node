@@ -11,8 +11,9 @@
  *    the store's op history. The editor is a pure draft generator that pushes
  *    TextRun[] into the store on every change (editingDraftRuns), and the
  *    store applies the final setTitle op on commit.
- *  - Pan is blocked while editing (CanvasView ignores wheel/drag) so the
- *    overlay transform never goes stale.
+ *  - Wheel pan/zoom keeps working while editing: CanvasView positions this
+ *    overlay from the store camera on every render, so the overlay stays
+ *    glued to the node even while the map moves under it.
  */
 import { useEffect, useRef, type CSSProperties } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
