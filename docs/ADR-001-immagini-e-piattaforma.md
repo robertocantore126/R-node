@@ -456,6 +456,8 @@ Allo stato attuale il progetto è nettamente nel primo caso.
 | Risolvere la race fra `layoutTimer` e `saveTimer` | **`saveTimer` non esiste**: il salvataggio è manuale. |
 | Il canvas somma le larghezze dei token e accumula errore di wrap | **Ipotesi testata e smentita** con un caso dedicato nell'harness: 9/9 righe, altezze identiche. |
 | SVG fra i formati immagine accettati | Documento eseguibile; l'hardening XSS è esplicitamente differito. |
+| Monaco Editor al posto di Lexical | **Non è un'alternativa né una soluzione locale.** È una libreria web (gira comunque in webview) ed è un editor di *codice*: il suo modello è testo semplice, la colorazione è decorazione della vista calcolata da un tokenizer, quindi non può rappresentare formattazione autoriale come `TextRun[]`. In più è orientato a righe e monospazio, e avendo un proprio motore di layout invaliderebbe i 16 casi di parità. Avrebbe senso solo per una vista "sorgente" del documento (JSON/outline), che è una feature diversa. |
+| Sostituire Lexical con ProseMirror / TipTap / Slate / Quill | Sono alternative *legittime* (a differenza di Monaco), ma cambiarle ora invaliderebbe la parità misurata e Lexical funziona. Da riaprire solo davanti a un problema concreto che Lexical non risolve, non per preferenza. |
 
 ---
 
