@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import type { MindNode } from "../core/types";
 import { makeOp, type Op } from "../core/ops";
+import { plainToRuns } from "../core/text";
 
 export function Outliner(): JSX.Element {
   const store = useStore();
@@ -59,7 +60,7 @@ function OutlinerRow({ node, depth }: { node: MindNode; depth: number }): JSX.El
           className="outliner-title"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          onBlur={() => { if (text !== node.title) store.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id: node.id, title: text, prev: node.title })]); }}
+          onBlur={() => { if (text !== node.title) store.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id: node.id, title: text, prev: node.title, titleRuns: plainToRuns(text), prevRuns: node.titleRuns })]); }}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();

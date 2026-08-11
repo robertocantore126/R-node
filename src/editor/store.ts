@@ -11,9 +11,11 @@
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
-import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RnodeDocument, type Sheet, type Style, type TaskInfo } from "../core/types";
+import { trace } from "../dev/trace";
+import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RnodeDocument, type Sheet, type Style, type TaskInfo, type TextRun } from "../core/types";
+import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
-import { createCanvasTextMeasurer, measureNode, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
@@ -26,6 +28,30 @@ declare global {
       types?: { description?: string; accept: Record<string, string[]> }[];
     }) => Promise<FileSystemFileHandle>;
   }
+}
+
+/**
+ * Validate/sanitize titleRuns coming from an imported document: only plain
+ * text with bold/italic/underline/color survives; anything else is dropped.
+ * Falls back to a single plain run of `title` when no valid runs are present.
+ */
+function sanitizeTitleRuns(raw: unknown): TextRun[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const runs: TextRun[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const text = typeof (r as { text?: unknown }).text === "string" ? (r as { text: string }).text : "";
+    if (text.length === 0) continue;
+    const run: TextRun = { text };
+    if ((r as { bold?: unknown }).bold === true) run.bold = true;
+    if ((r as { italic?: unknown }).italic === true) run.italic = true;
+    if ((r as { underline?: unknown }).underline === true) run.underline = true;
+    const color = (r as { color?: unknown }).color;
+    if (typeof color === "string" && /^#[0-9a-fA-F]{3,8}$/.test(color)) run.color = color;
+    runs.push(run);
+  }
+  if (runs.length === 0) return undefined;
+  return normalizeRuns(runs);
 }
 
 export type NavDir = "up" | "down" | "left" | "right";
@@ -74,12 +100,28 @@ export class EditorStore {
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
   /**
-   * Live text of the inline editor, kept in sync by TopicEditor on every
-   * keystroke. The canvas pointer handler runs BEFORE the textarea blur, so
-   * selection changes would lose typed text without this draft: selection
-   * changes commit the draft instead of discarding it.
+   * Live rich-text draft of the inline editor (TextRun[]), kept in sync by
+   * the Lexical overlay on every change. The canvas pointer handler runs
+   * BEFORE the editor blur, so selection changes commit the draft instead of
+   * losing it. While editing, the node's title/titleRuns mirror this draft so
+   * the layout engine measures the topic at its live size (30ms debounce).
    */
-  private editingDraft: string | null = null;
+  private editingDraftRuns: TextRun[] | null = null;
+  /**
+   * The node's committed title/titleRuns when editing started — used as the
+   * `prev` of the final setTitle op (undo restores exactly this) and to
+   * restore the node when the edit is cancelled (Escape).
+   */
+  private editOriginal: { title: string; titleRuns?: TextRun[] } | null = null;
+  /**
+   * Canvas resize drag (Xmind-style handles on the selected node's edges).
+   * setResizeDraft mutates the node's width (and, for a left-edge drag, its
+   * position.x with a transient manual flag) ephemerally — no op, no history
+   * — so the layout re-wraps the text live during the drag. commitResize
+   * emits ONE batch op (setStyle + optional setPosition), so undo restores
+   * the exact pre-drag state.
+   */
+  private resizeState: { nodeId: string; original: Style; origPos: Position } | null = null;
   /** Canvas-backed measurer: layout and renderer agree on every topic size. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
 
@@ -195,9 +237,11 @@ export class EditorStore {
   /** Apply ops, record them in history, mark dirty, schedule layout. */
   execOps(ops: Op[], opts?: { skipHistory?: boolean }): void {
     if (ops.length === 0) return;
+    const t = typeof performance !== "undefined" ? performance.now() : 0;
     const inverses: Op[][] = [];
     for (const op of ops) inverses.push(applyWithInverse(this.sheet, op));
     if (!opts?.skipHistory) this.history.push(ops, inverses);
+    trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
     this.touch();
   }
 
@@ -231,7 +275,9 @@ export class EditorStore {
   private scheduleLayout(force: boolean, clearManual = false): void {
     if (this.layoutTimer) clearTimeout(this.layoutTimer);
     this.layoutTimer = setTimeout(() => {
+      const t = typeof performance !== "undefined" ? performance.now() : 0;
       applyLayout(this.sheet, force, this.measurer, clearManual);
+      trace.layout(Object.keys(this.sheet.nodes).length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
       this.notify();
     }, 30);
   }
@@ -440,6 +486,7 @@ export class EditorStore {
         parentId: typeof node.parentId === "string" || node.parentId === null ? node.parentId : null,
         childrenIds: Array.isArray(node.childrenIds) ? node.childrenIds.filter((c): c is string => typeof c === "string") : [],
         title: typeof node.title === "string" ? node.title : "",
+        titleRuns: sanitizeTitleRuns(node.titleRuns),
         position: {
           x: typeof position.x === "number" ? position.x : 0,
           y: typeof position.y === "number" ? position.y : 0,
@@ -548,17 +595,23 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   startEdit(id: string): void {
+    trace.edit("start", id);
     this.commitDraftOnLeave();
+    const node = this.model.node(id);
+    if (!node) return;
     this.state.selection = [id];
     this.state.editingId = id;
     this.state.pendingInsert = null;
-    this.editingDraft = null; // the editor seeds it from the node title on mount
+    this.editOriginal = { title: node.title, titleRuns: node.titleRuns };
+    // Seed the draft with the current title so layout keeps measuring the
+    // node at its current size until the editor reports its first change.
+    this.applyDraftRuns(id, nodeRuns(node.title, node.titleRuns), false);
     this.notify();
   }
 
   /**
    * XMind-style type/paste-to-edit: a printable character (or pasted text)
-   * with a topic selected starts editing it with that content. TopicEditor
+   * with a topic selected starts editing it with that content. The editor
    * consumes the pending insert on mount, replacing the previous title.
    */
   typeToEdit(text: string): void {
@@ -568,11 +621,12 @@ export class EditorStore {
     this.state.selection = [node.id];
     this.state.editingId = node.id;
     this.state.pendingInsert = text;
-    this.editingDraft = null; // the editor seeds it from the pending text on mount
+    this.editOriginal = { title: node.title, titleRuns: node.titleRuns };
+    this.applyDraftRuns(node.id, nodeRuns(node.title, node.titleRuns), false);
     this.notify();
   }
 
-  /** TopicEditor calls this on mount to pick up the pending type/paste text. */
+  /** The Lexical overlay calls this on mount to pick up the pending type/paste text. */
   consumePendingInsert(): string | null {
     const v = this.state.pendingInsert;
     this.state.pendingInsert = null;
@@ -582,7 +636,7 @@ export class EditorStore {
   /**
    * Buffer an extra character while the type-to-edit editor is still
    * mounting (pendingInsert not yet consumed). Without this, fast typists
-   * lose the keystrokes between typeToEdit() and the textarea appearing:
+   * lose the keystrokes between typeToEdit() and the editor appearing:
    * the shortcut handler sees editingId set and drops them.
    */
   appendPendingInsert(ch: string): boolean {
@@ -592,35 +646,95 @@ export class EditorStore {
     return true;
   }
 
-  /** TopicEditor keeps this in sync with the live textarea value. */
+  /** Plain-text shim (Inspector/Outliner/tests): a single unstyled run. */
   setEditingDraft(text: string | null): void {
-    this.editingDraft = text;
+    if (text === null) {
+      this.editingDraftRuns = null;
+      return;
+    }
+    this.setEditingDraftRuns(plainToRuns(text));
   }
 
   /**
-   * Commit the in-progress edit. Selection changes commit the draft too, so
-   * clicking away (pointerdown runs before blur) never loses typed text.
+   * The Lexical overlay reports its live content as TextRuns on every
+   * change. The draft is applied to the node ephemerally (no op, no history)
+   * so the debounced layout and the canvas repaint track the text live.
    */
-  commitEdit(): void {
+  setEditingDraftRuns(runs: TextRun[]): void {
     const id = this.state.editingId;
-    const draft = this.editingDraft;
-    this.state.editingId = null;
-    this.editingDraft = null;
-    this.state.pendingInsert = null;
-    if (!id || draft === null) return;
+    if (!id) return;
+    this.applyDraftRuns(id, runs, true);
+  }
+
+  /** Apply the draft runs to the node (ephemeral) and schedule live layout. */
+  private applyDraftRuns(id: string, runs: TextRun[], notify: boolean): void {
     const node = this.model.node(id);
     if (!node) return;
-    const clean = draft.trim();
-    if (clean.length === 0) {
+    const clean = normalizeRuns(runs);
+    this.editingDraftRuns = clean;
+    if (clean.length > 0) {
+      node.title = runsToPlain(clean);
+      node.titleRuns = clean;
+    } else {
+      node.title = "";
+      node.titleRuns = [];
+    }
+    if (notify) {
+      this.scheduleLayout(false);
+      this.notify();
+    }
+  }
+
+  private restoreOriginal(node: MindNode, original: { title: string; titleRuns?: TextRun[] } | null): void {
+    if (!original) return;
+    node.title = original.title;
+    if (original.titleRuns) node.titleRuns = original.titleRuns.map((r) => ({ ...r }));
+    else delete node.titleRuns;
+  }
+
+  /**
+   * Commit the in-progress edit as a real setTitle op. Selection changes
+   * commit the draft too, so clicking away (pointerdown runs before blur)
+   * never loses typed text. Undo restores the pre-edit title exactly.
+   */
+  commitEdit(): void {
+    trace.edit("commit", this.state.editingId ?? undefined);
+    const id = this.state.editingId;
+    const runs = this.editingDraftRuns;
+    const original = this.editOriginal;
+    this.state.editingId = null;
+    this.editingDraftRuns = null;
+    this.editOriginal = null;
+    this.state.pendingInsert = null;
+    if (!id || runs === null || !original) return;
+    const node = this.model.node(id);
+    if (!node) return;
+    const clean = trimRuns(runs);
+    if (isEmptyRuns(clean)) {
       // empty new topic -> delete it; a topic with children keeps its title
       if (node.childrenIds.length === 0) this.deleteNodes([id]);
-      else this.notify();
+      else {
+        this.restoreOriginal(node, original);
+        this.notify();
+      }
       return;
     }
-    if (clean !== node.title) {
-      this.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id, title: clean, prev: node.title })]);
+    const plain = runsToPlain(clean);
+    if (plain !== original.title || !runsEqual(clean, original.titleRuns)) {
+      this.execOps([
+        makeOp<Op & { type: "setTitle" }>("setTitle", {
+          id,
+          title: plain,
+          prev: original.title,
+          titleRuns: clean,
+          prevRuns: original.titleRuns,
+        }),
+      ]);
+    } else {
+      // unchanged -> drop the ephemeral patch, nothing to record
+      this.restoreOriginal(node, original);
+      this.notify();
     }
-    this.notify();
   }
 
   /**
@@ -629,33 +743,52 @@ export class EditorStore {
    */
   private commitDraftKeepEditing(): void {
     const id = this.state.editingId;
-    const draft = this.editingDraft;
-    if (!id || draft === null) return;
+    const runs = this.editingDraftRuns;
+    const original = this.editOriginal;
+    if (!id || runs === null || !original) return;
     const node = this.model.node(id);
     if (!node) return;
-    const clean = draft.trim();
-    if (clean.length === 0 || clean === node.title) return;
-    this.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id, title: clean, prev: node.title })]);
+    const clean = trimRuns(runs);
+    if (isEmptyRuns(clean)) return;
+    const plain = runsToPlain(clean);
+    if (plain === original.title && runsEqual(clean, original.titleRuns)) return;
+    this.execOps([
+      makeOp<Op & { type: "setTitle" }>("setTitle", {
+        id,
+        title: plain,
+        prev: original.title,
+        titleRuns: clean,
+        prevRuns: original.titleRuns,
+      }),
+    ]);
+    // The committed state is now the baseline for any further Ctrl+S.
+    this.editOriginal = { title: plain, titleRuns: clean };
   }
 
   /** Commit the draft when the selection/editing context is about to change. */
   private commitDraftOnLeave(): void {
     if (this.state.editingId !== null) this.commitEdit();
     else {
-      this.editingDraft = null;
+      this.editingDraftRuns = null;
+      this.editOriginal = null;
       this.state.pendingInsert = null;
     }
   }
 
   cancelEdit(): void {
+    trace.edit("cancel", this.state.editingId ?? undefined);
     const id = this.state.editingId;
+    const original = this.editOriginal;
     this.state.editingId = null;
-    this.editingDraft = null;
+    this.editingDraftRuns = null;
+    this.editOriginal = null;
     this.state.pendingInsert = null;
     if (id) {
       const node = this.model.node(id);
-      if (node && node.title === "" && node.childrenIds.length === 0) this.deleteNodes([id]);
-      this.notify();
+      if (!node) return;
+      this.restoreOriginal(node, original);
+      if (node.title === "" && node.childrenIds.length === 0) this.deleteNodes([id]);
+      else this.notify();
     }
   }
 
@@ -1055,6 +1188,83 @@ export class EditorStore {
     this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
   }
 
+  // -------------------------------------------------------------------------
+  // Canvas resize drag (Xmind-style handle) — ephemeral draft, single commit
+  // -------------------------------------------------------------------------
+
+  /** A resize drag started on this node: capture the pre-drag style + position. */
+  beginResize(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    this.resizeState = { nodeId, original: { ...node.style }, origPos: { ...node.position } };
+  }
+
+  /**
+   * Live width during the drag: ephemeral mutation, no op, no history.
+   * For a left-edge drag the right edge is the anchor: position.x follows
+   * the cursor with a TRANSIENT manual flag — applyLayout skips manual
+   * nodes and would otherwise snap the position back every 30ms. The flag
+   * is restored to its original value by commitResize.
+   */
+  setResizeDraft(nodeId: string, width: number, opts?: { anchorRight?: boolean; x?: number }): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const w = Math.round(Math.min(640, Math.max(MIN_TOPIC_W, width)));
+    node.style = { ...node.style, width: w };
+    if (opts?.anchorRight && typeof opts.x === "number") {
+      node.position = { ...node.position, x: opts.x, manual: true };
+    }
+    this.scheduleLayout(false);
+    this.notify();
+  }
+
+  /** End of the drag: one batch op (setStyle + optional setPosition); undo restores it all. */
+  commitResize(): void {
+    const r = this.resizeState;
+    this.resizeState = null;
+    if (!r) return;
+    const node = this.model.node(r.nodeId);
+    if (!node) return;
+    const w = node.style.width;
+    const xChanged = node.position.x !== r.origPos.x;
+    // A left-edge drag moves position.x. It persists only for floating or
+    // already-manual nodes; auto-layout nodes return to the layout's slot
+    // (the width is what survives there — the next applyLayout re-pins x).
+    const keepX = xChanged && (node.type === "floating" || r.origPos.manual);
+    const ops: Op[] = [];
+    if (w !== undefined && w !== r.original.width) {
+      ops.push(
+        makeOp<Op & { type: "setStyle" }>("setStyle", {
+          id: r.nodeId,
+          style: { ...node.style, width: w },
+          prev: r.original,
+        })
+      );
+    }
+    if (keepX) {
+      ops.push(
+        makeOp<Op & { type: "setPosition" }>("setPosition", {
+          id: r.nodeId,
+          x: node.position.x,
+          y: node.position.y,
+          manual: true,
+          prev: r.origPos,
+        })
+      );
+    } else if (xChanged) {
+      node.position = { ...r.origPos };
+    }
+    if (ops.length > 0) {
+      this.execOps(ops);
+    } else {
+      // click without a real change — restore the pre-drag state, no op
+      node.style = r.original;
+      node.position = { ...r.origPos };
+      this.scheduleLayout(false);
+      this.notify();
+    }
+  }
+
   setBranchFreePosition(id: string, enabled: boolean): void {
     const node = this.model.node(id);
     if (!node || node.type !== "main") return;
@@ -1183,6 +1393,7 @@ export class EditorStore {
         parentId,
         index,
         title: srcRoot.title,
+        titleRuns: srcRoot.titleRuns,
         style: srcRoot.style,
         task: srcRoot.task,
       })
@@ -1202,6 +1413,7 @@ export class EditorStore {
             parentId: idMap.get(src.id)!,
             index: src.childrenIds.indexOf(cid),
             title: c.title,
+            titleRuns: c.titleRuns,
             style: c.style,
             task: c.task,
           })

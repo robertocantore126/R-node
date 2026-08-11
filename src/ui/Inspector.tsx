@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore } from "../editor/context";
 import type { TaskStatus, Priority, TopicShape } from "../core/types";
 import { makeOp, type Op } from "../core/ops";
+import { plainToRuns } from "../core/text";
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
@@ -42,7 +43,7 @@ export function Inspector(): JSX.Element {
           className="inspector-title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          onBlur={() => { if (title !== node.title) store.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id: node.id, title, prev: node.title })]); }}
+          onBlur={() => { if (title !== node.title) store.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id: node.id, title, prev: node.title, titleRuns: plainToRuns(title), prevRuns: node.titleRuns })]); }}
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
         />
         <div className="inspector-actions">
@@ -82,6 +83,22 @@ export function Inspector(): JSX.Element {
         <div className="field">
           <span>Font size</span>
           <input type="number" min={10} max={48} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
+        </div>
+        <div className="field">
+          <span>Node width</span>
+          <input
+            type="range"
+            min={90}
+            max={640}
+            step={5}
+            value={node.style.width ?? 280}
+            onChange={(e) => store.setNodeStyle(node.id, { width: Number(e.target.value) })}
+            title="Fixed node width — the text re-wraps and the height follows"
+          />
+          <span className="muted">{node.style.width ? `${node.style.width}px` : "auto"}</span>
+          <button className="btn small" title="Fit the box to the text again" onClick={() => store.setNodeStyle(node.id, { width: undefined })}>
+            Auto
+          </button>
         </div>
         <div className="field">
           <span>Bold</span>

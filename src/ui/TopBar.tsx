@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import { runExportPng } from "../editor/exportBridge";
 import { viewSize } from "../editor/view";
+import { trace } from "../dev/trace";
 
 export function TopBar(): JSX.Element {
   const store = useStore();
@@ -78,6 +79,23 @@ export function TopBar(): JSX.Element {
         <button className="btn icon" title="Command palette (Ctrl+K)" onClick={() => store.togglePalette()}>
           ⌘
         </button>
+        {/* Dev only: capture what just happened, then start a clean buffer so
+            the NEXT capture is scoped to the next problem. It downloads before
+            clearing on purpose — by the time you reach for this, the bug has
+            already happened and clearing first would throw the evidence away. */}
+        {trace.enabled && (
+          <button
+            className="btn icon"
+            title="Capture a session trace (Ctrl+Shift+D) — downloads the recent events, then starts a fresh recording"
+            onClick={() => {
+              trace.download();
+              trace.clear();
+              store.toast("Trace captured — recording restarted");
+            }}
+          >
+            ⏺
+          </button>
+        )}
       </div>
 
       <div className="topbar-group" ref={exportRef}>

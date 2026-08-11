@@ -5,8 +5,11 @@ import { setExportPngHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
+import type { MindNode } from "../core/types";
+import { RichEditor } from "./RichEditor";
+import { installTrace, trace } from "../dev/trace";
 
 /**
  * Paint synchronously on every store change. rAF is unreliable in embedded
@@ -28,6 +31,18 @@ interface DragState {
   lastY: number;
   grabOffsetX: number;
   grabOffsetY: number;
+  resizing: string | null;
+  resizeSide: "left" | "right" | null;
+  resizeStartWorldX: number;
+  resizeStartWidth: number;
+  resizeStartX: number;
+}
+
+/** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
+function shapeWidthAllowance(n: MindNode): number {
+  const shape = n.style.shape ?? "rounded";
+  const fs = n.style.fontSize ?? 14;
+  return shape === "diamond" ? fs : shape === "hexagon" ? 14 : 0;
 }
 
 const overlayMeasurer = createCanvasTextMeasurer();
@@ -38,9 +53,26 @@ export function CanvasView(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sizeRef = useRef({ w: viewSize.w, h: viewSize.h });
-  const dragRef = useRef<DragState>({ dragging: null, moved: false, panning: false, startX: 0, startY: 0, lastX: 0, lastY: 0, grabOffsetX: 0, grabOffsetY: 0 });
+  const dragRef = useRef<DragState>({
+    dragging: null,
+    moved: false,
+    panning: false,
+    startX: 0,
+    startY: 0,
+    lastX: 0,
+    lastY: 0,
+    grabOffsetX: 0,
+    grabOffsetY: 0,
+    resizing: null,
+    resizeSide: null,
+    resizeStartWorldX: 0,
+    resizeStartWidth: 0,
+    resizeStartX: 0,
+  });
   const [, force] = useState(0);
   const [panning, setPanning] = useState(false);
+  const [resizing, setResizing] = useState(false);
+  const [resizeHover, setResizeHover] = useState(false);
 
   const paint = useCallback(() => {
     const renderer = rendererRef.current;
@@ -115,32 +147,49 @@ export function CanvasView(): JSX.Element {
     });
 
     const unsub = store.subscribe(schedule);
+    const uninstallTrace = installTrace();
 
     // wheel must be non-passive to preventDefault
     const onWheel = (e: WheelEvent): void => {
+      // ALWAYS swallow the event, whatever we then decide to do with it.
+      // While editing, the pointer sits over the Lexical overlay — a sibling
+      // div, not the canvas — so a listener bound to the canvas never saw the
+      // event at all: the browser handled it instead and ctrl+wheel zoomed the
+      // whole page. Hence binding to the wrapper, which contains both.
       e.preventDefault();
       const { w, h } = sizeRef.current;
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
-      if (e.ctrlKey || e.metaKey) {
+      const zoom = e.ctrlKey || e.metaKey;
+      // While a topic is being edited the Lexical overlay owns the viewport:
+      // pan/zoom is blocked so the overlay transform never goes stale.
+      if (store.getSnapshot().editingId) {
+        trace.ignored("wheel", "editing", { zoom, deltaY: Math.round(e.deltaY) });
+        return;
+      }
+      if (zoom) {
         // Wheel-up zooms in (deltaY < 0). Flipped alongside pan so ctrl+scroll
         // stays coherent for users with inverted/natural-scroll deltas.
+        trace.applied("wheel:zoom", { deltaY: Math.round(e.deltaY) });
         store.zoomAt(sx, sy, e.deltaY < 0 ? 1.12 : 1 / 1.12, w, h);
       } else {
         // Scroll down → map content moves up (document-style pan). The sign is
         // flipped from the raw delta so the direction matches the OS-scroll
         // convention instead of appearing inverted.
+        trace.applied("wheel:pan", { deltaX: Math.round(e.deltaX), deltaY: Math.round(e.deltaY) });
         store.panBy(-e.deltaX, -e.deltaY);
       }
     };
-    canvas.addEventListener("wheel", onWheel, { passive: false });
+    const wheelTarget = canvas.parentElement ?? canvas;
+    wheelTarget.addEventListener("wheel", onWheel as EventListener, { passive: false });
 
     return () => {
       clearTimeout(fitTimer);
       ro.disconnect();
       unsub();
-      canvas.removeEventListener("wheel", onWheel);
+      wheelTarget.removeEventListener("wheel", onWheel as EventListener);
+      uninstallTrace();
       setExportPngHandler(null);
     };
   }, [store, schedule]);
@@ -173,7 +222,7 @@ export function CanvasView(): JSX.Element {
 
     // Panning is right-drag (or middle-drag / pan mode): left-click never
     // pans, it only selects or drags topics.
-    if (e.button === 2 || e.button === 1 || s.mode === "pan") {
+    if ((e.button === 2 || e.button === 1 || s.mode === "pan") && !s.editingId) {
       drag.panning = true;
       drag.dragging = null;
       setPanning(true);
@@ -185,6 +234,26 @@ export function CanvasView(): JSX.Element {
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
+
+    // Xmind-style width resize: grab the handle on the selected node's edge.
+    // Checked BEFORE the body hit test so the handle wins on the edge line
+    // (skipped while a relationship target is being picked).
+    const resizeHit = s.relFrom ? null : renderer.hitTestResize(rs, world.x, world.y);
+    if (resizeHit) {
+      const rect = renderer.nodeWorldRect(rs, resizeHit.id)!;
+      const n = store.doc.node(resizeHit.id)!;
+      drag.resizing = resizeHit.id;
+      drag.resizeSide = resizeHit.side;
+      drag.resizeStartWorldX = world.x;
+      drag.resizeStartWidth = n.style.width ?? Math.max(MIN_TOPIC_W, rect.w - shapeWidthAllowance(n));
+      drag.resizeStartX = rect.x;
+      store.beginResize(resizeHit.id);
+      store.select(resizeHit.id, { additive: false });
+      setResizing(true);
+      setResizeHover(false);
+      return;
+    }
+
     const hit = renderer.hitTest(rs, world.x, world.y);
 
     if (s.relFrom) {
@@ -210,11 +279,6 @@ export function CanvasView(): JSX.Element {
 
   const onPointerMove = (e: RPointerEvent): void => {
     const s0 = store.getSnapshot();
-    if (!dragRef.current.panning && !dragRef.current.dragging) {
-      const p = localPoint(e);
-      const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, p.x, p.y);
-      store.setHover(rendererRef.current?.hitTest(currentRenderState(), w.x, w.y) ?? null);
-    }
     const drag = dragRef.current;
     const { x, y } = localPoint(e);
     const dx = x - drag.lastX;
@@ -222,9 +286,34 @@ export function CanvasView(): JSX.Element {
     drag.lastX = x;
     drag.lastY = y;
 
+    if (drag.resizing) {
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const dx = world.x - drag.resizeStartWorldX;
+      if (drag.resizeSide === "left") {
+        // Right edge stays anchored; the left edge (position.x) follows the cursor.
+        store.setResizeDraft(drag.resizing, drag.resizeStartWidth - dx, {
+          anchorRight: true,
+          x: drag.resizeStartX + dx,
+        });
+      } else {
+        store.setResizeDraft(drag.resizing, drag.resizeStartWidth + dx);
+      }
+      drag.moved = true;
+      return;
+    }
     if (drag.panning) {
       store.panBy(dx, dy);
       return;
+    }
+    if (!drag.dragging) {
+      const p = localPoint(e);
+      const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, p.x, p.y);
+      const renderer = rendererRef.current;
+      const rs = currentRenderState();
+      const rh = renderer?.hitTestResize(rs, w.x, w.y) ?? null;
+      setResizeHover(!!rh);
+      store.setHover(rh ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
     }
     if (!drag.dragging) return;
     if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
@@ -250,6 +339,14 @@ export function CanvasView(): JSX.Element {
 
   const onPointerUp = (e: RPointerEvent): void => {
     const drag = dragRef.current;
+    if (drag.resizing) {
+      store.commitResize();
+      drag.resizing = null;
+      drag.resizeSide = null;
+      drag.moved = false;
+      setResizing(false);
+      return;
+    }
     if (drag.panning) {
       drag.panning = false;
       drag.dragging = null;
@@ -313,6 +410,9 @@ export function CanvasView(): JSX.Element {
   // -------------------------------------------------------------------------
 
   let editStyle: CSSProperties | null = null;
+  // The overlay wears the node's painted colors; resolving them in the
+  // renderer keeps branch palettes in one place.
+  let editColors: { fill: string; text: string } | undefined;
   if (state.editingId) {
     const n = store.doc.node(state.editingId);
     if (n) {
@@ -323,9 +423,8 @@ export function CanvasView(): JSX.Element {
         top: y,
         width: m.w * state.camera.scale,
         height: m.h * state.camera.scale,
-        fontSize: (n.style.fontSize ?? 14) * state.camera.scale,
-        lineHeight: 1.2,
       };
+      editColors = rendererRef.current?.nodeColors(currentRenderState(), state.editingId) ?? undefined;
     }
   }
 
@@ -334,91 +433,29 @@ export function CanvasView(): JSX.Element {
       <canvas
         ref={canvasRef}
         className="canvas"
-        style={{ cursor: panning ? "grabbing" : state.mode === "pan" ? "grab" : "default" }}
+        style={{
+          cursor: resizing || resizeHover ? "ew-resize" : panning ? "grabbing" : state.mode === "pan" ? "grab" : "default",
+        }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={() => store.setHover(null)}
+        onPointerLeave={() => {
+          store.setHover(null);
+          setResizeHover(false);
+        }}
         onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
-      {editStyle && <TopicEditor key={state.editingId ?? "topic-editor"} style={editStyle} scale={state.camera.scale} />}
+      {editStyle && state.editingId && (
+        <RichEditor
+          key={state.editingId}
+          node={store.doc.node(state.editingId)!}
+          style={editStyle}
+          scale={state.camera.scale}
+          colors={editColors}
+        />
+      )}
     </div>
-  );
-}
-
-function TopicEditor({ style, scale }: { style: CSSProperties; scale: number }): JSX.Element {
-  const store = useStore();
-  // The editing node is the one being typed into — with Tab the selection
-  // stays on the source node, so the editor must NOT read selectionNode.
-  const editingId = store.getSnapshot().editingId;
-  const node = editingId ? store.doc.node(editingId) : store.selectionNode;
-  const ref = useRef<HTMLTextAreaElement>(null);
-  const [value, setValue] = useState(node?.title ?? "");
-
-  useEffect(() => {
-    // Type/paste-to-edit: the store may hand us initial content that replaces
-    // the title (XMind-style). Otherwise select the existing text for a fresh edit.
-    const pending = store.consumePendingInsert();
-    if (pending !== null) {
-      setValue(pending);
-      store.setEditingDraft(pending);
-    } else {
-      store.setEditingDraft(value);
-      ref.current?.select();
-    }
-    ref.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store]);
-
-  // Keep the store's editing draft in sync with every keystroke. The canvas
-  // pointer handler clears editingId before the textarea blur fires, so the
-  // draft is what actually gets committed when the user clicks away.
-  useEffect(() => {
-    store.setEditingDraft(value);
-  }, [value, store]);
-
-  // Grow the box to contain the LIVE text (typed or pasted) so nothing is
-  // clipped while editing — after commit the canvas box is sized identically.
-  const live = node ? measureNode({ ...node, title: value }, overlayMeasurer) : { w: 0, h: 0 };
-  const box: CSSProperties = {
-    ...style,
-    width: Math.max(style.width as number, live.w * scale),
-    height: Math.max(style.height as number, live.h * scale),
-  };
-
-  const commit = (): void => {
-    store.commitEdit();
-  };
-
-  return (
-    <textarea
-      ref={ref}
-      className="topic-editor"
-      style={box}
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-          // Save while editing: commit the draft (editor stays open) so the
-          // browser "Save page" dialog never eats the keystroke.
-          e.preventDefault();
-          void store.saveNow();
-        } else if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          commit();
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          store.cancelEdit();
-        } else if (e.key === "Tab") {
-          e.preventDefault();
-          setValue((v) => v + "\t");
-        }
-      }}
-      onBlur={commit}
-      onPointerDown={(e) => e.stopPropagation()}
-    />
   );
 }

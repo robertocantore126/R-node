@@ -515,19 +515,169 @@ textarea:focus {
   touch-action: none;
 }
 
-.topic-editor {
+/* Rich-text topic editor (Lexical overlay — exactly one at any time).
+   The OUTER box only positions; the INNER box is laid out in world units and
+   scaled with a transform, so fonts, paddings, border and gaps match the
+   canvas pixel-for-pixel at every zoom. */
+.topic-rich-editor {
   position: absolute;
   z-index: 20;
+  overflow: visible;
+}
+
+.topic-rich-inner {
+  position: relative;
+  transform-origin: 0 0;
   border: 2px solid var(--accent);
   border-radius: 6px;
+  /* background/color come from RichEditor: while editing, the overlay must
+     wear the NODE's fill and resolved text color, not the app surface — the
+     canvas draws it that way at rest. */
   background: var(--surface);
   color: var(--text);
-  padding: 0 6px;
-  resize: none;
-  overflow: hidden;
-  text-align: center;
-  font-weight: inherit;
   box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 60px;
+  min-height: 28px;
+  overflow: visible;
+}
+
+/* Floating above the box (Xmind-style): the box height is measured for the
+   TEXT only, so the toolbar must not consume any of it — otherwise the text
+   area shrinks and the content scrolls/clips while the node view fits it.
+   It is a sibling of .topic-rich-inner, NOT a child: inside the scaled box it
+   inherited transform: scale(zoom) and became unreadable when zoomed out. */
+.topic-rich-toolbar {
+  position: absolute;
+  top: -32px;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  user-select: none;
+  white-space: nowrap;
+}
+
+.topic-rich-toolbar button {
+  background: none;
+  border: none;
+  border-radius: 3px;
+  padding: 1px 6px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.topic-rich-toolbar button:hover {
+  background: var(--hover);
+}
+
+.topic-rich-toolbar input[type="color"] {
+  width: 22px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+}
+
+.topic-rich-editable {
+  /* Natural height, vertically centered by the flex parent — the canvas draws
+     the text block centered in the node box too (startY = mid − totalH/2).
+     With flex: 1 the block sat at the top instead, which drifted on every
+     shape that inflates the box (diamond/hexagon/circle) and after a resize. */
+  flex: 0 0 auto;
+  outline: none;
+  /* NEVER scroll: a scrollbar would steal width and re-wrap the text mid-typing,
+     the one thing the canvas can never reproduce. The box already grows with
+     the draft. */
+  overflow: visible;
+  /* matches the canvas, which now breaks a token that cannot fit its column */
+  overflow-wrap: break-word;
+  font-family: inherit;
+}
+
+.topic-rich-editable p {
+  margin: 0;
+}
+
+/* WYSIWYG with the canvas: the same vertical rhythm the renderer uses.
+   Every block boundary (paragraph end AND list item end) gets the shared
+   --rnode-block-gap (BLOCK_GAP_FACTOR × line-height, set by RichEditor from
+   the same constants the canvas uses), and lists are compact — no
+   browser-default ul/ol margins or 40px indentation. */
+.topic-rich-editable ul,
+.topic-rich-editable ol {
+  margin: 0;
+  padding-left: 0;
+  /* The UA marker cannot be used: its width is UA-defined, so no CSS length
+     matches it and the canvas could never place a wrapped item's text at the
+     same x. We draw the bullet ourselves in a column of known width. */
+  list-style: none;
+  text-indent: 0;
+}
+
+/* Bullet column: the marker occupies exactly --rnode-bullet-w
+   (BULLET_WIDTH_EM em, the same constant wrapRunLines indents by), and the
+   negative text-indent pulls the first line back into it so continuation
+   lines hang under the text. Nesting comes from the PARENT item's
+   padding-left, so nested <ul> must stay at padding-left: 0. */
+.topic-rich-editable li {
+  margin: 0;
+  padding-left: var(--rnode-bullet-w, 1.2em);
+  text-indent: calc(-1 * var(--rnode-bullet-w, 1.2em));
+  /* centering a hanging indent is ill-defined — both sides pin lists to left */
+  text-align: left;
+}
+
+.topic-rich-editable li::before {
+  content: "•";
+  display: inline-block;
+  width: var(--rnode-bullet-w, 1.2em);
+}
+
+.topic-rich-editable li li::before {
+  content: "◦";
+}
+
+.topic-rich-editable li li li::before {
+  content: "▪";
+}
+
+/* Every block boundary gets the gap: between top-level blocks, between
+   sibling items, AND before a nested list — whose first item is :first-child
+   of its own <ul> and so matched none of the other two rules, leaving a
+   nested item 10.5px higher than the canvas drew it. */
+.topic-rich-editable > :not(:first-child),
+.topic-rich-editable li + li,
+.topic-rich-editable li > ul,
+.topic-rich-editable li > ol {
+  margin-top: var(--rnode-block-gap, 0.75em);
+}
+
+.rnode-text-bold {
+  font-weight: 700;
+}
+
+.rnode-text-italic {
+  font-style: italic;
+}
+
+.rnode-text-underline {
+  text-decoration: underline;
+}
+
+.rnode-text-strike {
+  text-decoration: line-through;
 }
 
 .rel-pending {

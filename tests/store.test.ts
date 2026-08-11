@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EditorStore } from "../src/editor/store";
+import { makeOp, type Op } from "../src/core/ops";
 import type { StorageAdapter } from "../src/persist/storage";
 
 const memoryAdapter: StorageAdapter = {
@@ -167,6 +168,77 @@ describe("type-to-edit", () => {
     expect(store.getSnapshot().sync).toBe("saved");
   });
 
+  it("commits a rich-text draft as a setTitle op with titleRuns", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+    store.startEdit(main.id);
+
+    // The Lexical overlay pushes runs on every keystroke (bold + color here).
+    store.setEditingDraftRuns([
+      { text: "Rich ", bold: true },
+      { text: "text", color: "#ff0000" },
+    ]);
+    store.commitEdit();
+
+    const node = store.doc.node(main.id)!;
+    expect(node.title).toBe("Rich text");
+    expect(node.titleRuns).toEqual([
+      { text: "Rich ", bold: true },
+      { text: "text", color: "#ff0000" },
+    ]);
+    expect(store.getSnapshot().editingId).toBeNull();
+  });
+
+  it("undo restores the exact pre-edit runs; redo reapplies them", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    // Give the node a rich baseline BEFORE editing.
+    store.execOps([
+      makeOp<Op & { type: "setTitle" }>("setTitle", {
+        id: main.id,
+        title: "Baseline",
+        prev: main.title,
+        titleRuns: [{ text: "Base", italic: true }],
+        prevRuns: main.titleRuns,
+      }),
+    ]);
+    const baselineRuns = store.doc.node(main.id)!.titleRuns;
+
+    store.select(main.id);
+    store.startEdit(main.id);
+    store.setEditingDraftRuns([{ text: "Bold new title", bold: true }]);
+    store.commitEdit();
+    expect(store.doc.node(main.id)!.title).toBe("Bold new title");
+
+    store.undo();
+    // the original rich runs come back exactly
+    expect(store.doc.node(main.id)!.title).toBe("Baseline");
+    expect(store.doc.node(main.id)!.titleRuns).toEqual(baselineRuns);
+
+    store.redo();
+    expect(store.doc.node(main.id)!.title).toBe("Bold new title");
+    expect(store.doc.node(main.id)!.titleRuns?.[0]?.bold).toBe(true);
+  });
+
+  it("cancelEdit discards rich runs and restores the original", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+    store.startEdit(main.id);
+    const before = store.doc.node(main.id)!.title;
+    store.setEditingDraftRuns([{ text: "discarded", italic: true }]);
+    store.cancelEdit();
+    expect(store.doc.node(main.id)!.title).toBe(before);
+    expect(store.getSnapshot().editingId).toBeNull();
+  });
+
   it("pastes plain text into the selected topic (falls back from map paste)", async () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();
@@ -264,5 +336,93 @@ describe("save / load file", () => {
     await store.saveNow();
     expect(blobs).toHaveLength(1); // the file is written with current content
     expect(store.getSnapshot().sync).toBe("saved");
+  });
+});
+
+describe("canvas resize drag", () => {
+  it("commits a live width drag as ONE setStyle op with exact undo", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const id = root.id;
+    const before = { ...store.doc.node(id)!.style };
+
+    store.beginResize(id);
+    store.setResizeDraft(id, 200);
+    store.setResizeDraft(id, 180);
+    expect(store.doc.node(id)!.style.width).toBe(180);
+    store.commitResize();
+
+    // exactly one op in history (two live drafts collapsed into one commit)
+    expect(store.getSnapshot().canUndo).toBe(true);
+    const node = store.doc.node(id)!;
+    expect(node.style.width).toBe(180);
+
+    store.undo();
+    expect(store.doc.node(id)!.style.width).toBeUndefined();
+    expect(store.doc.node(id)!.style).toEqual(before);
+  });
+
+  it("clamps the width to the allowed range and no-ops on a click without drag", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = store.sheet.rootNodeId;
+    store.beginResize(id);
+    store.setResizeDraft(id, 5); // below MIN_TOPIC_W
+    expect(store.doc.node(id)!.style.width).toBe(84);
+    store.setResizeDraft(id, 5000); // above the 640 cap
+    expect(store.doc.node(id)!.style.width).toBe(640);
+    store.commitResize();
+    expect(store.doc.node(id)!.style.width).toBe(640);
+
+    // a pointer-down/up with no move must not create an op
+    const before = { ...store.doc.node(id)!.style };
+    store.beginResize(id);
+    store.commitResize();
+    expect(store.doc.node(id)!.style).toEqual(before);
+    const historyOps = store.getSnapshot().canUndo;
+    store.undo();
+    store.undo();
+    expect(store.getSnapshot().canUndo).toBe(false);
+    expect(historyOps).toBe(true);
+  });
+
+  it("left-edge drag anchors the right edge: floating node keeps width + position, one undo restores both", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createFloatingAt(500, 200);
+    store.cancelEdit(); // leave the auto-opened editor
+    const f = Object.values(store.sheet.nodes).find((n) => n.type === "floating")!;
+    store.select(f.id);
+    store.beginResize(f.id);
+    store.setResizeDraft(f.id, 220, { anchorRight: true, x: 480 }); // dragged 20 left
+    store.commitResize();
+
+    const node = store.doc.node(f.id)!;
+    expect(node.style.width).toBe(220);
+    expect(node.position.x).toBe(480);
+    expect(node.position.manual).toBe(true);
+
+    store.undo();
+    const undone = store.doc.node(f.id)!;
+    expect(undone.style.width).toBeUndefined();
+    expect(undone.position.x).toBe(500);
+  });
+
+  it("left-edge drag on an auto-layout node keeps the width but returns the position to the layout slot", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    const origX = main.position.x;
+    store.beginResize(main.id);
+    store.setResizeDraft(main.id, 260, { anchorRight: true, x: origX - 40 });
+    store.commitResize();
+
+    const node = store.doc.node(main.id)!;
+    expect(node.style.width).toBe(260);
+    // auto node: position restored (not manual) — width is what survives
+    expect(node.position.x).toBe(origX);
+    expect(node.position.manual).toBe(false);
+
+    store.undo();
+    expect(store.doc.node(main.id)!.style.width).toBeUndefined();
   });
 });

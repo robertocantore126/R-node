@@ -6,9 +6,11 @@
  * HTML overlay (allowed by the architecture) — the renderer skips the title
  * of the node being edited so the overlay doesn't double-paint.
  */
-import type { MindNode, Sheet, StructureType, Orientation } from "../core/types";
-import { createCanvasTextMeasurer, measureNode, wrapLines, type TextMeasurer } from "../layout/measure";
+import type { MindNode, Sheet, StructureType, Orientation, TextRun } from "../core/types";
+import { nodeRuns } from "../core/text";
+import { createCanvasTextMeasurer, FONT_STACK, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
+import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
 export interface DropIndicator {
@@ -43,6 +45,19 @@ export class Renderer {
   private dpr = 1;
   /** Same measurer the layout engine uses — extents always agree. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
+  /** Camera scale of the current frame (used to pick the text-cache resolution). */
+  private curScale = 1;
+  /**
+   * Bitmap cache for node titles: the styled text of a node is rendered once
+   * into an offscreen canvas and blitted with drawImage during pan/zoom — the
+   * text layout is NOT recomputed every frame. The cache key covers the runs,
+   * style, resolved color and a scale bucket, so it is invalidated only when
+   * the title/content actually changes (or the zoom crosses a power-of-two
+   * boundary, where the bitmap is re-rendered sharper).
+   */
+  private textCache = new Map<string, { canvas: HTMLCanvasElement; w: number; h: number }>();
+  private textHits = 0;
+  private textMisses = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -107,36 +122,70 @@ export class Renderer {
     ctx.fillRect(0, 0, state.viewW, state.viewH);
 
     const s = state.camera.scale;
+    this.curScale = s;
     const ox = state.viewW / 2 - state.camera.x * s;
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
     this.drawGrid(theme, state);
 
+    const tStart = typeof performance !== "undefined" ? performance.now() : 0;
+    this.textHits = 0;
+    this.textMisses = 0;
+
     const placed = this.placedNodes(state);
     const byId = new Map(placed.map((p) => [p.node.id, p]));
 
+    // Viewport in world units, with the same 40px margin placedNodes uses.
+    const vw = state.viewW / s;
+    const vh = state.viewH / s;
+    const viewMinX = state.camera.x - vw / 2 - 40;
+    const viewMaxX = state.camera.x + vw / 2 + 40;
+    const viewMinY = state.camera.y - vh / 2 - 40;
+    const viewMaxY = state.camera.y + vh / 2 + 40;
+    /**
+     * A line between two boxes is on screen whenever the box that CONTAINS
+     * both of them is — not only when both endpoints are individually visible.
+     * Requiring both is what made a connector vanish as soon as its parent
+     * scrolled off, while the child was still in view.
+     */
+    const linkVisible = (a: Placed, b: Placed): boolean =>
+      state.showHidden === true ||
+      (Math.max(a.x + a.w, b.x + b.w) >= viewMinX &&
+        Math.min(a.x, b.x) <= viewMaxX &&
+        Math.max(a.y + a.h, b.y + b.h) >= viewMinY &&
+        Math.min(a.y, b.y) <= viewMaxY);
+
     // 1) relationships
+    let rels = 0;
+    let relsDrawn = 0;
     for (const rel of state.sheet.relationships) {
+      rels++;
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
-      if (a && b) this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label);
+      if (a && b && linkVisible(a, b)) {
+        relsDrawn++;
+        this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label);
+      }
     }
 
     // 2) connectors
+    let links = 0;
+    let linksDrawn = 0;
     for (const p of placed) {
-      if (!p.visible) continue;
-      if (p.node.parentId) {
-        const parent = byId.get(p.node.parentId);
-        if (parent && parent.visible)
-          this.drawConnector(
-            parent,
-            p,
-            state.sheet.structure.structureType,
-            state.sheet.structure.orientation,
-            this.branchColor(theme, p.node, state.sheet)
-          );
-      }
+      if (!p.node.parentId) continue;
+      const parent = byId.get(p.node.parentId);
+      if (!parent) continue;
+      links++;
+      if (!linkVisible(parent, p)) continue;
+      linksDrawn++;
+      this.drawConnector(
+        parent,
+        p,
+        state.sheet.structure.structureType,
+        state.sheet.structure.orientation,
+        this.branchColor(theme, p.node, state.sheet)
+      );
     }
 
     // 3) nodes
@@ -152,6 +201,23 @@ export class Renderer {
     }
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+
+    // Per-frame counters: they are what separates "not drawn" from "drawn but
+    // invisible" when someone reports something missing on screen.
+    trace.render(
+      {
+        scale: s,
+        nodes: placed.length,
+        visible: placed.reduce((a, p) => a + (p.visible ? 1 : 0), 0),
+        rels,
+        relsDrawn,
+        links,
+        linksDrawn,
+        textHits: this.textHits,
+        textMisses: this.textMisses,
+      },
+      (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -225,6 +291,26 @@ export class Renderer {
     return n.type === "subtopic" ? theme.branchSoft[this.branchIndex(n, state.sheet)] : color;
   }
 
+  /**
+   * The fill and text color a node is actually painted with. The editing
+   * overlay wears these so the box does not change appearance the moment you
+   * double-click it — resolving branch palettes here keeps the one source of
+   * truth in the renderer.
+   */
+  nodeColors(state: RenderState, id: string): { fill: string; text: string } | null {
+    const n = state.sheet.nodes[id];
+    if (!n) return null;
+    const theme = THEMES[state.themeName];
+    const fill =
+      n.style.fill ??
+      (n.type === "central"
+        ? theme.rootFill
+        : n.type === "subtopic"
+          ? theme.branchSoft[this.branchIndex(n, state.sheet)]
+          : this.branchColor(theme, n, state.sheet));
+    return { fill, text: n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text) };
+  }
+
   private branchColor(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     const branchRootId = this.branchRoot(n, sheet);
     const branchRoot = sheet.nodes[branchRootId];
@@ -292,6 +378,24 @@ export class Renderer {
       ctx.setLineDash([]);
       const pad = 3;
       ctx.strokeRect(p.x - pad, p.y - pad, p.w + pad * 2, p.h + pad * 2);
+
+      // Xmind-style resize handles on BOTH edges (hidden while editing — the
+      // HTML overlay owns the node then). Dragging changes the width and the
+      // text re-wraps; see hitTestResize + store.setResizeDraft. Outline only
+      // (a filled square reads as a purple blob on the node); a white
+      // under-stroke keeps them visible on dark/same-colored fills (e.g. the
+      // indigo central topic) without adding a fill.
+      const hs = 9;
+      const hy = p.y + p.h / 2 - hs / 2;
+      for (const hx of [p.x - hs / 2, p.x + p.w - hs / 2]) {
+        this.roundRect(ctx, hx, hy, hs, hs, 2);
+        ctx.strokeStyle = theme.background;
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
     }
     if (state.hoverId === n.id && !selected) {
       ctx.strokeStyle = theme.selection;
@@ -312,7 +416,8 @@ export class Renderer {
       ctx.fill();
     }
 
-    // text
+    // text (rich, bitmap-cached). The node being edited is skipped: the
+    // HTML overlay owns it, no ghosting.
     if (!editing) this.drawText(theme, p, textColor);
 
     // collapsed badge (mirror to the left when the branch is left-side)
@@ -402,45 +507,108 @@ export class Renderer {
   }
 
   private drawText(_theme: RenderTheme, p: Placed, color: string): void {
-    const ctx = this.ctx;
     const n = p.node;
-    const size = n.style.fontSize ?? 14;
-    const weight = n.style.fontWeight ?? 400;
-    const family = n.style.fontFamily ?? "system-ui, -apple-system, sans-serif";
-    ctx.font = `${n.style.italic ? "italic " : ""}${weight} ${size}px ${family}`;
-    ctx.fillStyle = color;
-    ctx.textAlign = n.style.align === "left" ? "left" : "center";
-    ctx.textBaseline = "middle";
-
     const pad = n.style.padding ?? 10;
-    const maxW = p.w - pad * 2 - 6;
-    const lines = wrapLines(n.title, maxW, this.measurer, n.style);
-    const lineH = size * 1.25;
-    const startY = p.y + p.h / 2 - ((lines.length - 1) * lineH) / 2;
-    const startX = n.style.align === "left" ? p.x + pad : p.x + p.w / 2;
-
-    for (let i = 0; i < lines.length; i++) {
-      const y = startY + i * lineH;
-      const w = ctx.measureText(lines[i]).width;
-      const lineX = n.style.align === "left" ? startX : startX - w / 2;
-      if (n.style.underline) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(lineX, y + size * 0.55);
-        ctx.lineTo(lineX + w, y + size * 0.55);
-        ctx.stroke();
-      }
-      ctx.fillText(lines[i], startX, y);
-      if (n.style.strikethrough) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(lineX, y);
-        ctx.lineTo(lineX + w, y);
-        ctx.stroke();
+    const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
+    // Resolution bucket: re-render the bitmap only when the zoom crosses a
+    // power-of-two boundary; between boundaries pan/zoom just blits.
+    const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
+    const key = this.textCacheKey(n, color, maxW, res);
+    let entry = this.textCache.get(key);
+    if (entry) this.textHits++;
+    if (!entry) {
+      this.textMisses++;
+      entry = this.renderTextBitmap(n, color, maxW, res);
+      this.textCache.set(key, entry);
+      if (this.textCache.size > 5000) {
+        const first = this.textCache.keys().next().value;
+        if (first !== undefined) this.textCache.delete(first);
       }
     }
+    const totalH = entry.h;
+    const startY = p.y + p.h / 2 - totalH / 2;
+    const startX = p.x + pad;
+    if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, startX, startY, entry.w, entry.h);
+  }
+
+  private textCacheKey(n: MindNode, color: string, maxW: number, res: number): string {
+    const st = n.style;
+    const runs = JSON.stringify(n.titleRuns ?? n.title);
+    return `${n.id}|${runs}|${st.fontSize ?? 14}|${st.fontFamily ?? ""}|${st.fontWeight ?? 400}|${st.italic ? 1 : 0}|${st.align ?? "center"}|${st.padding ?? 10}|${st.underline ? 1 : 0}|${st.strikethrough ? 1 : 0}|${color}|${maxW}|${res}`;
+  }
+
+  /** Render the styled title once into an offscreen canvas (world-unit sized, `res` pixels per unit). */
+  private renderTextBitmap(n: MindNode, color: string, maxW: number, res: number): { canvas: HTMLCanvasElement; w: number; h: number } {
+    const size = n.style.fontSize ?? 14;
+    const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, this.measurer, n.style);
+    let totalH = 0;
+    for (const line of lines) {
+      const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
+      totalH += lh + (line.gapPx ?? 0);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(maxW * res));
+    canvas.height = Math.max(1, Math.ceil(totalH * res));
+    const bctx = canvas.getContext("2d");
+    if (!bctx) return { canvas, w: maxW, h: totalH };
+    bctx.scale(res, res);
+    bctx.textBaseline = "alphabetic";
+
+    const family = n.style.fontFamily ?? FONT_STACK;
+    const baseWeight = n.style.fontWeight ?? 400;
+    const strike = (n.style.strikethrough ?? false);
+    const fontOf = (seg: { run: TextRun }): string => {
+      const runSize = seg.run.fontSize ?? size;
+      const bold = (seg.run.bold ?? false) || baseWeight >= 700;
+      const italic = (seg.run.italic ?? false) || (n.style.italic ?? false);
+      return `${italic ? "italic " : ""}${bold ? 700 : baseWeight} ${runSize}px ${family}`;
+    };
+    let yCursor = 0;
+    for (const line of lines) {
+      const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
+      yCursor += line.gapPx ?? 0;
+
+      // The line box and its baseline come from wrapRunLines, which builds
+      // them with the CSS rule (per-inline-box half-leading over every run
+      // plus the strut). Recomputing them here — with ONE half-leading for the
+      // whole line — is what used to drift from the editor on mixed sizes.
+      const baselineY = yCursor + (line.baseline ?? lh * 0.8);
+
+      // 2) draw the bullet in its own fixed-width column, then the text.
+      //    List items are ALWAYS left-aligned (as in the overlay's CSS):
+      //    centering a hanging indent is ill-defined and the two sides could
+      //    never agree on it.
+      const indent = line.indent ?? 0;
+      if (line.bullet) {
+        bctx.font = fontOf({ run: line.bullet.run });
+        bctx.fillStyle = line.bullet.run.color ?? color;
+        bctx.fillText(line.bullet.char, line.bullet.x, baselineY);
+      }
+      const isList = indent > 0 || !!line.bullet;
+      let x = n.style.align === "left" || isList ? indent : (maxW - line.width) / 2;
+      for (const seg of line.segments) {
+        const runSize = seg.run.fontSize ?? size;
+        const bold = (seg.run.bold ?? false) || baseWeight >= 700;
+        bctx.font = fontOf(seg);
+        bctx.fillStyle = seg.run.color ?? color;
+        const w = this.measurer.measure(seg.text, { fontSize: runSize, fontFamily: family, fontWeight: bold ? 700 : baseWeight, italic: (seg.run.italic ?? false) || (n.style.italic ?? false) }).width;
+        bctx.fillText(seg.text, x, baselineY);
+        const underline = (seg.run.underline ?? false) || (n.style.underline ?? false);
+        if (underline || strike) {
+          bctx.strokeStyle = seg.run.color ?? color;
+          bctx.lineWidth = 1;
+          bctx.beginPath();
+          // underline ~0.1em below the baseline, strikethrough ~0.28em above
+          const yy = underline ? baselineY + runSize * 0.1 : baselineY - runSize * 0.28;
+          bctx.moveTo(x, yy);
+          bctx.lineTo(x + w, yy);
+          bctx.stroke();
+        }
+        x += w;
+      }
+      yCursor += lh;
+    }
+    return { canvas, w: maxW, h: totalH };
   }
 
   private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string): void {
@@ -504,6 +672,27 @@ export class Renderer {
     return { x: p.x * s + ox, y: p.y * s + oy, w: p.w * s, h: p.h * s };
   }
 
+  /**
+   * Hit test for the resize handles: small squares centered on the left and
+   * right edges of any SELECTED node (the node being edited is excluded).
+   * Returns { id, side } or null. Checked before the body hit test so the
+   * handles win even where they overlap the node edge.
+   */
+  hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {
+    const hs = 12; // grab box slightly larger than the drawn 9px handle
+    for (const id of state.selection) {
+      if (state.editingId === id) continue;
+      const rect = this.nodeWorldRect(state, id);
+      if (!rect) continue;
+      const hy = rect.y + rect.h / 2 - hs / 2;
+      for (const side of ["left", "right"] as const) {
+        const hx = (side === "left" ? rect.x : rect.x + rect.w) - hs / 2;
+        if (worldX >= hx && worldX <= hx + hs && worldY >= hy && worldY <= hy + hs) return { id, side };
+      }
+    }
+    return null;
+  }
+
   nodeWorldRect(state: RenderState, id: string): { x: number; y: number; w: number; h: number } | null {
     const p = this.placedNodes(state).find((p) => p.node.id === id);
     if (!p) return null;
@@ -528,6 +717,7 @@ export class Renderer {
       ctx.fillStyle = theme.background;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
+    this.curScale = scale;
     ctx.setTransform(scale, 0, 0, scale, -bounds.minX * scale, -bounds.minY * scale);
     this.paintFull(ctx, state, theme);
     return canvas;

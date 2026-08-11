@@ -10,7 +10,7 @@
  * applyOp mutates the sheet in place. inverseOf returns the operation(s)
  * that exactly reverse it, which is what the History stack uses for undo.
  */
-import type { MindNode, Position, Relationship, Sheet, StructureConfig, Style, TaskInfo } from "./types";
+import type { MindNode, Position, Relationship, Sheet, StructureConfig, Style, TaskInfo, TextRun } from "./types";
 import { nowIso } from "./doc";
 
 // ---------------------------------------------------------------------------
@@ -18,10 +18,10 @@ import { nowIso } from "./doc";
 // ---------------------------------------------------------------------------
 
 export type Op =
-  | { opId: string; actorId: string; ts: string; type: "createNode"; id: string; nodeType: MindNode["type"]; parentId: string | null; index: number; title: string; style?: Style; task?: TaskInfo | null; position?: { x: number; y: number; manual: boolean } }
+  | { opId: string; actorId: string; ts: string; type: "createNode"; id: string; nodeType: MindNode["type"]; parentId: string | null; index: number; title: string; titleRuns?: TextRun[]; style?: Style; task?: TaskInfo | null; position?: { x: number; y: number; manual: boolean } }
   | { opId: string; actorId: string; ts: string; type: "restoreNode"; id: string; parentId: string | null; index: number; subtree: MindNode[]; removedRelationships: Relationship[] }
   | { opId: string; actorId: string; ts: string; type: "deleteNode"; id: string; parentId: string | null; index: number; subtree: MindNode[]; removedRelationships: Relationship[] }
-  | { opId: string; actorId: string; ts: string; type: "setTitle"; id: string; title: string; prev: string }
+  | { opId: string; actorId: string; ts: string; type: "setTitle"; id: string; title: string; prev: string; titleRuns?: TextRun[]; prevRuns?: TextRun[] }
   | { opId: string; actorId: string; ts: string; type: "setStyle"; id: string; style: Style; prev: Style }
   | { opId: string; actorId: string; ts: string; type: "setPosition"; id: string; x: number; y: number; manual: boolean; offsetX?: number; offsetY?: number; prev: Position }
   | { opId: string; actorId: string; ts: string; type: "setCollapsed"; id: string; collapsed: boolean; prev: boolean }
@@ -59,6 +59,7 @@ export function cloneNode(n: MindNode): MindNode {
     task: n.task ? { ...n.task } : null,
     metadata: { ...n.metadata },
     position: { ...n.position },
+    titleRuns: n.titleRuns ? n.titleRuns.map((r) => ({ ...r })) : undefined,
   };
 }
 
@@ -77,6 +78,7 @@ export function applyOp(sheet: Sheet, op: Op): void {
         parentId: op.parentId,
         childrenIds: [],
         title: op.title,
+        titleRuns: op.titleRuns ? op.titleRuns.map((r) => ({ ...r })) : undefined,
         position: op.position ?? { x: 0, y: 0, manual: false },
         style: op.style ?? {},
         collapsed: false,
@@ -111,9 +113,13 @@ export function applyOp(sheet: Sheet, op: Op): void {
       sheet.relationships = sheet.relationships.filter((r) => !op.removedRelationships.some((rr) => rr.id === r.id));
       break;
     }
-    case "setTitle":
-      nodes[op.id].title = op.title;
+    case "setTitle": {
+      const node = nodes[op.id];
+      node.title = op.title;
+      if (op.titleRuns) node.titleRuns = op.titleRuns.map((r) => ({ ...r }));
+      else delete node.titleRuns;
       break;
+    }
     case "setStyle":
       nodes[op.id].style = { ...op.style };
       break;
@@ -186,7 +192,7 @@ export function inverseOf(op: Op, meta?: OpMeta): Op[] {
     case "restoreNode":
       return [makeOp<Op & { type: "deleteNode" }>("deleteNode", { id: op.id, parentId: op.parentId, index: op.index, subtree: op.subtree, removedRelationships: op.removedRelationships }, m)];
     case "setTitle":
-      return [makeOp<Op & { type: "setTitle" }>("setTitle", { id: op.id, title: op.prev, prev: op.title }, m)];
+      return [makeOp<Op & { type: "setTitle" }>("setTitle", { id: op.id, title: op.prev, prev: op.title, titleRuns: op.prevRuns, prevRuns: op.titleRuns }, m)];
     case "setStyle":
       return [makeOp<Op & { type: "setStyle" }>("setStyle", { id: op.id, style: op.prev, prev: op.style }, m)];
     case "setPosition":

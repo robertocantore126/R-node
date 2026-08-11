@@ -13,6 +13,9 @@ nothing is copied from other mind-mapping products.
   arrows to navigate, every action undoable.
 - **Local-first** — documents save when you decide (Ctrl+S, no hidden autosave); a desktop build with
   SQLite persistence is scaffolded and ready.
+- **Rich text on the canvas** — bold, italic, colours, headings and lists live
+  in the topic itself, drawn by the canvas and edited in an overlay that
+  matches it pixel for pixel (see [Text](#text-rich-text-on-a-canvas)).
 - **Extensible by design** — a pure, framework-free core (document model,
   operation system, layout engine) that web, desktop and mobile clients share.
 
@@ -20,8 +23,9 @@ nothing is copied from other mind-mapping products.
 
 ## Status
 
-**Phase 1 (core editor) — implemented and tested.** 53 unit tests passing,
-typecheck clean, performance-verified at 10k topics.
+**Phase 1 (core editor) — implemented and tested.** 101 unit tests passing,
+typecheck clean, performance-verified at 10k topics, editor/canvas text parity
+measured at 0 divergences.
 
 | | |
 |---|---|
@@ -29,10 +33,11 @@ typecheck clean, performance-verified at 10k topics.
 | Operation system | every edit is an idempotent, replayable op with an inverse — undo/redo for free, collaboration-ready |
 | Rendering | single `<canvas>`, viewport culling, shapes, curved connectors, relationships, PNG export |
 | Layout | mind map with balanced branches, exact measured extents, no overlap by construction |
+| Text | rich text per topic (`TextRun[]`): bold/italic/underline, colours, heading sizes, nested bullet lists — drawn by the canvas, edited in a single Lexical overlay |
 | Editing | create / sibling / child / promote, rename, delete, duplicate, copy/paste/cut, drag-and-drop reparenting |
 | Structure ops | collapse/expand, sort siblings, tasks, notes, styles, relationships |
-| Workspace | outliner, inspector, command palette, search, themes, Zen mode, manual save |
-| Import/export | JSON, Markdown, PNG |
+| Workspace | outliner, inspector, command palette, search, light theme, Zen mode, manual save |
+| Import/export | JSON, Markdown, PNG; clipboard import sanitized from Word / Google Docs / Draw.io |
 
 ---
 
@@ -47,6 +52,10 @@ npm test           # run the test suite (vitest)
 npm run typecheck  # TypeScript check only
 npm run build      # typecheck + production build → dist/
 ```
+
+The dev server also serves the **text parity harness** at
+`http://localhost:5173/dev/parity.html`, which must report 0 diverging cases
+(see [Text](#text-rich-text-on-a-canvas)).
 
 Open `http://localhost:5173` and start typing — select the central topic and
 press **Tab** to add the first branch. The sample roadmap document shows the
@@ -85,9 +94,14 @@ can be rebound without touching the editor logic.
 
 ## Architecture
 
-See `docs/ARCHITECTURE.md` for the full design document (PRD, information
-architecture, schema, API design, sync strategy, layout strategy,
-import/export, security model, phased plan, risk register, open decisions).
+Documentation map:
+
+| Document | What it is for |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | full design document: PRD, information architecture, schema, API design, sync and layout strategy, security model, phased plan, risk register |
+| [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) | **read before changing code** — invariants, the editor↔canvas parity contract, traps already paid for, definition of done |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | the ordered task list, one task at a time |
+| [docs/RICH_TEXT_EDITOR.md](docs/RICH_TEXT_EDITOR.md) | how rich text is modelled, measured, drawn and edited |
 
 The code is split into clean, framework-free layers — only the UI uses React:
 
@@ -99,6 +113,7 @@ src/
 ├── editor/    store (orchestration), keyboard shortcuts, context, export bridge
 ├── persist/   storage adapters (localStorage now; IndexedDB, SQLite next)
 └── ui/        React shell: canvas, sidebar, topbar, outliner, inspector, palette
+dev/           text parity harness (development only, not shipped)
 ```
 
 ### Document model & operations
@@ -135,13 +150,42 @@ Pure functions in `src/layout/`:
 Manual positions are preserved; layout is derived data and never pollutes
 undo history.
 
+### Text: rich text on a canvas
+
+A topic title is not a string but a sequence of styled runs (`TextRun[]`), so
+one topic can carry bold, italics, colours, heading sizes and nested bullet
+lists. Keeping that on a single canvas means two renderers must agree:
+
+- **the canvas** draws every topic at rest, with a per-topic bitmap cache so
+  pan and zoom only blit;
+- **one Lexical overlay** — never more than one — owns the topic being edited,
+  and the canvas skips it so nothing is drawn twice.
+
+The two share the measurement (`wrapRunLines`), the constants
+(`LINE_HEIGHT_FACTOR`, `BLOCK_GAP_FACTOR`, `BULLET_WIDTH_EM`, `FONT_STACK`,
+`TEXT_INSET`) and the resolved colours — the overlay wears the node's own fill
+and text colour, so double-clicking a topic does not change how it looks.
+
+Because the canvas *imitates* the browser's text layout, that agreement is
+**measured, not assumed**: `dev/parity.html` renders a corpus of cases into the
+real editable DOM, extracts the browser's true line boxes character by
+character, and diffs them against the canvas measurement — break points,
+baselines, line advances, lefts and total height. Current state: 16 of 16
+cases aligned, worst residual 0.5px.
+
+Pasting from Word, Google Docs or Draw.io is sanitized into that model:
+structure and emphasis survive, scripts, layout CSS and foreign fonts do not.
+
+Full detail in [docs/RICH_TEXT_EDITOR.md](docs/RICH_TEXT_EDITOR.md).
+
 ### Performance
 
-Verified with a permanent perf suite (`tests/perf.test.ts`) and live browser
-measurements at 10k topics: ops are linear (~0.004 ms/op), layout ~11 ms,
-full generation + paint ~242 ms, sustained rendering ~9 ms/frame even at
-minimum zoom. The real constraint at scale is storage (a 10k map is ~3.6 MB
-in localStorage), which is exactly what the IndexedDB/SQLite adapters solve.
+Verified with a permanent perf suite (`tests/perf.test.ts`). At 10k topics ops
+stay linear (~0.005 ms/op); the numbers the suite prints on each run are the
+reference — it reports `applyOps`, `layout`, `writeback` and tree walks
+separately at 1k / 5k / 10k so a regression is attributable to one subsystem.
+The real constraint at scale is storage (a 10k map is ~3.6 MB in
+localStorage), which is exactly what the IndexedDB/SQLite adapters solve.
 
 ---
 
@@ -177,10 +221,51 @@ is installed.
 npm test
 ```
 
-53 tests across 6 suites: document operations, undo/redo round-trips,
+101 tests across 8 suites: document operations, undo/redo round-trips,
 reparenting and subtree moves, layout geometry (no-overlap, straddle,
-size-aware balance, upward propagation), measurement math, viewport math,
-and performance ceilings at 1k/5k/10k topics.
+size-aware balance, upward propagation), text measurement (line boxes, block
+gaps, bullet columns, mid-word breaks), the Lexical ↔ runs bridge (including
+round-trip idempotence), clipboard sanitization, viewport math, and
+performance ceilings at 1k/5k/10k topics.
+
+Text parity between the canvas and the editor is checked separately, in a real
+browser, at `http://localhost:5173/dev/parity.html` — jsdom cannot do it
+because it has no layout engine. Automating it is task T2 in
+[docs/ROADMAP.md](docs/ROADMAP.md).
+
+---
+
+## Reporting a bug
+
+Don't describe the symptom — capture it. While running `npm run dev` the app
+records its own decisions in a rolling buffer.
+
+**When something looks wrong, press the ⏺ button in the toolbar** (or
+`Ctrl+Shift+D`, which also asks what you expected). A `rnode-trace-*.json`
+file downloads. Attach that file. It carries the last few hundred events:
+which inputs were acted on, which were deliberately ignored *and why*, what
+the renderer actually drew each frame, how long layout took, and any errors —
+with the events that preceded them.
+
+Both capture **and then reset**, in that order: by the time you reach for the
+button the bug has already happened, so clearing first would throw away the
+evidence. Because the buffer restarts, each capture covers only what happened
+since the previous one — hit it once to get a clean slate, reproduce, hit it
+again, and the second file contains the repro and nothing else.
+
+Console entry points: `__rnodeTrace.capture()` returns the same bundle as an
+object (handy for inspecting in place), `__rnodeTrace.download()` skips the
+prompt, `__rnodeTrace.clear()` resets, `__rnodeTrace.enabled` tells you
+whether recording is on.
+
+The tracer is **development-only** — it is compiled out of production builds,
+so a `npm run build` bundle records nothing.
+
+Why this instead of a written report: the decisive facts are invisible from
+outside the app. "The connector lines disappear when I pan" cannot tell anyone
+whether the renderer skipped them or drew them where you could not see them —
+two different bugs. A capture answers that in one line. How to read one is in
+[docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) §4bis.
 
 ---
 
@@ -188,7 +273,8 @@ and performance ceilings at 1k/5k/10k topics.
 
 - **Phase 1 — Core editor (done):** document model, ops + undo/redo, canvas
   renderer, mind-map layout, keyboard + mouse editing, drag-and-drop,
-  outliner, inspector, palette, autosave, JSON/Markdown/PNG export.
+  outliner, inspector, palette, manual save, rich text topics with measured
+  editor/canvas parity, JSON/Markdown/PNG export.
 - **Phase 2 — Visual richness:** themes/styles polish, markers, labels, rich
   notes, boundaries, summaries, relationships UI, callouts, attachments.
 - **Phase 3 — Structures:** logic chart, tree chart, org chart, timeline,

@@ -4,3 +4,9 @@ src-tauri/target/
 src-tauri/gen/
 *.log
 .DS_Store
+
+# Generated code snapshots for AI-assisted review. They go stale the moment
+# anything is committed, and a stale snapshot read as documentation is worse
+# than no snapshot: regenerate on demand instead of tracking them.
+repomix-output.xml
+docs/layout-bundle.html
