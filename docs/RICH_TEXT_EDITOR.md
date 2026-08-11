@@ -5,8 +5,9 @@ di R-node: come il testo dei nodi viene modellato, misurato, disegnato sul
 canvas e modificato tramite l'overlay Lexical, e come i due mondi (browser e
 canvas) restano allineati.
 
-> Stato: in sviluppo attivo sul branch `rich-text`. Le sezioni *Limitazioni
-> note* elencano i punti ancora aperti.
+> Stato: in sviluppo attivo. La parità geometrica fra editor e canvas è
+> misurata, non asserita: vedi §7bis, oggi 16 casi su 16 allineati. Le sezioni
+> *Limitazioni note* elencano i punti ancora aperti.
 
 ---
 
@@ -203,27 +204,71 @@ Layout e renderer usano **la stessa** `wrapRunLines`, con le stesse costanti:
 
 | Costante | Valore | Significato |
 |---|---|---|
-| `LINE_HEIGHT_FACTOR` | 1.25 | altezza riga = max font-size della riga × 1.25 |
-| `BLOCK_GAP_FACTOR` | 0.6 | gap di blocco = 0.6 × line-height (≈0.75em) |
+| `LINE_HEIGHT_FACTOR` | 1.25 | line-height unitless, come nel CSS |
+| `BLOCK_GAP_FACTOR` | 0.6 | gap di blocco = 0.6 × 1.25 × **font del blocco** |
 | `TEXT_INSET` | 6 | insetto orizzontale dentro la box (entrambi i lati) |
-| `MIN_TOPIC_W` / `MAX_TOPIC_W` | 84 / ~640 | clamp della larghezza |
+| `BULLET_WIDTH_EM` | 1.2 | larghezza della colonna del pallino, in em |
+| `FONT_STACK` | = `--font` | unico stack tipografico per canvas e overlay |
+| `MIN_TOPIC_W` / `MAX_TOPIC_W` | 84 / 280 | clamp della larghezza |
 
-Regole del modello:
-- ogni riga avanza di `1.25 × fontSize` (la più alta sulla riga);
-- ogni **confine di blocco** (fine paragrafo, fine item di lista) aggiunge
-  `BLOCK_GAP_FACTOR × line-height`; il primo blocco del nodo non ha gap;
-- `listIndent` → pallino sulla prima riga, hanging indent sulle successive;
-- una larghezza esplicita (`style.width`) fissa la box e ri-avvolge il testo.
+Regole del modello (tutte verificate dall'harness, §7bis):
+- l'altezza di riga è la **line box del CSS**: `max(above) + max(below)` su
+  ogni inline box della riga — lo *strut* del blocco compreso — dove ciascuno
+  contribuisce `ascent + half-leading` e `descent + half-leading`. Non è
+  «font-size più grande × 1.25»: quella formula ignora lo strut (un run da
+  10px dentro un topic da 14px dava 12.5px contro i 17.5px del browser) e
+  sbaglia la baseline quando sulla riga convivono più corpi;
+- la **baseline** è calcolata qui e il renderer la usa così com'è;
+- ogni **confine di blocco** aggiunge `BLOCK_GAP_FACTOR × LINE_HEIGHT_FACTOR ×
+  fontSize del nodo`. Il gap viene dallo **strut**, non dall'altezza della riga
+  che segue: `margin-top: calc(.6 * 1.25em)` si risolve sull'`em` del blocco, e
+  la dimensione di un heading vive su una span interna;
+- un run con `paraGap` apre un blocco **anche senza `\n`** (l'editor segna il
+  confine fra root children solo così);
+- `listIndent` → il pallino sta in una colonna larga `BULLET_WIDTH_EM em` e il
+  testo parte a `depth × bulletW` su **tutte** le righe dell'item;
+- lo spazio finale non conta nella larghezza della riga (il CSS lo fa
+  debordare), un token più largo della colonna va a capo a metà parola;
+- una riga vuota fra due paragrafi è una riga vera; quelle in coda no.
 
 L'overlay replica le stesse regole in CSS:
 - `line-height: 1.25` (ereditato, unitless → relativo al font di ogni riga);
 - `p, ul, ol, li { margin: 0 }` (zero margini nativi del browser);
-- `> :not(:first-child), li + li { margin-top: var(--rnode-block-gap) }` —
-  stesso gap del canvas;
+- `> :not(:first-child), li + li, li > ul { margin-top: var(--rnode-block-gap) }`
+  — stesso gap del canvas, liste annidate comprese;
+- `li { padding-left: var(--rnode-bullet-w); text-indent: calc(-1 * ...) }` con
+  il pallino disegnato da `li::before`: il marker nativo del browser non è
+  utilizzabile, la sua larghezza è decisa dallo UA e nessuna lunghezza CSS la
+  eguaglia;
 - padding dell'editable calcolato da `pad` e `TEXT_INSET`:
-  - verticale: `pad + 2` (la box è `testo + pad·2 + 4`, centrata);
+  - verticale: `pad + 2`, e il blocco è centrato da `justify-content: center`
+    (come il renderer centra la bitmap: con `flex: 1` restava in alto e
+    derivava su diamond/hexagon/circle e dopo ogni resize);
   - orizzontale: `pad − 2` sx, `pad + TEXT_INSET − 2` dx (dentro il bordo da
     2px) → la larghezza di avvolgimento coincide con `boxW − pad·2 − TEXT_INSET`.
+
+---
+
+## 7bis. L'harness di parità (`dev/parity.html`)
+
+La parità non è un'opinione: `npm run dev` →
+`http://localhost:5173/dev/parity.html` monta un corpus di casi nel DOM vero
+dell'editable, ne estrae le line box reali carattere per carattere con
+`Range.getClientRects()`, e le confronta con l'output di `wrapRunLines`
+(punti di a-capo, baseline, avanzamento riga, `left`, altezza totale).
+Risultati anche su `window.__parity`.
+
+Due trappole di misura che l'harness deve evitare — entrambe producevano
+divergenze fantasma:
+- il rect di un carattere è l'**inline box** (~19px a 14px), più alto della
+  line box da 17.5px: la sovrapposizione verticale non separa le righe (si usa
+  il ritorno a sinistra) e la sua altezza non è l'altezza di riga (si usa
+  l'avanzamento);
+- il *top* del glifo sta a distanze diverse dalla line box per ogni corpo, per
+  cui il confronto è sulla **baseline**, ricavata dal rect e dall'ascent.
+
+Stato: **16 casi su 16 allineati**, residuo massimo 0.5px (arrotondamento di
+`fontBoundingBox`).
 
 ---
 
@@ -248,18 +293,17 @@ invalida solo quando il contenuto cambia davvero, non ad ogni frame.
 
 ### Baseline come il browser
 
-Il canvas posiziona i glifi sulla **baseline** con la matematica delle line
-box del CSS (half-leading attorno all'area contenuto del font), NON al centro
-dell'em box:
+Il canvas **non** calcola più la baseline: la prende da `line.baseline`, che
+`wrapRunLines` costruisce con la regola del CSS (half-leading per ogni inline
+box, strut incluso — vedi §7). Prima il renderer applicava un solo
+half-leading per riga, e con corpi misti la posizione verticale dei glifi si
+scostava da quella dell'editor.
 
-```
-ascent/descent  = measureText("M").fontBoundingBoxAscent/Descent (per run)
-halfLeading     = (lineHeight − (maxAscent + maxDescent)) / 2
-baselineY       = top riga + halfLeading + maxAscent
-```
+Sottolineato a ~0.1em sotto la baseline, barrato a ~0.28em sopra.
 
-Sottolineato a ~0.1em sotto la baseline, barrato a ~0.28em sopra. Così la
-posizione verticale dei glifi coincide con quella dell'editor.
+Il pallino di una lista viene disegnato in `line.bullet` alla sua `x` di
+colonna, non è più un segmento di testo: la sua larghezza deve essere una
+lunghezza che anche il CSS può esprimere.
 
 ---
 
@@ -267,13 +311,16 @@ posizione verticale dei glifi coincide con quella dell'editor.
 
 | Aspetto | Valore condiviso |
 |---|---|
-| Passo riga | `1.25 × font-size` (browser: line-height; canvas: LINE_HEIGHT_FACTOR) |
-| Gap di blocco | `0.6 × line-height` (CSS var `--rnode-block-gap` = costanti TS) |
+| Line box | `max(ascent+half) + max(descent+half)` su ogni inline box, strut incluso |
+| Gap di blocco | `0.6 × 1.25 × font del blocco` (CSS var `--rnode-block-gap`) |
 | Margini nativi | azzerati in CSS (p/ul/ol/li) come nel modello |
-| Posizione glifi | baseline + half-leading (browser e canvas) |
+| Posizione glifi | `line.baseline`, calcolata una volta sola nella misura |
+| Colonna pallino | `BULLET_WIDTH_EM em` (CSS var `--rnode-bullet-w`) |
 | Wrap width | `boxW − pad·2 − TEXT_INSET` (padding dell'editable calcolato) |
-| Centratura blocco | verticale, `pad + 2` sopra/sotto |
-| Scala | tutto l'overlay in world units + `transform: scale(zoom)` |
+| Centratura blocco | verticale, `justify-content: center` su entrambi i lati |
+| Font | unico `FONT_STACK` (= `--font`), più weight/italic/decorazioni del nodo |
+| Colori | fill e colore testo risolti da `Renderer.nodeColors` |
+| Scala | overlay in world units + `transform: scale(zoom)`; toolbar **fuori** |
 
 ---
 
@@ -303,21 +350,41 @@ posizione verticale dei glifi coincide con quella dell'editor.
   flottante sopra.
 - **Scalatura per-proprietà** dell'overlay (heading px assoluti, padding px
   schermo) gonfiava il contenuto: sostituita dal `transform: scale`.
+- **`<p>` dentro `<li>`**: un figlio *block* con `list-style-position: inside`
+  manda il marker su una riga sua (item da 17.5px misurato 35px) — una riga
+  intera di deriva per ogni elemento di lista. Ora gli item hanno figli inline.
+- **Round-trip non idempotente**: `runs → editor → runs` cambiava il contenuto,
+  quindi un titolo derivava a ogni modifica. Due cause: la profondità di lista
+  contata due volte (nidificazione strutturale **e** `getIndent()` sommati) e
+  il `\n` di chiusura di una lista riemesso ogni volta, che si accumulava in
+  una riga vuota disegnata dal canvas e mai mostrata dall'editor.
+- **`stripEmptyNestedLists` non rimuoveva nulla**: iterava i figli della lista
+  (tutti `ListItemNode`) cercando `$isListNode` — ogni `<li>` si portava dietro
+  un `<ul>` vuoto.
+- **Marker nativo del browser**: la sua larghezza è decisa dallo UA e nessuna
+  lunghezza CSS la eguaglia, quindi un item andato a capo non poteva allinearsi.
+  Sostituito da una colonna di larghezza nota disegnata da `li::before`.
 
 ---
 
 ## 12. Limitazioni note e lavori in corso
 
-- **Riga di wrap residua**: con contenuti lunghi l'editor può produrre 1–2
-  righe in più del canvas a parità di larghezza (shaping browser vs measurer
-  canvas). In corso di indagine; la geometria dei blocchi e i gap sono già
-  identici.
 - **Link nel testo**: non supportati (nessun campo `link` su `TextRun`) — i
   link di Draw.io vanno persi.
 - **Liste numerate**: gli item vengono resi con pallini (list-style: disc);
   il tipo numerato non è ancora modellato.
 - **Allineamento per paragrafo**: solo quello del nodo intero
-  (center/left/right), non per singolo blocco.
+  (center/left), non per singolo blocco. Gli **item di lista sono sempre
+  allineati a sinistra** su entrambi i lati: centrare un hanging indent non è
+  ben definito e i due renderer non potrebbero accordarsi.
+- **Liste con contenuto misto**: un gruppo `paraGap` che contiene sia testo
+  normale sia item di lista perde il testo che precede il primo item
+  (`buildList` parte dal primo run con `listIndent`). Non raggiungibile
+  dall'editor — `editorStateToRuns` mette `paraGap` su ogni root child, quindi
+  la lista finisce sempre in un gruppo suo — ma runs costruiti a mano o
+  migrati possono incapparci.
+- **Toolbar**: mancano barrato, sottolineato, liste e heading; liste e heading
+  si ottengono oggi solo incollando.
 - **Note dei nodi**: ancora plain text (il rich text vale per i titoli).
 - **Outliner/search/export**: mostrano il testo appiattito (`runsToPlain`).
 - **Tabelle nel titolo**: non supportate.
@@ -335,8 +402,9 @@ src/editor/store.ts        EditorStore: draft, commit, undo/redo, resize…
 src/ui/RichEditor.tsx      overlay Lexical (unico), toolbar, tasti, paste
 src/ui/lexicalRuns.ts      bridge editor <-> runs
 src/ui/pasteSanitizer.ts   sanitizeHtml / htmlToRuns (Word, Draw.io, web)
-src/layout/measure.ts      wrapRunLines condiviso, costanti, measureNode
-src/render/renderer.ts     drawNode, renderTextBitmap (cache + baseline)
+src/layout/measure.ts      wrapRunLines condiviso, line box CSS, costanti
+src/render/renderer.ts     drawNode, renderTextBitmap (cache), nodeColors
 src/ui/CanvasView.tsx      overlay positioning, pan bloccato, resize handle
+dev/parity.html · dev/parity.ts   harness di parità editor ↔ canvas (§7bis)
 tests/pasteSanitizer.test.ts · lexicalRuns.test.ts · measure.test.ts · store.test.ts
 ```
