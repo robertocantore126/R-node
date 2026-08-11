@@ -167,6 +167,36 @@ Non re-derivarle. Costano ore ciascuna.
 
 ---
 
+## 4bis. Segnalare un bug: il tracer
+
+Non descrivere i sintomi a parole. In dev l'app registra le proprie
+**decisioni** in un ring buffer (`src/dev/trace.ts`): premi **Ctrl+Shift+D**
+nell'istante in cui vedi il problema e scarichi un JSON con gli ultimi ~500
+eventi. Quello si allega, non la descrizione.
+
+Cosa contiene, e perché conta:
+
+| Evento | A cosa risponde |
+|---|---|
+| `input … outcome: "ignored", reason` | «perché non è successo niente?» — distingue un baco da una guardia deliberata |
+| `render … visible/nodes, relsDrawn/rels, linksDrawn/links` | «l'ho disegnato ma non si vede» **oppure** «non l'ho proprio disegnato»: sono due bug diversi |
+| `render … textHits/textMisses` | regressioni della cache del testo |
+| `op`, `layout` con durata | quale sottosistema è rallentato |
+| `invariant`, `error` | arrivano con i venti eventi che li hanno preceduti |
+
+Regola per chi scrive codice: **ogni `return` anticipato in un handler di input
+deve dire perché**.
+
+```ts
+if (this.state.editingId) return trace.ignored("wheel", "editing");
+```
+
+Un `return` muto rende un comportamento voluto indistinguibile da un difetto,
+e nessuna segnalazione a parole può colmare quella differenza. Il tracer è
+disattivato nelle build di produzione: ogni chiamata esce su un booleano.
+
+---
+
 ## 5. Cosa NON fare (già fatto o inesistente)
 
 Verificato nel codice. Se una lista di miglioramenti propone questi, salta.

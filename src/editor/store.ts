@@ -11,6 +11,7 @@
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
+import { trace } from "../dev/trace";
 import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RnodeDocument, type Sheet, type Style, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
@@ -236,9 +237,11 @@ export class EditorStore {
   /** Apply ops, record them in history, mark dirty, schedule layout. */
   execOps(ops: Op[], opts?: { skipHistory?: boolean }): void {
     if (ops.length === 0) return;
+    const t = typeof performance !== "undefined" ? performance.now() : 0;
     const inverses: Op[][] = [];
     for (const op of ops) inverses.push(applyWithInverse(this.sheet, op));
     if (!opts?.skipHistory) this.history.push(ops, inverses);
+    trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
     this.touch();
   }
 
@@ -272,7 +275,9 @@ export class EditorStore {
   private scheduleLayout(force: boolean, clearManual = false): void {
     if (this.layoutTimer) clearTimeout(this.layoutTimer);
     this.layoutTimer = setTimeout(() => {
+      const t = typeof performance !== "undefined" ? performance.now() : 0;
       applyLayout(this.sheet, force, this.measurer, clearManual);
+      trace.layout(Object.keys(this.sheet.nodes).length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
       this.notify();
     }, 30);
   }
@@ -590,6 +595,7 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   startEdit(id: string): void {
+    trace.edit("start", id);
     this.commitDraftOnLeave();
     const node = this.model.node(id);
     if (!node) return;
@@ -692,6 +698,7 @@ export class EditorStore {
    * never loses typed text. Undo restores the pre-edit title exactly.
    */
   commitEdit(): void {
+    trace.edit("commit", this.state.editingId ?? undefined);
     const id = this.state.editingId;
     const runs = this.editingDraftRuns;
     const original = this.editOriginal;
@@ -769,6 +776,7 @@ export class EditorStore {
   }
 
   cancelEdit(): void {
+    trace.edit("cancel", this.state.editingId ?? undefined);
     const id = this.state.editingId;
     const original = this.editOriginal;
     this.state.editingId = null;

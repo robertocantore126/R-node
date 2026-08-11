@@ -9,6 +9,7 @@ import { createCanvasTextMeasurer, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import type { MindNode } from "../core/types";
 import { RichEditor } from "./RichEditor";
+import { installTrace, trace } from "../dev/trace";
 
 /**
  * Paint synchronously on every store change. rAF is unreliable in embedded
@@ -146,35 +147,49 @@ export function CanvasView(): JSX.Element {
     });
 
     const unsub = store.subscribe(schedule);
+    const uninstallTrace = installTrace();
 
     // wheel must be non-passive to preventDefault
     const onWheel = (e: WheelEvent): void => {
+      // ALWAYS swallow the event, whatever we then decide to do with it.
+      // While editing, the pointer sits over the Lexical overlay — a sibling
+      // div, not the canvas — so a listener bound to the canvas never saw the
+      // event at all: the browser handled it instead and ctrl+wheel zoomed the
+      // whole page. Hence binding to the wrapper, which contains both.
       e.preventDefault();
-      // While a topic is being edited the Lexical overlay owns the viewport:
-      // pan/zoom is blocked so the overlay transform never goes stale.
-      if (store.getSnapshot().editingId) return;
       const { w, h } = sizeRef.current;
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
-      if (e.ctrlKey || e.metaKey) {
+      const zoom = e.ctrlKey || e.metaKey;
+      // While a topic is being edited the Lexical overlay owns the viewport:
+      // pan/zoom is blocked so the overlay transform never goes stale.
+      if (store.getSnapshot().editingId) {
+        trace.ignored("wheel", "editing", { zoom, deltaY: Math.round(e.deltaY) });
+        return;
+      }
+      if (zoom) {
         // Wheel-up zooms in (deltaY < 0). Flipped alongside pan so ctrl+scroll
         // stays coherent for users with inverted/natural-scroll deltas.
+        trace.applied("wheel:zoom", { deltaY: Math.round(e.deltaY) });
         store.zoomAt(sx, sy, e.deltaY < 0 ? 1.12 : 1 / 1.12, w, h);
       } else {
         // Scroll down → map content moves up (document-style pan). The sign is
         // flipped from the raw delta so the direction matches the OS-scroll
         // convention instead of appearing inverted.
+        trace.applied("wheel:pan", { deltaX: Math.round(e.deltaX), deltaY: Math.round(e.deltaY) });
         store.panBy(-e.deltaX, -e.deltaY);
       }
     };
-    canvas.addEventListener("wheel", onWheel, { passive: false });
+    const wheelTarget = canvas.parentElement ?? canvas;
+    wheelTarget.addEventListener("wheel", onWheel as EventListener, { passive: false });
 
     return () => {
       clearTimeout(fitTimer);
       ro.disconnect();
       unsub();
-      canvas.removeEventListener("wheel", onWheel);
+      wheelTarget.removeEventListener("wheel", onWheel as EventListener);
+      uninstallTrace();
       setExportPngHandler(null);
     };
   }, [store, schedule]);

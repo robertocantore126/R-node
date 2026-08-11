@@ -10,6 +10,7 @@ import type { MindNode, Sheet, StructureType, Orientation, TextRun } from "../co
 import { nodeRuns } from "../core/text";
 import { createCanvasTextMeasurer, FONT_STACK, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
+import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
 export interface DropIndicator {
@@ -55,6 +56,8 @@ export class Renderer {
    * boundary, where the bitmap is re-rendered sharper).
    */
   private textCache = new Map<string, { canvas: HTMLCanvasElement; w: number; h: number }>();
+  private textHits = 0;
+  private textMisses = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -126,30 +129,63 @@ export class Renderer {
 
     this.drawGrid(theme, state);
 
+    const tStart = typeof performance !== "undefined" ? performance.now() : 0;
+    this.textHits = 0;
+    this.textMisses = 0;
+
     const placed = this.placedNodes(state);
     const byId = new Map(placed.map((p) => [p.node.id, p]));
 
+    // Viewport in world units, with the same 40px margin placedNodes uses.
+    const vw = state.viewW / s;
+    const vh = state.viewH / s;
+    const viewMinX = state.camera.x - vw / 2 - 40;
+    const viewMaxX = state.camera.x + vw / 2 + 40;
+    const viewMinY = state.camera.y - vh / 2 - 40;
+    const viewMaxY = state.camera.y + vh / 2 + 40;
+    /**
+     * A line between two boxes is on screen whenever the box that CONTAINS
+     * both of them is — not only when both endpoints are individually visible.
+     * Requiring both is what made a connector vanish as soon as its parent
+     * scrolled off, while the child was still in view.
+     */
+    const linkVisible = (a: Placed, b: Placed): boolean =>
+      state.showHidden === true ||
+      (Math.max(a.x + a.w, b.x + b.w) >= viewMinX &&
+        Math.min(a.x, b.x) <= viewMaxX &&
+        Math.max(a.y + a.h, b.y + b.h) >= viewMinY &&
+        Math.min(a.y, b.y) <= viewMaxY);
+
     // 1) relationships
+    let rels = 0;
+    let relsDrawn = 0;
     for (const rel of state.sheet.relationships) {
+      rels++;
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
-      if (a && b) this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label);
+      if (a && b && linkVisible(a, b)) {
+        relsDrawn++;
+        this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label);
+      }
     }
 
     // 2) connectors
+    let links = 0;
+    let linksDrawn = 0;
     for (const p of placed) {
-      if (!p.visible) continue;
-      if (p.node.parentId) {
-        const parent = byId.get(p.node.parentId);
-        if (parent && parent.visible)
-          this.drawConnector(
-            parent,
-            p,
-            state.sheet.structure.structureType,
-            state.sheet.structure.orientation,
-            this.branchColor(theme, p.node, state.sheet)
-          );
-      }
+      if (!p.node.parentId) continue;
+      const parent = byId.get(p.node.parentId);
+      if (!parent) continue;
+      links++;
+      if (!linkVisible(parent, p)) continue;
+      linksDrawn++;
+      this.drawConnector(
+        parent,
+        p,
+        state.sheet.structure.structureType,
+        state.sheet.structure.orientation,
+        this.branchColor(theme, p.node, state.sheet)
+      );
     }
 
     // 3) nodes
@@ -165,6 +201,23 @@ export class Renderer {
     }
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+
+    // Per-frame counters: they are what separates "not drawn" from "drawn but
+    // invisible" when someone reports something missing on screen.
+    trace.render(
+      {
+        scale: s,
+        nodes: placed.length,
+        visible: placed.reduce((a, p) => a + (p.visible ? 1 : 0), 0),
+        rels,
+        relsDrawn,
+        links,
+        linksDrawn,
+        textHits: this.textHits,
+        textMisses: this.textMisses,
+      },
+      (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -462,7 +515,9 @@ export class Renderer {
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
     const key = this.textCacheKey(n, color, maxW, res);
     let entry = this.textCache.get(key);
+    if (entry) this.textHits++;
     if (!entry) {
+      this.textMisses++;
       entry = this.renderTextBitmap(n, color, maxW, res);
       this.textCache.set(key, entry);
       if (this.textCache.size > 5000) {
