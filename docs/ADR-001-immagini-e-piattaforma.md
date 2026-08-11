@@ -306,27 +306,61 @@ Tutte e tre condividono benefici e costi, quindi si valutano insieme.
 - **Risolvono**: controllo totale su texture, mipmap e sfratto; texture
   compresse; niente webview né suo consumo di memoria; avvio più rapido;
   binario più piccolo. Sul problema §3.2 sono **tecnicamente superiori**.
-- **Costo dominante — leggere con attenzione** [S]: **bisogna riscrivere un
-  editor di rich text da zero.**
+#### Il costo del rich text in nativo — versione corretta
 
-  In una webview il browser regala: shaping del testo, andata a capo Unicode,
-  bidi, caret, selezione col mouse, **IME** per cinese/giapponese/coreano,
-  dead key per gli accenti, accessibilità. Lexical ci sta sopra.
+> Una prima stesura di questo ADR diceva «bisogna riscrivere un editor di rich
+> text da zero, sono anni-persona». **È stato contestato ed era troppo
+> assoluto**: nessuno scriverebbe da zero. Qui la versione rivista.
 
-  Nativamente **nulla di tutto ciò esiste**. Servono HarfBuzz/rustybuzz per lo
-  shaping, line breaking Unicode, gestione IME per piattaforma, caret e
-  selezione. È fra le cose più insidiose che si possano scrivere; ci lavorano
-  team interi per anni.
+Il problema si divide in cinque strati, e le librerie esistenti ne coprono
+quantità molto diverse:
 
-  Più: 101 test da riscrivere, tutta l'interfaccia React da rifare, il core in
-  un altro linguaggio.
+| Strato | Stato dell'arte |
+|---|---|
+| 1. Shaping (glifi, kerning, legature, scritture complesse) | **risolto**: HarfBuzz, rustybuzz, swash |
+| 2. Line breaking Unicode (UAX #14) e bidi (UAX #9) | **risolto**: crate dedicate, ICU |
+| 3. Layout con run di stile misto, baseline condivisa | **buona copertura** |
+| 4. Modello di editing: caret per grafemi, selezione, word boundaries | **parziale** |
+| 5. Integrazione IME di sistema (TSF, NSTextInputClient, ibus/fcitx) | **il punto dolente** |
 
-- **Ironia da notare**: l'intero lavoro di parità testo esiste **perché** c'è
-  un browser con cui coincidere. In nativo quel problema sparisce — ma al suo
-  posto arriva "scrivi il motore di testo", che è di due ordini di grandezza
-  più grosso.
-- **Verdetto** [S]: sproporzionato rispetto al problema, **finché il rich text
-  resta il differenziatore**. Vedi §8.
+**Flutter** [?, da riverificare: l'ecosistema si muove in fretta]: copre tutti e
+cinque **di serie**. `EditableText` con alberi di `TextSpan`, e integrazione IME
+su tutte le piattaforme, perché Flutter porta il proprio motore e l'IME è una
+sua competenza centrale. Sopra esistono componenti maturi — **super_editor**,
+**AppFlowy Editor**, **flutter_quill**, **fleather** — e AppFlowy è un prodotto
+reale che lo dimostra.
+
+**Rust** [?]: `cosmic-text` e `parley` coprono bene 1–3 e in parte il 4, con
+attributi per run. Lo strato 5 dipende dalla crate di windowing e la qualità
+varia. Terreno in movimento rapido: verificare le versioni prima di decidere.
+
+**Qt**: `QTextDocument` è un motore di rich text maturo con IME funzionante.
+
+**Un vantaggio di C che le prime stesure non riportavano.** In nativo si usa
+**lo stesso motore di layout** per l'editing e per il disegno statico. Quindi
+**il problema della parità non esiste**: non c'è nessun canvas che debba
+imitare nessun browser. L'intera sessione di lavoro che ha portato la parità a
+16/16 non sarebbe mai stata necessaria. Va detto, perché è un argomento
+concreto a favore di C.
+
+**Cosa resta contro C, dopo la correzione:**
+
+1. **È una riscrittura totale, non incrementale**: core, ops, history, layout,
+   101 test, tutta l'interfaccia React. Non esiste un percorso a tappe.
+2. Flutter significa Dart e, di fatto, abbandonare il web.
+3. In Rust lo strato 5 resta il rischio vero — quello che si scopre tardi,
+   quando un utente giapponese segnala che non riesce a scrivere.
+4. **Vincolo specifico di questo prodotto**: l'editor vive **dentro un canvas
+   con zoom e pan arbitrari**. Non è un campo di testo in un form, è un box
+   trasformato. Quanto bene sopravviva il posizionamento dell'IME — la finestra
+   dei candidati deve comparire al caret, trasformato — sotto una scala
+   arbitraria è **la domanda da porre per prima**, e non ha risposta certa per
+   nessuna delle opzioni. Vedi §9, domanda 7.
+
+- **Verdetto rivisto** [S]: non «proibitivo perché il testo», ma **costoso
+  perché è una riscrittura totale**. Il testo è il rischio *minore* con
+  Flutter, il *maggiore* con Rust. Il criterio di §8 resta valido ma va letto
+  con questa correzione.
 
 ---
 
@@ -439,8 +473,22 @@ Allo stato attuale il progetto è nettamente nel primo caso.
    quanto spesso Chrome effettivamente cancella origini persistite?
 
 6. **Su C**: esiste oggi una libreria di rich text editing nativa, matura e
-   multipiattaforma (Rust o Flutter) che renda la famiglia C meno proibitiva di
-   come è descritta? Se sì, cambia il quadro.
+   multipiattaforma che renda la famiglia C meno proibitiva? — **parzialmente
+   risposta**, vedi §5/C: sì per Flutter (super_editor, AppFlowy Editor),
+   parzialmente per Rust (cosmic-text, parley, con lo strato IME incerto). La
+   domanda residua è **quanto sono maturi oggi**, perché quell'ecosistema si
+   muove in fretta e le informazioni invecchiano in mesi.
+
+7. **La domanda che vale più di tutte, e che resta aperta**: in R-node
+   l'editor di testo vive **dentro un canvas con zoom e pan arbitrari**. Il
+   caret, la selezione e soprattutto la **finestra dei candidati IME** devono
+   posizionarsi correttamente sotto una trasformazione di scala qualsiasi.
+   Nessuna delle librerie citate — né Flutter, né cosmic-text, né Qt — nasce
+   per questo caso: nascono per campi di testo in un layout. Qualcuno ha
+   esperienza diretta di editing di testo con IME dentro una vista
+   trasformata? È il punto su cui la famiglia C può rompersi in modo non
+   recuperabile, e non è visibile finché non lo provi con una tastiera
+   giapponese.
 
 ---
 
