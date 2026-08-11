@@ -27,6 +27,7 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
   "Mod+Shift+z": "redo",
   "Mod+y": "redo",
   "Mod+c": "copy",
+  "Mod+Shift+c": "copy-outline",
   "Mod+x": "cut",
   "Mod+v": "paste",
   "Mod+k": "palette",
@@ -123,9 +124,17 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       if (n) store.toggleCollapsed(n.id);
       return true;
     }
-    case "delete":
+    case "delete": {
       e.preventDefault();
-      store.deleteSelection();
+      const s = store.getSnapshot();
+      if (s.relSel) store.deleteSelectedRelationship();
+      else if (s.groupSel) store.deleteGroup(s.groupSel);
+      else if (s.summarySel) store.deleteSummary(s.summarySel);
+      else store.deleteSelection();
+      return true;
+    }
+    case "copy-outline":
+      void store.copySelectionOutline();
       return true;
     case "undo":
       e.preventDefault();

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../editor/context";
-import type { TaskStatus, Priority, TopicShape } from "../core/types";
+import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
 import { makeOp, type Op } from "../core/ops";
 import { plainToRuns } from "../core/text";
 
@@ -22,6 +22,22 @@ export function Inspector(): JSX.Element {
     setTitle(node?.title ?? "");
     setNotes(node?.notes ?? "");
   }, [node?.id, node?.title, node?.notes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const snap = store.getSnapshot();
+  const rel = snap.relSel ? store.sheet.relationships.find((r) => r.id === snap.relSel) : undefined;
+  const grp = snap.groupSel ? store.sheet.boundaries.find((g) => g.id === snap.groupSel) : undefined;
+  const sum = snap.summarySel ? store.sheet.summaries.find((s) => s.id === snap.summarySel) : undefined;
+
+  if (!node && (rel || grp || sum)) {
+    return (
+      <aside className="inspector">
+        {rel && <RelationshipSection rel={rel} />}
+        {grp && <GroupSection grp={grp} />}
+        {sum && <SummarySection sum={sum} />}
+        <SheetControls />
+      </aside>
+    );
+  }
 
   if (!node) {
     return (
@@ -54,6 +70,12 @@ export function Inspector(): JSX.Element {
           <button className="btn small" onClick={() => store.duplicateTopic()}>⧉ Duplicate</button>
           <button className="btn small danger" onClick={() => store.deleteNodes([node.id])}>Delete</button>
           <button className="btn small" onClick={() => store.beginRelationship(node.id)}>⇄ Link…</button>
+          {snap.selection.length >= 2 && (
+            <>
+              <button className="btn small" onClick={() => store.createGroupFromSelection()}>❐ Group</button>
+              <button className="btn small" onClick={() => store.createSummaryFromSelection()}>❨ Summary</button>
+            </>
+          )}
           <button className="btn small" onClick={() => store.toggleCollapsed(node.id)}>
             {node.collapsed ? "Expand" : "Collapse"}
           </button>
@@ -197,6 +219,81 @@ function SheetControls(): JSX.Element {
       </div>
       <button className="btn small" onClick={() => store.autoLayoutAll()}>⟳ Auto layout</button>
       <div className="muted count">Visible topics: {store.doc.visibleNodeCount}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Overlay sections: relationship, group, summary
+// ---------------------------------------------------------------------------
+
+function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
+  const store = useStore();
+  const [label, setLabel] = useState(rel.label ?? "");
+  useEffect(() => setLabel(rel.label ?? ""), [rel.id, rel.label]); // eslint-disable-line react-hooks/exhaustive-deps
+  const a = store.doc.node(rel.fromId);
+  const b = store.doc.node(rel.toId);
+  return (
+    <div className="inspector-section">
+      <div className="inspector-label">Relationship</div>
+      <p className="muted">{a?.title ?? "?"} → {b?.title ?? "?"}</p>
+      <div className="field">
+        <span>Label</span>
+        <input
+          value={label}
+          placeholder="(none)"
+          onChange={(e) => setLabel(e.target.value)}
+          onBlur={() => { if (label !== (rel.label ?? "")) store.setRelationship(rel.id, { label: label.trim() || undefined }); }}
+          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        />
+      </div>
+      <label className="field">
+        <span>Bidirectional arrows</span>
+        <input type="checkbox" checked={!!rel.bidirectional} onChange={(e) => store.setRelationship(rel.id, { bidirectional: e.target.checked })} />
+      </label>
+      <div className="field">
+        <span>Line style</span>
+        <select value={rel.lineStyle ?? "dashed"} onChange={(e) => store.setRelationship(rel.id, { lineStyle: e.target.value as Relationship["lineStyle"] })}>
+          <option value="solid">solid</option>
+          <option value="dashed">dashed</option>
+          <option value="dotted">dotted</option>
+        </select>
+      </div>
+      <button className="btn small danger" onClick={() => store.deleteSelectedRelationship()}>Delete relationship</button>
+    </div>
+  );
+}
+
+function GroupSection({ grp }: { grp: Group }): JSX.Element {
+  const store = useStore();
+  return (
+    <div className="inspector-section">
+      <div className="inspector-label">Group</div>
+      <p className="muted">{grp.memberIds.length} topics enclosed</p>
+      <button className="btn small danger" onClick={() => store.deleteGroup(grp.id)}>Delete group</button>
+    </div>
+  );
+}
+
+function SummarySection({ sum }: { sum: Summary }): JSX.Element {
+  const store = useStore();
+  const [label, setLabel] = useState(sum.label ?? "");
+  useEffect(() => setLabel(sum.label ?? ""), [sum.id, sum.label]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <div className="inspector-section">
+      <div className="inspector-label">Summary</div>
+      <p className="muted">{sum.memberIds.length} topics spanned</p>
+      <div className="field">
+        <span>Label</span>
+        <input
+          value={label}
+          placeholder="Summary"
+          onChange={(e) => setLabel(e.target.value)}
+          onBlur={() => { if (label !== (sum.label ?? "")) store.setSummary(sum.id, { label: label.trim() || undefined }); }}
+          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        />
+      </div>
+      <button className="btn small danger" onClick={() => store.deleteSummary(sum.id)}>Delete summary</button>
     </div>
   );
 }

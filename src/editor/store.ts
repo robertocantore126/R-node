@@ -12,7 +12,7 @@ import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type MindNode, type NodeType, type Position, type RnodeDocument, type Sheet, type Style, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type Group, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
@@ -82,6 +82,10 @@ export interface EditorState {
   mode: "select" | "pan";
   zen: boolean;
   relFrom: string | null;
+  /** Selected overlay object: a relationship, group or summary (not a node). */
+  relSel: string | null;
+  groupSel: string | null;
+  summarySel: string | null;
 }
 
 export class EditorStore {
@@ -179,6 +183,9 @@ export class EditorStore {
       mode: "select",
       zen: false,
       relFrom: null,
+      relSel: null,
+      groupSel: null,
+      summarySel: null,
     };
   }
 
@@ -573,15 +580,40 @@ export class EditorStore {
     this.state.selection = sel;
     this.state.editingId = null;
     this.state.pendingInsert = null;
+    this.state.relSel = null;
+    this.state.groupSel = null;
+    this.state.summarySel = null;
     if (opts?.center) this.centerOnNode(id);
+    this.notify();
+  }
+
+  selectMany(ids: string[], opts?: { additive?: boolean }): void {
+    this.commitDraftOnLeave();
+    if (opts?.additive) {
+      const set = new Set(this.state.selection);
+      for (const id of ids) {
+        if (set.has(id)) set.delete(id);
+        else set.add(id);
+      }
+      this.state.selection = [...set];
+    } else {
+      this.state.selection = [...ids];
+    }
+    this.state.editingId = null;
+    this.state.relSel = null;
+    this.state.groupSel = null;
+    this.state.summarySel = null;
     this.notify();
   }
 
   clearSelection(): void {
     this.commitDraftOnLeave();
-    if (this.state.selection.length === 0) return;
+    if (this.state.selection.length === 0 && !this.state.relSel && !this.state.groupSel && !this.state.summarySel) return;
     this.state.selection = [];
     this.state.editingId = null;
+    this.state.relSel = null;
+    this.state.groupSel = null;
+    this.state.summarySel = null;
     this.notify();
   }
 
@@ -1029,9 +1061,26 @@ export class EditorStore {
       const index = parentId ? this.model.requireNode(parentId).childrenIds.indexOf(id) : 0;
       ops.push(makeOp<Op & { type: "deleteNode" }>("deleteNode", { id, parentId, index, subtree, removedRelationships }));
     }
+    // Drop groups/summaries whose members are all gone (their boxes/braces
+    // would dangle otherwise). Undo of the batch restores them.
+    const deletedSet = new Set<string>();
+    for (const id of toDelete) for (const sid of this.model.subtreeIds(id)) deletedSet.add(sid);
+    for (const g of this.sheet.boundaries) {
+      if (g.memberIds.length > 0 && g.memberIds.every((m) => deletedSet.has(m))) {
+        ops.push(makeOp<Op & { type: "deleteGroup" }>("deleteGroup", { id: g.id, group: g }));
+      }
+    }
+    for (const s of this.sheet.summaries) {
+      if (s.memberIds.length > 0 && s.memberIds.every((m) => deletedSet.has(m))) {
+        ops.push(makeOp<Op & { type: "deleteSummary" }>("deleteSummary", { id: s.id, summary: s }));
+      }
+    }
     if (ops.length) {
       this.execOps(ops);
       this.state.selection = [];
+      this.state.relSel = null;
+      this.state.groupSel = null;
+      this.state.summarySel = null;
       this.notify();
     }
   }
@@ -1346,6 +1395,26 @@ export class EditorStore {
     if (ops.length) this.execOps(ops);
   }
 
+  /** Indented text outline (XMind-style) of the pruned selection: each selected
+   *  topic is a root line, descendants follow indented, in tree order. */
+  private outlineText(pruned: string[]): string {
+    const lines: string[] = [];
+    const emit = (id: string, depth: number): void => {
+      const n = this.model.node(id);
+      if (!n) return;
+      lines.push("  ".repeat(depth) + runsToPlain(nodeRuns(n.title, n.titleRuns)));
+      for (const cid of n.childrenIds) emit(cid, depth + 1);
+    };
+    const walk = (id: string): void => {
+      if (pruned.includes(id)) emit(id, 0);
+      const n = this.model.node(id);
+      if (!n) return;
+      for (const cid of n.childrenIds) walk(cid);
+    };
+    walk(this.sheet.rootNodeId);
+    return lines.join("\n");
+  }
+
   async copySelection(): Promise<void> {
     const ids = this.state.selection;
     const pruned = ids.filter((id) => !ids.some((other) => other !== id && this.isDescendant(other, id)));
@@ -1355,12 +1424,45 @@ export class EditorStore {
     const nodes = subtreeIds.map((id) => this.model.node(id)!).filter(Boolean);
     const rels = this.sheet.relationships.filter((r) => subtreeIds.includes(r.fromId) && subtreeIds.includes(r.toId));
     const payload = JSON.stringify({ app: "r-node", payload: { rootId, nodes, relationships: rels } });
+    const text = this.outlineText(pruned);
     try {
-      await navigator.clipboard.writeText(payload);
+      // Two formats on the clipboard at once: the full map as the custom
+      // `text/rnode` MIME (internal paste keeps every run/style), and the
+      // plain-text outline as `text/plain` so pasting OUTSIDE R-node (chat,
+      // Word, notes) yields readable text instead of raw JSON.
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/rnode": new Blob([payload], { type: "text/rnode" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
     } catch {
-      /* clipboard may be blocked; copying still succeeded in-memory */
+      // ClipboardItem with custom types unsupported (older engines / blocked) —
+      // fall back to plain text only.
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        /* clipboard may be blocked; copying still succeeded in-memory */
+      }
     }
     this.toast(`Copied ${nodes.length} topic${nodes.length > 1 ? "s" : ""}`);
+  }
+
+  /** Copy the selected branches to the clipboard as an indented text outline
+   *  (XMind-style): each selected topic becomes a root line, its descendants
+   *  follow indented, in tree order. */
+  async copySelectionOutline(): Promise<void> {
+    const ids = this.state.selection;
+    const pruned = ids.filter((id) => !ids.some((other) => other !== id && this.isDescendant(other, id)));
+    if (pruned.length === 0) return;
+    const text = this.outlineText(pruned);
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be blocked */
+    }
+    this.toast(`Copied outline (${text.split("\n").length} lines)`);
   }
 
   async cutSelection(): Promise<void> {
@@ -1369,7 +1471,22 @@ export class EditorStore {
   }
 
   async paste(anchorId?: string | null): Promise<void> {
-    const text = await navigator.clipboard.readText().catch(() => null);
+    // Prefer the full-fidelity `text/rnode` payload that copySelection writes;
+    // fall back to whatever plain text is on the clipboard (external sources,
+    // or older engines that can't read custom MIME types).
+    let text: string | null = null;
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (item.types.includes("text/rnode")) {
+          text = await item.getType("text/rnode").then((blob) => blob.text());
+          break;
+        }
+      }
+    } catch {
+      /* clipboard read with MIME types blocked — fall through to readText */
+    }
+    if (text === null) text = await navigator.clipboard.readText().catch(() => null);
     if (!text) return;
     let parsed: { app?: string; payload?: { rootId: string; nodes: MindNode[]; relationships: { fromId: string; toId: string; label?: string }[] } } | null = null;
     try {
@@ -1486,6 +1603,122 @@ export class EditorStore {
         relationship: { id: uid("rel"), fromId, toId },
       }),
     ]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Overlay selection: relationships, groups, summaries
+  // -------------------------------------------------------------------------
+
+  selectRelationship(id: string | null): void {
+    this.state.selection = [];
+    this.state.groupSel = null;
+    this.state.summarySel = null;
+    this.state.relSel = id;
+    this.notify();
+  }
+
+  selectGroup(id: string | null): void {
+    this.state.selection = [];
+    this.state.relSel = null;
+    this.state.summarySel = null;
+    this.state.groupSel = id;
+    this.notify();
+  }
+
+  selectSummary(id: string | null): void {
+    this.state.selection = [];
+    this.state.relSel = null;
+    this.state.groupSel = null;
+    this.state.summarySel = id;
+    this.notify();
+  }
+
+  setRelationship(id: string, patch: Partial<Relationship>): void {
+    const rel = this.sheet.relationships.find((r) => r.id === id);
+    if (!rel) return;
+    this.execOps([makeOp<Op & { type: "setRelationship" }>("setRelationship", { id, relationship: { ...rel, ...patch }, prev: { ...rel } })]);
+  }
+
+  deleteSelectedRelationship(): void {
+    const id = this.state.relSel;
+    if (!id) return;
+    const rel = this.sheet.relationships.find((r) => r.id === id);
+    if (!rel) return;
+    this.execOps([makeOp<Op & { type: "deleteRelationship" }>("deleteRelationship", { id, relationship: rel })]);
+    this.state.relSel = null;
+    this.notify();
+  }
+
+  // -------------------------------------------------------------------------
+  // Groups & summaries
+  // -------------------------------------------------------------------------
+
+  /** The selected nodes, iff they are at least two SIBLINGS (what a
+   *  group/brace can span). Returns null otherwise. */
+  private selectedSiblings(): MindNode[] | null {
+    const ids = this.state.selection;
+    if (ids.length < 2) return null;
+    const nodes = ids.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
+    if (nodes.length < 2) return null;
+    const parent = nodes[0].parentId;
+    if (!parent || nodes.some((n) => n.parentId !== parent)) return null;
+    return nodes;
+  }
+
+  createGroupFromSelection(): void {
+    // A group can enclose ANY selected topics — siblings, cousins, nodes from
+    // different branches (the box is just the union of their bounds). Only
+    // the summary brace needs a sibling column.
+    const ids = this.state.selection;
+    if (ids.length < 2) {
+      this.toast("Select at least two topics to group");
+      return;
+    }
+    const nodes = ids.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
+    if (nodes.length < 2) {
+      this.toast("Select at least two topics to group");
+      return;
+    }
+    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", { group: { id: uid("grp"), memberIds: nodes.map((n) => n.id), label: "group" } })]);
+    this.toast("Group created");
+  }
+
+  createSummaryFromSelection(): void {
+    const nodes = this.selectedSiblings();
+    if (!nodes) {
+      this.toast("Select at least two sibling topics to summarize");
+      return;
+    }
+    this.execOps([makeOp<Op & { type: "createSummary" }>("createSummary", { summary: { id: uid("sum"), memberIds: nodes.map((n) => n.id), label: "Summary" } })]);
+    this.toast("Summary created");
+  }
+
+  setGroup(id: string, patch: Partial<Group>): void {
+    const g = this.sheet.boundaries.find((x) => x.id === id);
+    if (!g) return;
+    this.execOps([makeOp<Op & { type: "setGroup" }>("setGroup", { id, group: { ...g, ...patch }, prev: { ...g, memberIds: [...g.memberIds] } })]);
+  }
+
+  setSummary(id: string, patch: Partial<Summary>): void {
+    const s = this.sheet.summaries.find((x) => x.id === id);
+    if (!s) return;
+    this.execOps([makeOp<Op & { type: "setSummary" }>("setSummary", { id, summary: { ...s, ...patch }, prev: { ...s, memberIds: [...s.memberIds] } })]);
+  }
+
+  deleteGroup(id: string): void {
+    const g = this.sheet.boundaries.find((x) => x.id === id);
+    if (!g) return;
+    this.execOps([makeOp<Op & { type: "deleteGroup" }>("deleteGroup", { id, group: g })]);
+    this.state.groupSel = null;
+    this.notify();
+  }
+
+  deleteSummary(id: string): void {
+    const s = this.sheet.summaries.find((x) => x.id === id);
+    if (!s) return;
+    this.execOps([makeOp<Op & { type: "deleteSummary" }>("deleteSummary", { id, summary: s })]);
+    this.state.summarySel = null;
+    this.notify();
   }
 
   // -------------------------------------------------------------------------

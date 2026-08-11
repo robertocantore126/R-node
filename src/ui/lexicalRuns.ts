@@ -21,6 +21,9 @@ import {
   $createParagraphNode,
   $createTextNode,
   $getRoot,
+  IS_BOLD,
+  IS_ITALIC,
+  IS_UNDERLINE,
   type EditorState,
   type ElementNode,
   type LexicalEditor,
@@ -32,10 +35,13 @@ import { $createListItemNode, $createListNode, $isListItemNode, $isListNode, typ
 import type { TextRun } from "../core/types";
 import { normalizeRuns } from "../core/text";
 
-// Lexical TextNode format bits (same values as the library's FORMAT_* exports).
-const FORMAT_BOLD = 1;
-const FORMAT_ITALIC = 2;
-const FORMAT_UNDERLINE = 4;
+// Lexical TextNode format bits — imported from the library, NOT hardcoded:
+// in newer Lexical the values moved (IS_STRIKETHROUGH is 4, IS_UNDERLINE is 8),
+// so a local copy silently misread underline as strikethrough and seeded
+// underline text as strikethrough in the editor.
+const FORMAT_BOLD = IS_BOLD;
+const FORMAT_ITALIC = IS_ITALIC;
+const FORMAT_UNDERLINE = IS_UNDERLINE;
 
 const COLOR_RE = /color:\s*(#[0-9a-fA-F]{3,8})\b/;
 const FONT_SIZE_RE = /font-size:\s*(\d+(?:\.\d+)?)px/;

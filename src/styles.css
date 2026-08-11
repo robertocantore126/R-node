@@ -694,6 +694,16 @@ textarea:focus {
   box-shadow: var(--shadow);
 }
 
+/* Marquee (box selection) drawn as a DOM overlay — the only transient
+   chrome that lives outside the canvas. Coordinates are canvas-wrap space. */
+.marquee {
+  position: absolute;
+  z-index: 15;
+  border: 1.5px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  pointer-events: none;
+}
+
 /* ---------- Outliner ---------- */
 
 .outliner {

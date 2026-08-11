@@ -482,4 +482,138 @@ describe("canvas resize drag", () => {
     expect(after.position.x).toBe(400);
     expect(after.position.y).toBe(300);
   });
+
+  it("creates a group only from at least two sibling topics, undoable", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const first = store.doc.node(root.childrenIds[0])!;
+    store.select(store.sheet.rootNodeId);
+    store.createChild();
+    const second = root.childrenIds.find((id) => id !== first.id)!;
+
+    // single selection → rejected
+    store.select(second);
+    store.createGroupFromSelection();
+    expect(store.sheet.boundaries).toHaveLength(0);
+
+    store.selectMany([first.id, second]);
+    store.createGroupFromSelection();
+    expect(store.sheet.boundaries).toHaveLength(1);
+    expect(store.sheet.boundaries[0].memberIds).toEqual(expect.arrayContaining([first.id, second]));
+
+    store.undo();
+    expect(store.sheet.boundaries).toHaveLength(0);
+  });
+
+  it("groups ANY selected topics, not just siblings, undoable", () => {
+    const store = new EditorStore(memoryAdapter);
+    // two children of the root, then a grandchild of the first: not siblings
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const first = store.doc.node(root.childrenIds[0])!;
+    store.select(first.id);
+    store.createChild();
+    const grandchild = store.doc.node(first.childrenIds[0])!;
+
+    store.selectMany([first.id, grandchild.id]);
+    store.createGroupFromSelection();
+    expect(store.sheet.boundaries).toHaveLength(1);
+    expect(store.sheet.boundaries[0].memberIds).toEqual(expect.arrayContaining([first.id, grandchild.id]));
+
+    store.undo();
+    expect(store.sheet.boundaries).toHaveLength(0);
+
+    // but a summary still needs siblings
+    store.selectMany([first.id, grandchild.id]);
+    store.createSummaryFromSelection();
+    expect(store.sheet.summaries).toHaveLength(0);
+  });
+
+  it("creates a summary from sibling selection, undoable", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const first = store.doc.node(root.childrenIds[0])!;
+    store.select(store.sheet.rootNodeId);
+    store.createChild();
+    const second = root.childrenIds.find((id) => id !== first.id)!;
+
+    store.selectMany([first.id, second]);
+    store.createSummaryFromSelection();
+    expect(store.sheet.summaries).toHaveLength(1);
+    expect(store.sheet.summaries[0].memberIds).toEqual(expect.arrayContaining([first.id, second]));
+
+    store.undo();
+    expect(store.sheet.summaries).toHaveLength(0);
+  });
+
+  it("deleting a main topic drops groups/summaries over its subtree", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.select(main.id);
+    store.createChild();
+    store.createChild(); // same parent stays selected → two subtopics
+    const subs = [...main.childrenIds];
+    store.selectMany(subs);
+    store.createGroupFromSelection();
+    store.createSummaryFromSelection();
+    expect(store.sheet.boundaries).toHaveLength(1);
+    expect(store.sheet.summaries).toHaveLength(1);
+
+    store.deleteNodes([main.id]);
+    expect(store.sheet.boundaries).toHaveLength(0);
+    expect(store.sheet.summaries).toHaveLength(0);
+  });
+
+  it("relationship label edits are undoable and deletable", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const first = store.doc.node(root.childrenIds[0])!;
+    store.select(store.sheet.rootNodeId);
+    store.createChild();
+    const second = root.childrenIds.find((id) => id !== first.id)!;
+    store.createRelationship(first.id, second);
+    const relId = store.sheet.relationships[0].id;
+
+    store.setRelationship(relId, { label: "causes" });
+    expect(store.sheet.relationships[0].label).toBe("causes");
+    store.undo();
+    expect(store.sheet.relationships[0].label).toBeUndefined();
+
+    store.selectRelationship(relId);
+    store.deleteSelectedRelationship();
+    expect(store.sheet.relationships).toHaveLength(0);
+    store.undo();
+    expect(store.sheet.relationships).toHaveLength(1);
+  });
+
+  it("copySelectionOutline writes an indented hierarchy to the clipboard", async () => {
+    const writes: string[] = [];
+    Object.defineProperty(globalThis, "navigator", {
+      value: { clipboard: { writeText: async (t: string) => { writes.push(t); } } },
+      configurable: true,
+    });
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.doc.node(main.id)!.title = "A";
+    store.select(main.id);
+    store.createChild();
+    const sub = store.doc.node(main.childrenIds[0])!;
+    store.doc.node(sub.id)!.title = "A1";
+    store.select(store.sheet.rootNodeId);
+    store.createChild();
+    const other = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    store.doc.node(other.id)!.title = "B";
+
+    store.selectMany([main.id, other.id]);
+    await store.copySelectionOutline();
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe("A\n  A1\nB");
+  });
 });

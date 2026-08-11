@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DocumentModel, uid } from "../src/core/doc";
 import { applyOp, applyWithInverse, makeOp, type Op } from "../src/core/ops";
 import { History } from "../src/core/history";
-import type { MindNode, RnodeDocument } from "../src/core/types";
+import type { Group, MindNode, Relationship, RnodeDocument, Summary } from "../src/core/types";
 
 function freshDoc(): { doc: RnodeDocument; model: DocumentModel; root: MindNode } {
   const model = new DocumentModel(DocumentModel.blank("Test"));
@@ -21,6 +21,70 @@ function exec(model: DocumentModel, history: History, ops: Op[]): void {
   for (const op of ops) inverses.push(applyWithInverse(model.sheet, op));
   history.push(ops, inverses);
 }
+
+function undo(model: DocumentModel, history: History): void {
+  const ops = history.undo();
+  if (ops) for (const op of ops) applyWithInverse(model.sheet, op);
+}
+
+function redo(model: DocumentModel, history: History): void {
+  const ops = history.redo();
+  if (ops) for (const op of ops) applyWithInverse(model.sheet, op);
+}
+
+describe("relationship / group / summary ops", () => {
+  it("setRelationship applies, undoes and redoes", () => {
+    const { model, root } = freshDoc();
+    const history = new History();
+    const a = child(model, root.id, "A");
+    const b = child(model, root.id, "B");
+    const rel: Relationship = { id: "rel1", fromId: a, toId: b, label: "links" };
+    exec(model, history, [makeOp<Op & { type: "createRelationship" }>("createRelationship", { relationship: rel })]);
+    const patch: Relationship = { id: "rel1", fromId: a, toId: b, label: "renamed", bidirectional: true };
+    exec(model, history, [makeOp<Op & { type: "setRelationship" }>("setRelationship", { id: "rel1", relationship: patch, prev: rel })]);
+    expect(model.sheet.relationships[0].label).toBe("renamed");
+    expect(model.sheet.relationships[0].bidirectional).toBe(true);
+    undo(model, history);
+    expect(model.sheet.relationships[0].label).toBe("links");
+    expect(model.sheet.relationships[0].bidirectional).toBeUndefined();
+    redo(model, history);
+    expect(model.sheet.relationships[0].label).toBe("renamed");
+  });
+
+  it("createGroup/deleteGroup/setGroup round-trip through undo", () => {
+    const { model, root } = freshDoc();
+    const history = new History();
+    const a = child(model, root.id, "A");
+    const b = child(model, root.id, "B");
+    const g: Group = { id: "g1", memberIds: [a, b], label: "group" };
+    exec(model, history, [makeOp<Op & { type: "createGroup" }>("createGroup", { group: g })]);
+    expect(model.sheet.boundaries).toHaveLength(1);
+    expect(model.sheet.boundaries[0].memberIds).toEqual([a, b]);
+    exec(model, history, [makeOp<Op & { type: "setGroup" }>("setGroup", { id: "g1", group: { ...g, label: "x" }, prev: g })]);
+    expect(model.sheet.boundaries[0].label).toBe("x");
+    undo(model, history);
+    expect(model.sheet.boundaries[0].label).toBe("group");
+    undo(model, history);
+    expect(model.sheet.boundaries).toHaveLength(0);
+    redo(model, history);
+    redo(model, history);
+    expect(model.sheet.boundaries).toHaveLength(1);
+  });
+
+  it("createSummary/deleteSummary round-trip through undo", () => {
+    const { model, root } = freshDoc();
+    const history = new History();
+    const a = child(model, root.id, "A");
+    const b = child(model, root.id, "B");
+    const sum: Summary = { id: "s1", memberIds: [a, b], label: "Summary" };
+    exec(model, history, [makeOp<Op & { type: "createSummary" }>("createSummary", { summary: sum })]);
+    expect(model.sheet.summaries).toHaveLength(1);
+    exec(model, history, [makeOp<Op & { type: "deleteSummary" }>("deleteSummary", { id: "s1", summary: sum })]);
+    expect(model.sheet.summaries).toHaveLength(0);
+    undo(model, history);
+    expect(model.sheet.summaries).toHaveLength(1);
+  });
+});
 
 describe("create + delete", () => {
   it("creates a child and links it to the parent", () => {

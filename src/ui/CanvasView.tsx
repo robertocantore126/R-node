@@ -36,6 +36,10 @@ interface DragState {
   resizeStartWorldX: number;
   resizeStartWidth: number;
   resizeStartX: number;
+  /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
+  marqueeStartX: number | null;
+  marqueeStartY: number | null;
+  marqueeActive: boolean;
 }
 
 /** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
@@ -68,6 +72,9 @@ export function CanvasView(): JSX.Element {
     resizeStartWorldX: 0,
     resizeStartWidth: 0,
     resizeStartX: 0,
+    marqueeStartX: null,
+    marqueeStartY: null,
+    marqueeActive: false,
   });
   // Right/middle-drag pan started over the Lexical overlay (the overlay is a
   // sibling of the canvas, so the canvas pointer handlers never see it).
@@ -79,6 +86,7 @@ export function CanvasView(): JSX.Element {
   const [panning, setPanning] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [resizeHover, setResizeHover] = useState(false);
+  const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const paint = useCallback(() => {
     const renderer = rendererRef.current;
@@ -96,6 +104,9 @@ export function CanvasView(): JSX.Element {
       themeName: s.theme,
       viewW: w,
       viewH: h,
+      relSel: s.relSel,
+      groupSel: s.groupSel,
+      summarySel: s.summarySel,
     };
     renderer.render(rs);
   }, [store]);
@@ -285,8 +296,34 @@ export function CanvasView(): JSX.Element {
       drag.grabOffsetY = rect ? world.y - rect.y : 0;
       store.select(hit, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
       drag.dragging = hit;
+      drag.marqueeStartX = null;
     } else {
-      store.clearSelection();
+      // Overlay objects first: a relationship line, a group box, a summary
+      // brace/label — then, on plain empty canvas, begin a marquee box.
+      const relId = renderer.hitTestRelationship(rs, world.x, world.y);
+      if (relId) {
+        store.selectRelationship(relId);
+        drag.marqueeStartX = null;
+        return;
+      }
+      const grpId = renderer.hitTestGroup(rs, world.x, world.y);
+      if (grpId) {
+        store.selectGroup(grpId);
+        drag.marqueeStartX = null;
+        return;
+      }
+      const sumId = renderer.hitTestSummary(rs, world.x, world.y);
+      if (sumId) {
+        store.selectSummary(sumId);
+        drag.marqueeStartX = null;
+        return;
+      }
+      // A plain click on empty canvas clears the selection; with Shift held
+      // the current selection is kept so the marquee can extend it.
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey) store.clearSelection();
+      drag.marqueeStartX = x;
+      drag.marqueeStartY = y;
+      drag.marqueeActive = false;
     }
   };
 
@@ -317,6 +354,31 @@ export function CanvasView(): JSX.Element {
     }
     if (drag.panning) {
       store.panBy(dx, dy);
+      return;
+    }
+    // Marquee: activate once the pointer moves 4px from the anchor, then
+    // track the box in screen coords (the overlay div is positioned in
+    // canvas-wrap space, same as localPoint).
+    const mx0 = drag.marqueeStartX, my0 = drag.marqueeStartY;
+    if (mx0 !== null && my0 !== null && !drag.marqueeActive) {
+      if (Math.hypot(x - mx0, y - my0) >= 4) {
+        drag.marqueeActive = true;
+        drag.dragging = null;
+        setMarquee({
+          x: mx0,
+          y: my0,
+          w: Math.abs(x - mx0),
+          h: Math.abs(y - my0),
+        });
+      }
+    }
+    if (drag.marqueeActive && mx0 !== null && my0 !== null) {
+      setMarquee({
+        x: Math.min(mx0, x),
+        y: Math.min(my0, y),
+        w: Math.abs(x - mx0),
+        h: Math.abs(y - my0),
+      });
       return;
     }
     if (!drag.dragging) {
@@ -356,6 +418,24 @@ export function CanvasView(): JSX.Element {
 
   const onPointerUp = (e: RPointerEvent): void => {
     const drag = dragRef.current;
+    // A plain click on empty canvas (marquee never activated): just reset.
+    if (drag.marqueeStartX !== null && !drag.marqueeActive) {
+      drag.marqueeStartX = null;
+      drag.marqueeStartY = null;
+    }
+    if (drag.marqueeActive) {
+      const s = store.getSnapshot();
+      const { x, y } = localPoint(e);
+      const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, drag.marqueeStartX!, drag.marqueeStartY!);
+      const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
+      if (ids.length > 0) store.selectMany(ids, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
+      drag.marqueeActive = false;
+      drag.marqueeStartX = null;
+      drag.marqueeStartY = null;
+      setMarquee(null);
+      return;
+    }
     if (drag.resizing) {
       store.commitResize();
       drag.resizing = null;
@@ -488,6 +568,9 @@ export function CanvasView(): JSX.Element {
       themeName: s.theme,
       viewW: sizeRef.current.w,
       viewH: sizeRef.current.h,
+      relSel: s.relSel,
+      groupSel: s.groupSel,
+      summarySel: s.summarySel,
     };
   };
 
@@ -539,6 +622,12 @@ export function CanvasView(): JSX.Element {
         onContextMenu={onContextMenu}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
+      {marquee && (
+        <div
+          className="marquee"
+          style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }}
+        />
+      )}
       {editStyle && state.editingId && (
         <RichEditor
           key={state.editingId}

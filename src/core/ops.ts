@@ -10,7 +10,7 @@
  * applyOp mutates the sheet in place. inverseOf returns the operation(s)
  * that exactly reverse it, which is what the History stack uses for undo.
  */
-import type { MindNode, Position, Relationship, Sheet, StructureConfig, Style, TaskInfo, TextRun } from "./types";
+import type { Group, MindNode, Position, Relationship, Sheet, StructureConfig, Style, Summary, TaskInfo, TextRun } from "./types";
 import { nowIso } from "./doc";
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,14 @@ export type Op =
   | { opId: string; actorId: string; ts: string; type: "setSheetTitle"; title: string; prev: string }
   | { opId: string; actorId: string; ts: string; type: "setStructure"; config: StructureConfig; prev: StructureConfig }
   | { opId: string; actorId: string; ts: string; type: "createRelationship"; relationship: Relationship }
-  | { opId: string; actorId: string; ts: string; type: "deleteRelationship"; id: string; relationship: Relationship };
+  | { opId: string; actorId: string; ts: string; type: "deleteRelationship"; id: string; relationship: Relationship }
+  | { opId: string; actorId: string; ts: string; type: "setRelationship"; id: string; relationship: Relationship; prev: Relationship }
+  | { opId: string; actorId: string; ts: string; type: "createGroup"; group: Group }
+  | { opId: string; actorId: string; ts: string; type: "deleteGroup"; id: string; group: Group }
+  | { opId: string; actorId: string; ts: string; type: "setGroup"; id: string; group: Group; prev: Group }
+  | { opId: string; actorId: string; ts: string; type: "createSummary"; summary: Summary }
+  | { opId: string; actorId: string; ts: string; type: "deleteSummary"; id: string; summary: Summary }
+  | { opId: string; actorId: string; ts: string; type: "setSummary"; id: string; summary: Summary; prev: Summary };
 
 export interface OpMeta {
   actorId?: string;
@@ -171,6 +178,33 @@ export function applyOp(sheet: Sheet, op: Op): void {
     case "deleteRelationship":
       sheet.relationships = sheet.relationships.filter((r) => r.id !== op.id);
       break;
+    case "setRelationship": {
+      const idx = sheet.relationships.findIndex((r) => r.id === op.id);
+      if (idx >= 0) sheet.relationships[idx] = { ...op.relationship };
+      break;
+    }
+    case "createGroup":
+      sheet.boundaries.push({ ...op.group, memberIds: [...op.group.memberIds] });
+      break;
+    case "deleteGroup":
+      sheet.boundaries = sheet.boundaries.filter((g) => g.id !== op.id);
+      break;
+    case "setGroup": {
+      const idx = sheet.boundaries.findIndex((g) => g.id === op.id);
+      if (idx >= 0) sheet.boundaries[idx] = { ...op.group, memberIds: [...op.group.memberIds] };
+      break;
+    }
+    case "createSummary":
+      sheet.summaries.push({ ...op.summary, memberIds: [...op.summary.memberIds] });
+      break;
+    case "deleteSummary":
+      sheet.summaries = sheet.summaries.filter((s) => s.id !== op.id);
+      break;
+    case "setSummary": {
+      const idx = sheet.summaries.findIndex((s) => s.id === op.id);
+      if (idx >= 0) sheet.summaries[idx] = { ...op.summary, memberIds: [...op.summary.memberIds] };
+      break;
+    }
   }
 }
 
@@ -223,6 +257,20 @@ export function inverseOf(op: Op, meta?: OpMeta): Op[] {
       return [makeOp<Op & { type: "deleteRelationship" }>("deleteRelationship", { id: op.relationship.id, relationship: op.relationship }, m)];
     case "deleteRelationship":
       return [makeOp<Op & { type: "createRelationship" }>("createRelationship", { relationship: op.relationship }, m)];
+    case "setRelationship":
+      return [makeOp<Op & { type: "setRelationship" }>("setRelationship", { id: op.id, relationship: op.prev, prev: op.relationship }, m)];
+    case "createGroup":
+      return [makeOp<Op & { type: "deleteGroup" }>("deleteGroup", { id: op.group.id, group: op.group }, m)];
+    case "deleteGroup":
+      return [makeOp<Op & { type: "createGroup" }>("createGroup", { group: op.group }, m)];
+    case "setGroup":
+      return [makeOp<Op & { type: "setGroup" }>("setGroup", { id: op.id, group: op.prev, prev: op.group }, m)];
+    case "createSummary":
+      return [makeOp<Op & { type: "deleteSummary" }>("deleteSummary", { id: op.summary.id, summary: op.summary }, m)];
+    case "deleteSummary":
+      return [makeOp<Op & { type: "createSummary" }>("createSummary", { summary: op.summary }, m)];
+    case "setSummary":
+      return [makeOp<Op & { type: "setSummary" }>("setSummary", { id: op.id, summary: op.prev, prev: op.summary }, m)];
   }
 }
 

@@ -22,7 +22,7 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 import { RichTextPlugin } from "@lexical/react/LexicalRichTextPlugin";
 import { ListPlugin } from "@lexical/react/LexicalListPlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
-import { $getRoot, $getSelection, $isTextNode, COMMAND_PRIORITY_HIGH, FORMAT_TEXT_COMMAND, INSERT_TAB_COMMAND, PASTE_COMMAND, type LexicalEditor } from "lexical";
+import { $getRoot, $getSelection, $isTextNode, COMMAND_PRIORITY_HIGH, FORMAT_TEXT_COMMAND, INSERT_TAB_COMMAND, PASTE_COMMAND, type LexicalEditor, type TextFormatType } from "lexical";
 import { HeadingNode } from "@lexical/rich-text";
 import { ListItemNode, ListNode } from "@lexical/list";
 import { useStore } from "../editor/context";
@@ -141,6 +141,20 @@ function KeysPlugin({ store }: { store: EditorStore }): null {
   const [editor] = useLexicalComposerContext();
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
+      // Inline formatting: Ctrl/Cmd+B / I / U toggle bold / italic /
+      // underline on the current selection (or the pending format for the
+      // next keystroke). Handled here, in capture phase, so the browser's
+      // own contenteditable defaults never get a chance.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+        const k = e.key.toLowerCase();
+        const fmt: TextFormatType | null = k === "b" ? "bold" : k === "i" ? "italic" : k === "u" ? "underline" : null;
+        if (fmt) {
+          e.preventDefault();
+          e.stopPropagation();
+          editor.dispatchCommand(FORMAT_TEXT_COMMAND, fmt);
+          return;
+        }
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         // Save while editing: commit the draft (editor stays open) so the
         // browser "Save page" dialog never eats the keystroke.
@@ -287,6 +301,16 @@ function Toolbar(): JSX.Element {
         }}
       >
         <i>I</i>
+      </button>
+      <button
+        type="button"
+        title="Underline (Ctrl+U)"
+        onMouseDown={(e) => {
+          e.preventDefault();
+          editor.dispatchCommand(FORMAT_TEXT_COMMAND, "underline");
+        }}
+      >
+        <u>U</u>
       </button>
       <input
         type="color"

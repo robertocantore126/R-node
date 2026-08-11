@@ -6,7 +6,7 @@
  * HTML overlay (allowed by the architecture) — the renderer skips the title
  * of the node being edited so the overlay doesn't double-paint.
  */
-import type { MindNode, Sheet, StructureType, Orientation, TextRun } from "../core/types";
+import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
 import { createCanvasTextMeasurer, FONT_STACK, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
@@ -28,6 +28,9 @@ export interface RenderState {
   themeName: ThemeName;
   viewW: number;
   viewH: number;
+  relSel?: string | null;
+  groupSel?: string | null;
+  summarySel?: string | null;
   showHidden?: boolean; // export: include collapsed subtrees
 }
 
@@ -165,7 +168,7 @@ export class Renderer {
       const b = byId.get(rel.toId);
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
-        this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label);
+        this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional, state.relSel === rel.id);
       }
     }
 
@@ -194,7 +197,10 @@ export class Renderer {
       this.drawNode(theme, p, state);
     }
 
-    // 4) drop indicator
+    // 4) groups & summaries (drawn over the nodes, geometry derived from members)
+    this.drawGroupsAndSummaries(theme, state, byId);
+
+    // 5) drop indicator
     if (state.drop && state.drop.mode !== "none") {
       const target = byId.get(state.drop.nodeId);
       if (target) this.drawDropIndicator(theme, target, state.drop.mode);
@@ -611,18 +617,35 @@ export class Renderer {
     return { canvas, w: maxW, h: totalH };
   }
 
-  private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string): void {
+  private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string, bidirectional?: boolean, selected?: boolean): void {
     const ctx = this.ctx;
     const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
     const bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    const c1x = ax + (bx - ax) * 0.35, c1y = ay;
+    const c2x = bx - (bx - ax) * 0.35, c2y = by;
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = selected ? 2.5 : 1.5;
     ctx.setLineDash(style === "dashed" ? [7, 5] : style === "dotted" ? [2, 4] : []);
     ctx.beginPath();
     ctx.moveTo(ax, ay);
-    ctx.bezierCurveTo(ax + (bx - ax) * 0.35, ay, bx - (bx - ax) * 0.35, by, bx, by);
+    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, bx, by);
     ctx.stroke();
     ctx.setLineDash([]);
+    // Arrowheads: at the target, and at the source when bidirectional.
+    const arrow = (fromX: number, fromY: number, toX: number, toY: number): void => {
+      const ang = Math.atan2(toY - fromY, toX - fromX);
+      const len = 9;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(toX, toY);
+      ctx.lineTo(toX - len * Math.cos(ang - 0.42), toY - len * Math.sin(ang - 0.42));
+      ctx.lineTo(toX - len * Math.cos(ang + 0.42), toY - len * Math.sin(ang + 0.42));
+      ctx.closePath();
+      ctx.fill();
+    };
+    // tangent at the end of the bezier ≈ direction from c2 to b
+    arrow(c2x, c2y, bx, by);
+    if (bidirectional) arrow(c1x, c1y, ax, ay);
     if (label) {
       const mx = (ax + bx) / 2, my = (ay + by) / 2;
       ctx.font = `600 12px system-ui, sans-serif`;
@@ -634,6 +657,178 @@ export class Renderer {
       ctx.fillStyle = color;
       ctx.fillText(label, mx, my + 0.5);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Groups & summaries
+  // -------------------------------------------------------------------------
+
+  /** Union rect (padded) of the member topics, in world coords. */
+  private membersBounds(state: RenderState, memberIds: string[], byId?: Map<string, Placed>): { x: number; y: number; w: number; h: number } | null {
+    const placed = byId ?? new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let found = false;
+    for (const m of memberIds) {
+      const p = placed.get(m);
+      if (!p) continue;
+      found = true;
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + p.w);
+      maxY = Math.max(maxY, p.y + p.h);
+    }
+    if (!found) return null;
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+
+  private drawGroupsAndSummaries(theme: RenderTheme, state: RenderState, byId: Map<string, Placed>): void {
+    const s = state.camera.scale;
+    for (const g of state.sheet.boundaries) {
+      const b = this.membersBounds(state, g.memberIds, byId);
+      if (!b) continue;
+      // cull: skip if the whole box is off-screen
+      if (b.x + b.w < state.camera.x - state.viewW / 2 / s - 40 || b.x > state.camera.x + state.viewW / 2 / s + 40) continue;
+      if (b.y + b.h < state.camera.y - state.viewH / 2 / s - 40 || b.y > state.camera.y + state.viewH / 2 / s + 40) continue;
+      const pad = 16;
+      const selected = state.groupSel === g.id;
+      this.drawGroup(theme, g, b, pad, selected, s);
+    }
+    for (const sum of state.sheet.summaries) {
+      const b = this.membersBounds(state, sum.memberIds, byId);
+      if (!b) continue;
+      if (b.y + b.h < state.camera.y - state.viewH / 2 / s - 40 || b.y > state.camera.y + state.viewH / 2 / s + 40) continue;
+      const selected = state.summarySel === sum.id;
+      this.drawSummary(theme, sum, b, selected, s, this.summaryFacingLeft(state, b, byId));
+    }
+  }
+
+  private drawGroup(theme: RenderTheme, _g: Group, b: { x: number; y: number; w: number; h: number }, pad: number, selected: boolean, s: number): void {
+    // Just the dashed boundary — no fill, no label tag (per the XMind-style
+    // look: the box only "encapsulates" the topics visually).
+    const ctx = this.ctx;
+    const x = b.x - pad, y = b.y - pad, w = b.w + pad * 2, h = b.h + pad * 2;
+    ctx.strokeStyle = selected ? theme.selection : theme.textMuted;
+    ctx.lineWidth = selected ? 2.5 / s : 1.5 / s;
+    ctx.setLineDash([7 / s, 5 / s]);
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 10 / s);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /** Which side of the root the summary members sit on: a summary on a left
+   *  branch opens its brace to the LEFT (facing the tree direction), one on
+   *  the right opens to the RIGHT. */
+  private summaryFacingLeft(state: RenderState, b: { x: number; y: number; w: number; h: number }, byId: Map<string, Placed>): boolean {
+    const root = byId.get(state.sheet.rootNodeId);
+    if (!root) return false;
+    return b.x + b.w / 2 < root.x + root.w / 2;
+  }
+
+  private drawSummary(theme: RenderTheme, sum: Summary, b: { x: number; y: number; w: number; h: number }, selected: boolean, s: number, facingLeft: boolean): void {
+    const ctx = this.ctx;
+    const y0 = b.y, y1 = b.y + b.h;
+    const gap = 22 / s;
+    const braceX = facingLeft ? b.x - gap : b.x + b.w + gap;
+    const label = sum.label ?? "Summary";
+    ctx.font = `600 ${12 / s}px system-ui, sans-serif`;
+    const tw = ctx.measureText(label).width;
+    const labelW = tw + 16, labelH = 22 / s;
+    const midY = (y0 + y1) / 2;
+    // brace: ends at the member column, middle vertex pointing away from the
+    // tree (right on a right branch, left on a left branch)
+    ctx.strokeStyle = selected ? theme.selection : theme.textMuted;
+    ctx.lineWidth = selected ? 2.5 / s : 1.5 / s;
+    ctx.beginPath();
+    this.bracePath(ctx, braceX, y0, y1, (facingLeft ? -1 : 1) * (9 / s));
+    ctx.stroke();
+    // label box on the far side of the brace
+    const bx = facingLeft ? braceX - 16 / s - labelW : braceX + 16 / s;
+    const by = midY - labelH / 2;
+    ctx.fillStyle = theme.background;
+    ctx.strokeStyle = selected ? theme.selection : theme.nodeBorder;
+    ctx.lineWidth = 1.2 / s;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, labelW, labelH, 5 / s);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = selected ? theme.selection : theme.text;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, bx + labelW / 2, by + labelH / 2 + 0.5);
+  }
+
+  /** A curly-brace path: ends at (x, y0/y1) tucked left, vertex pointing right. */
+  private bracePath(ctx: CanvasRenderingContext2D, x: number, y0: number, y1: number, depth: number): void {
+    const span = y1 - y0;
+    const gap = Math.min(10, Math.max(4, span / 8));
+    const d = depth;
+    const mid = (y0 + y1) / 2;
+    ctx.moveTo(x, y0);
+    ctx.bezierCurveTo(x + d, y0, x + d, y0 + gap, x, y0 + gap);
+    ctx.bezierCurveTo(x - d, y0 + gap * 2, x - d, mid - gap, x + d, mid);
+    ctx.bezierCurveTo(x - d, mid + gap, x - d, y1 - gap * 2, x, y1 - gap);
+    ctx.bezierCurveTo(x + d, y1 - gap, x + d, y1, x, y1);
+  }
+
+  // -------------------------------------------------------------------------
+  // Overlay hit testing (relationships, groups, summaries)
+  // -------------------------------------------------------------------------
+
+  /** Distance from a point to the relationship bezier, in world units. */
+  hitTestRelationship(state: RenderState, wx: number, wy: number): string | null {
+    const byId = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const threshold = 8 / state.camera.scale;
+    for (const rel of state.sheet.relationships) {
+      const a = byId.get(rel.fromId);
+      const b = byId.get(rel.toId);
+      if (!a || !b) continue;
+      const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
+      const bx = b.x + b.w / 2, by = b.y + b.h / 2;
+      const c1x = ax + (bx - ax) * 0.35, c1y = ay;
+      const c2x = bx - (bx - ax) * 0.35, c2y = by;
+      let prevX = ax, prevY = ay;
+      for (let t = 0.05; t <= 1.0; t += 0.05) {
+        const mt = 1 - t;
+        const px = mt * mt * mt * ax + 3 * mt * mt * t * c1x + 3 * mt * t * t * c2x + t * t * t * bx;
+        const py = mt * mt * mt * ay + 3 * mt * mt * t * c1y + 3 * mt * t * t * c2y + t * t * t * by;
+        const dx = px - prevX, dy = py - prevY;
+        const len = Math.hypot(dx, dy) || 1e-6;
+        const dist = Math.abs((wx - prevX) * dy - (wy - prevY) * dx) / len;
+        if (dist < threshold) return rel.id;
+        prevX = px;
+        prevY = py;
+      }
+    }
+    return null;
+  }
+
+  hitTestGroup(state: RenderState, wx: number, wy: number): string | null {
+    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    for (const g of state.sheet.boundaries) {
+      const b = this.membersBounds(state, g.memberIds, placed);
+      if (!b) continue;
+      const pad = 16;
+      if (wx >= b.x - pad && wx <= b.x + b.w + pad && wy >= b.y - pad && wy <= b.y + b.h + pad) return g.id;
+    }
+    return null;
+  }
+
+  hitTestSummary(state: RenderState, wx: number, wy: number): string | null {
+    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    for (const sum of state.sheet.summaries) {
+      const b = this.membersBounds(state, sum.memberIds, placed);
+      if (!b) continue;
+      const s = state.camera.scale;
+      const facingLeft = this.summaryFacingLeft(state, b, placed);
+      const gap = 22 / s;
+      const braceX = facingLeft ? b.x - gap : b.x + b.w + gap;
+      // approximate: a box around the brace + label, on the correct side
+      const lo = facingLeft ? braceX - 90 / s : braceX - 8 / s;
+      const hi = facingLeft ? braceX + 8 / s : braceX + 90 / s;
+      if (wx >= lo && wx <= hi && wy >= b.y - 6 && wy <= b.y + b.h + 6) return sum.id;
+    }
+    return null;
   }
 
   private drawDropIndicator(theme: RenderTheme, target: Placed, mode: string): void {
@@ -699,6 +894,15 @@ export class Renderer {
     return { x: p.x, y: p.y, w: p.w, h: p.h };
   }
 
+  /** Visible node ids whose box intersects the given world-space rectangle (marquee). */
+  nodesInRect(state: RenderState, wx0: number, wy0: number, wx1: number, wy1: number): string[] {
+    const minX = Math.min(wx0, wx1), maxX = Math.max(wx0, wx1);
+    const minY = Math.min(wy0, wy1), maxY = Math.max(wy0, wy1);
+    return this.placedNodes(state)
+      .filter((p) => p.visible && p.x < maxX && p.x + p.w > minX && p.y < maxY && p.y + p.h > minY)
+      .map((p) => p.node.id);
+  }
+
   // -------------------------------------------------------------------------
   // Export
   // -------------------------------------------------------------------------
@@ -742,7 +946,7 @@ export class Renderer {
     for (const rel of state.sheet.relationships) {
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
-      if (a && b) this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label);
+      if (a && b) this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional);
     }
     for (const p of all) {
       if (p.node.parentId) {
@@ -758,5 +962,7 @@ export class Renderer {
       }
     }
     for (const p of all) this.drawNode(theme, p, { ...state, showHidden: true });
+    // export with a fixed 1px-ish stroke scale
+    this.drawGroupsAndSummaries(theme, { ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);
   }
 }

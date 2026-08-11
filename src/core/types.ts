@@ -203,6 +203,24 @@ export interface Relationship {
 }
 
 // ---------------------------------------------------------------------------
+// Groups & summaries (drawn over the map, derived from member geometry)
+// ---------------------------------------------------------------------------
+
+export interface Group {
+  id: string;
+  /** Topic ids enclosed by the dashed boundary (usually siblings). */
+  memberIds: string[];
+  label?: string;
+}
+
+export interface Summary {
+  id: string;
+  /** Topic ids spanned by the brace (usually a contiguous sibling range). */
+  memberIds: string[];
+  label?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Structure config
 // ---------------------------------------------------------------------------
 
@@ -245,8 +263,8 @@ export interface Sheet {
   /** nodes keyed by id — the single source of truth for the tree */
   nodes: Record<string, MindNode>;
   relationships: Relationship[];
-  boundaries: unknown[];
-  summaries: unknown[];
+  boundaries: Group[];
+  summaries: Summary[];
   callouts: unknown[];
   labels: string[];
   zones: unknown[];
