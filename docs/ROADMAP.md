@@ -343,7 +343,68 @@ contiene il testo finale corretto alla fine.
 
 ---
 
-## T12 — Immagini nei nodi: modello, misura, disegno · P2
+## T12a — Archivio degli asset (fuori dal documento) · P2
+
+**Obiettivo.** Un archivio di blob separato dal documento, indirizzato per
+contenuto, dietro un'interfaccia con due implementazioni possibili.
+
+**Perché prima di tutto il resto.** Le immagini **non possono stare dentro il
+documento**. Oggi si salva con `JSON.stringify(docs)` in localStorage: quota
+reale ~5MB, e una mappa da 10k nodi ne occupa già ~3.6. Il base64 gonfia i
+byte del 33%. L'obiettivo dichiarato sono **centinaia di immagini**: non ci
+sta di un ordine di grandezza, e un documento da decine di MB blocca il thread
+principale a ogni `JSON.parse`. Se questo task non viene per primo, ogni
+immagine già allegata va poi migrata.
+
+**File.** `src/persist/assets.ts` (nuovo) · `src/core/types.ts` ·
+`tests/assets.test.ts` (nuovo)
+
+**Passi.**
+
+1. **Interfaccia**, sullo stesso modello di `StorageAdapter` che esiste già:
+   ```ts
+   export interface AssetVariant { blob: Blob; w: number; h: number; bytes: number }
+   export interface AssetStore {
+     put(original: Blob, display: Blob, meta: {...}): Promise<string>; // → id
+     get(id: string, variant: "display" | "original"): Promise<Blob | null>;
+     delete(id: string): Promise<void>;
+     list(): Promise<string[]>;
+   }
+   ```
+2. **`IndexedDbAssetStore`** come default: unica implementazione richiesta da
+   questo task. IndexedDB immagazzina `Blob` **nativi** — niente base64, niente
+   inflazione — e la quota è di centinaia di MB fino a GB. Un object store
+   `assets` con chiave l'id, valore `{ original, display, meta }`.
+3. **Indirizzamento per contenuto**: l'id è lo SHA-256 del file originale
+   (`crypto.subtle.digest`). La stessa immagine allegata a 50 nodi occupa
+   spazio **una volta sola**, e non esistono collisioni di nomi.
+4. **Due varianti per asset**, ed è il punto che concilia i due requisiti:
+   - `original` — il file come importato, mai ricompresso. È la sorgente di
+     verità: lo slider di T14 e l'export ad alta qualità partono da qui.
+   - `display` — derivata all'import, **1024px sul lato lungo**, JPEG q0.85
+     (PNG se ha canale alpha). È l'unica che il canvas decodifica mai.
+
+   Un nodo mostra al massimo poche centinaia di unità world: decodificare
+   l'originale da 4000px per disegnarlo a 240 significa tenere in RAM decine di
+   volte i pixel che finiscono a schermo. Con centinaia di immagini è la
+   differenza fra una mappa fluida e una che fa scattare lo scorrimento.
+5. **Conteggio dei riferimenti e GC.** `sheet.attachments` elenca gli id usati;
+   una funzione `collectOrphans(sheet)` restituisce gli id nell'archivio che
+   nessun nodo referenzia più. Va invocata **esplicitamente** (comando, non
+   automatismo): cancellare byte come effetto collaterale di un undo è il tipo
+   di comportamento che distrugge dati.
+
+**Fatto quando.** Test su `AssetStore` con un `fake-indexeddb`: `put` due volte
+lo stesso contenuto restituisce lo stesso id e non duplica; `get` restituisce
+le due varianti; `delete` rimuove; `collectOrphans` trova solo gli id non
+referenziati. `npm test` e `npm run typecheck` verdi.
+
+**Non fare.** Niente data URL da nessuna parte. Nessun byte in `MindNode`, in
+un `Op` o nella history.
+
+---
+
+## T12 — Immagini nei nodi: modello, misura, disegno · P2 · dipende da T12a
 
 **Obiettivo.** Un nodo può portare un'immagine, mostrata **sopra** il testo,
 dentro la stessa box.
@@ -365,18 +426,22 @@ aggiunge **nessuna** interazione: si verifica impostando `style.image` a mano.
 1. **Modello.** In `types.ts`:
    ```ts
    export interface AttachmentInfo {
-     id: string;
+     id: string;        // SHA-256 del contenuto: la chiave nell'AssetStore
      mime: string;      // image/png | image/jpeg | image/gif | image/webp
-     src: string;       // data URL
-     w: number;         // pixel intrinseci
+     w: number;         // pixel intrinseci dell'ORIGINALE
      h: number;
+     displayW: number;  // pixel della variante che il canvas decodifica
+     displayH: number;
+     bytes: number;     // originale, per mostrare il peso all'utente
      name?: string;
      alt?: string;
    }
    ```
-   `attachments: AttachmentInfo[]`. `Style.image` esiste già ed è l'id: **non
-   aggiungere un secondo campo**. Aggiungi `Style.imageWidth?: number`
-   (larghezza di visualizzazione in unità world; l'altezza segue le proporzioni).
+   **Nessun byte qui dentro**: i blob vivono nell'AssetStore di T12a e questa è
+   solo la scheda anagrafica, che sta nel documento. `Style.image` esiste già ed
+   è l'id: **non aggiungere un secondo campo**. Aggiungi
+   `Style.imageWidth?: number` (larghezza di visualizzazione in unità world;
+   l'altezza segue le proporzioni dell'originale).
 
    **`w`/`h` sono obbligatori nel modello.** Senza le dimensioni intrinseche il
    layout non può misurare il nodo finché l'immagine non è decodificata, e ogni
@@ -399,16 +464,24 @@ aggiunge **nessuna** interazione: si verifica impostando `style.image` a mano.
 3. **Disegno** (`renderer.drawNode`). L'immagine va **fra la forma e il testo**.
    Il renderer è sincrono, le immagini no: serve una cache con stato.
    ```ts
-   private images = new Map<string, { el: HTMLImageElement; ready: boolean }>();
+   private bitmaps = new Map<string, ImageBitmap>();   // LRU, max ~100
    ```
-   - miss → crea l'`Image`, `onload` imposta `ready = true` e **richiama un
-     repaint** (callback passata al Renderer dal CanvasView);
-   - finché `!ready` non disegnare nulla — lo spazio è già riservato dalla
-     misura, quindi non c'è salto quando arriva;
-   - `drawImage` nel rettangolo calcolato al passo 2, orizzontalmente centrato.
+   - decodifica **solo la variante `display`** e **solo per i nodi visibili**:
+     il renderer culla già i nodi, quindi aprire una mappa con 500 immagini
+     deve costare quanto aprirne una senza;
+   - usa `createImageBitmap(blob)` — decodifica fuori dal thread principale e
+     restituisce un oggetto che `drawImage` accetta direttamente, senza data
+     URL né `<img>` intermedi;
+   - miss → avvia la decodifica, e al termine **richiama un repaint** (callback
+     passata al Renderer dal CanvasView). Finché non è pronta non disegnare
+     nulla: lo spazio è già riservato dalla misura, quindi non c'è salto;
+   - sfratto **LRU con `bitmap.close()`**: libera la memoria in modo
+     deterministico, cosa che con `new Image()` non puoi fare. Con centinaia di
+     immagini è ciò che tiene la RAM sotto controllo.
 
-   **Non** ridisegnare la cache a ogni frame e **non** usare `await`: il
-   renderer resta sincrono.
+   **Non** decodificare a ogni frame, **non** usare `await` dentro il disegno,
+   **non** toccare mai la variante `original`: il renderer resta sincrono e non
+   deve mai vedere i pixel a piena risoluzione.
 
 4. **Parità con l'overlay** (`RichEditor`). Mentre editi, la box deve avere la
    stessa geometria: aggiungi sopra l'editable un `<div>` non editabile,
@@ -455,15 +528,19 @@ selezionato, lo allega.
      **SVG escluso**: è un documento eseguibile, e la guida (§9 di
      ARCHITECTURE) mette l'hardening XSS fra le cose differite — non è il
      momento di aprire quella porta;
-   - rifiuta oltre `MAX_SOURCE_BYTES = 10 MB` con un messaggio;
-   - **ridimensiona sempre** oltre `MAX_STORED_PX = 1600` sul lato lungo,
-     ricomprimendo via `<canvas>` in JPEG q0.85 (PNG se ha canale alpha);
-   - restituisce `AttachmentInfo` con `w`/`h` **intrinseci del risultato**.
+   - rifiuta oltre `MAX_SOURCE_BYTES = 25 MB` con un messaggio;
+   - **conserva l'originale così com'è**, senza ricomprimerlo: è la sorgente di
+     verità per lo slider di T14 e per l'export ad alta qualità;
+   - **deriva la variante `display`** a `1024px` sul lato lungo (JPEG q0.85,
+     PNG se ha canale alpha), via `<canvas>` o `createImageBitmap` con
+     `resizeWidth`;
+   - passa entrambe a `AssetStore.put` e restituisce l'`AttachmentInfo`.
 
-   Il ridimensionamento non è un optional: le immagini finiscono come data URL
-   dentro il documento, e il README già segnala che a 10k nodi il vincolo è lo
-   storage (~3.6 MB in localStorage). Tre screenshot non compressi sfondano la
-   quota e il salvataggio fallisce.
+   Le due varianti servono a cose diverse e non sono negoziabili: l'originale
+   perché l'hai chiesto tu, la `display` perché è l'unica che il canvas
+   decodifica. Decodificare un originale da 4000px per disegnarlo a 240 unità
+   world tiene in RAM decine di volte i pixel che finiscono a schermo, e con
+   centinaia di immagini è esattamente lì che l'app inizia a scattare.
 
 2. **Drop.** Handler `dragover` (con `preventDefault`, altrimenti il browser
    apre il file) e `drop` su `.canvas-wrap` — **lo stesso elemento del wheel**,
@@ -495,27 +572,74 @@ sul vuoto non fa nulla e lascia una riga nel trace.
 
 ---
 
-## T14 — Ridimensionare l'immagine · P2 · dipende da T12
+## T14 — Ridimensionare l'immagine (slider + maniglia) · P2 · dipende da T12
 
-**Obiettivo.** Maniglie per cambiare la dimensione dell'immagine dentro il nodo.
+**Obiettivo.** Cambiare la dimensione con cui l'immagine è mostrata nel nodo,
+senza toccare i byte immagazzinati.
 
-**File.** `src/render/renderer.ts` · `src/ui/CanvasView.tsx` ·
-`src/editor/store.ts`
+**File.** `src/ui/Inspector.tsx` · `src/render/renderer.ts` ·
+`src/ui/CanvasView.tsx` · `src/editor/store.ts`
 
 **Passi.**
-1. Con il nodo selezionato e un'immagine presente, disegna una maniglia
-   nell'angolo in basso a destra dell'immagine. Riusa lo stile di quelle di
-   resize del nodo (bordo + alone bianco).
-2. `hitTestImageResize(state, x, y)` sul modello di `hitTestResize`.
-3. Il drag aggiorna `style.imageWidth` **con proporzioni bloccate**; clamp fra
-   `48` e la larghezza massima del testo del nodo. Doppio click sulla maniglia
-   riporta alla dimensione naturale (clampata a `MAX_IMAGE_W`).
-4. Un solo op alla fine del drag (come il resize del nodo), non uno per frame:
-   altrimenti un trascinamento riempie la history.
+1. **Slider nell'Inspector** (il pannello esiste già), visibile solo quando il
+   nodo selezionato ha un'immagine. Va da `48` alla larghezza massima del nodo
+   e scrive `style.imageWidth`; accanto, la dimensione in px e un pulsante
+   «dimensione naturale».
+2. **Maniglia sul canvas**, angolo in basso a destra dell'immagine, con
+   `hitTestImageResize(state, x, y)` sul modello di `hitTestResize`. Stesso
+   stile delle maniglie del nodo (bordo + alone bianco).
+3. Proporzioni **sempre bloccate**: `imageWidth` è l'unico valore memorizzato,
+   l'altezza si ricava da `att.h / att.w`.
+4. **Un solo op alla fine del gesto** — al rilascio dello slider o del drag,
+   non a ogni frame: altrimenti un trascinamento riempie la history di 400
+   voci e l'undo diventa inutilizzabile.
+5. Ingrandendo oltre la risoluzione della variante `display`, l'immagine
+   sgrana. Se dà fastidio, genera una seconda variante più grande su richiesta
+   dall'originale — **ma non decodificare l'originale per disegnare**.
 
-**Fatto quando.** Il trascinamento ridimensiona con proporzioni costanti, il
-layout segue, un Ctrl+Z annulla l'intero gesto, e l'overlay in editing mostra
-la stessa dimensione.
+**Fatto quando.** Slider e maniglia producono lo stesso risultato, le
+proporzioni restano costanti, il layout segue, un Ctrl+Z annulla l'intero
+gesto, e l'overlay in editing mostra la stessa dimensione.
+
+---
+
+## T15 — Documento portabile con immagini (`.rnode.zip`) · P2 · dipende da T12a
+
+**Obiettivo.** Un singolo file da mandare via mail o chat, che contiene la
+mappa e le sue immagini.
+
+**Perché.** Con le immagini fuori dal documento, un `.rnode.json` inviato a
+qualcun altro arriva **senza immagini**: i nodi ci sono, i riquadri sono
+vuoti. È la conseguenza diretta e inevitabile di T12a, e va chiusa prima che
+qualcuno ci sbatta.
+
+**File.** `src/editor/exportBridge.ts` · `src/editor/store.ts` ·
+`package.json` (una libreria zip, es. `fflate`)
+
+**Passi.**
+1. Formato container, lo stesso schema di `.xmind` e `.docx`:
+   ```
+   document.json          il documento, identico a oggi
+   assets/<id>.<ext>      un file per asset referenziato
+   ```
+2. **Due modalità di export**, perché il peso cambia di un ordine di grandezza:
+   - **completo** — include gli originali: fedele, ma con centinaia di immagini
+     può fare centinaia di MB;
+   - **compatto** — include solo le varianti `display`: qualche decina di MB,
+     visivamente identico a schermo.
+
+   Mostra la dimensione stimata **prima** di generare, non dopo.
+3. In import, estrai gli asset dentro l'`AssetStore` e apri il documento. Gli
+   id sono hash del contenuto, quindi reimportare due volte lo stesso file
+   **non duplica** nulla.
+4. `.rnode.json` continua a funzionare per i documenti senza immagini.
+
+**Fatto quando.** Export → import in un profilo browser pulito restituisce la
+mappa con tutte le immagini. Un documento senza immagini esporta ancora come
+`.rnode.json`. La stima di dimensione è entro il 10% del file prodotto.
+
+**Non fare.** Non riscrivere lo zip a ogni salvataggio: è un formato di
+scambio, non il formato di lavoro.
 
 ---
 
