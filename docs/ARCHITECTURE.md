@@ -50,7 +50,7 @@ App
  ├── Workspace
  │    ├── CanvasArea
  │    │    ├── CanvasView   — <canvas> renderer + pointer/wheel handling
- │    │    ├── TopicEditor  — HTML textarea overlay (allowed by spec)
+ │    │    ├── RichEditor   — the ONE Lexical overlay for the topic being edited
  │    │    └── Outliner     — synchronized indented list (bottom sheet)
  │    └── Inspector  — node style/task/notes + sheet structure controls
  ├── StatusBar      — zoom %, selection, sync, hints
@@ -178,7 +178,8 @@ check, known limitations.
   (desktop) are adapters, not rewrites.
 - Sync conflict model (CRDT vs OT) — open, will be chosen in Phase 5.
 - Layout animations — deferred to Phase 3 (stable positions already).
-- Default theme dark; light toggle works end to end.
+- Light theme only (`ThemeName = "light"`). The renderer already takes the
+  theme as data, so adding a dark one is a palette, not a refactor.
 - Fonts: system stack (no bundling).
 
 ## Tech-stack mapping (per owner)
