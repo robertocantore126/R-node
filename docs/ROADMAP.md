@@ -151,7 +151,9 @@ accetta qualunque cosa in scrittura: è un invito a inventare schemi incoerenti.
 **File.** `src/core/types.ts` · eventuali punti che li inizializzano.
 
 **Passi.**
-1. Cambia i sei campi da `unknown[]` a `never[]`.
+1. Cambia a `never[]` **cinque** campi: `boundaries`, `summaries`, `callouts`,
+   `zones`, `comments`. **Lascia stare `attachments`**: è l'unico che sta per
+   avere un consumatore vero, e lo tipizza T12.
 2. Aggiungi sopra un commento: sono feature di Fase 2–3, si tipizzano quando si
    progettano, e `never[]` costringe a una decisione esplicita.
 
@@ -338,6 +340,182 @@ composizione.
 
 **Fatto quando.** Il draft non viene aggiornato durante la composizione e
 contiene il testo finale corretto alla fine.
+
+---
+
+## T12 — Immagini nei nodi: modello, misura, disegno · P2
+
+**Obiettivo.** Un nodo può portare un'immagine, mostrata **sopra** il testo,
+dentro la stessa box.
+
+**Perché prima di T13/T14.** Ingestione (drop/paste) e resize sono inutili
+finché il modello non esiste e la box non si misura giusta. Questo task non
+aggiunge **nessuna** interazione: si verifica impostando `style.image` a mano.
+
+> **Conflitto con T4.** T4 dice di portare i campi non implementati di `Sheet` a
+> `never[]`. `attachments` è il primo ad avere un consumatore reale: **escludilo
+> da T4** e tipizzalo qui.
+
+**File.** `src/core/types.ts` · `src/core/ops.ts` · `src/layout/measure.ts` ·
+`src/render/renderer.ts` · `src/ui/RichEditor.tsx` · `src/editor/store.ts` ·
+`tests/measure.test.ts`
+
+**Passi.**
+
+1. **Modello.** In `types.ts`:
+   ```ts
+   export interface AttachmentInfo {
+     id: string;
+     mime: string;      // image/png | image/jpeg | image/gif | image/webp
+     src: string;       // data URL
+     w: number;         // pixel intrinseci
+     h: number;
+     name?: string;
+     alt?: string;
+   }
+   ```
+   `attachments: AttachmentInfo[]`. `Style.image` esiste già ed è l'id: **non
+   aggiungere un secondo campo**. Aggiungi `Style.imageWidth?: number`
+   (larghezza di visualizzazione in unità world; l'altezza segue le proporzioni).
+
+   **`w`/`h` sono obbligatori nel modello.** Senza le dimensioni intrinseche il
+   layout non può misurare il nodo finché l'immagine non è decodificata, e ogni
+   ricaricamento del documento farebbe saltare tutte le posizioni.
+
+2. **Misura** (`measureTopic`). Se il nodo ha un'immagine risolvibile:
+   - `imgW = style.imageWidth ?? min(att.w, MAX_IMAGE_W)` con `MAX_IMAGE_W = 240`;
+   - `imgH = imgW * att.h / att.w`;
+   - la larghezza della box è `max(larghezza del testo, imgW + pad*2)`;
+   - l'altezza è `imgH + IMAGE_GAP + altezza del testo + pad*2 + 4`, con
+     `IMAGE_GAP = 6` esportata come costante condivisa;
+   - se il testo è vuoto, niente `IMAGE_GAP` e niente riga vuota.
+
+   `measureTopic` è puro e non può leggere `sheet.attachments`: passa la
+   risoluzione come parametro opzionale, es.
+   `measureTopic(n, measurer, resolveImage?: (id) => {w,h} | null)`. Chi chiama
+   (layout, renderer, overlay) fornisce la stessa funzione — **se i tre non la
+   passano tutti, le misure divergono** e l'invariante I9 salta.
+
+3. **Disegno** (`renderer.drawNode`). L'immagine va **fra la forma e il testo**.
+   Il renderer è sincrono, le immagini no: serve una cache con stato.
+   ```ts
+   private images = new Map<string, { el: HTMLImageElement; ready: boolean }>();
+   ```
+   - miss → crea l'`Image`, `onload` imposta `ready = true` e **richiama un
+     repaint** (callback passata al Renderer dal CanvasView);
+   - finché `!ready` non disegnare nulla — lo spazio è già riservato dalla
+     misura, quindi non c'è salto quando arriva;
+   - `drawImage` nel rettangolo calcolato al passo 2, orizzontalmente centrato.
+
+   **Non** ridisegnare la cache a ogni frame e **non** usare `await`: il
+   renderer resta sincrono.
+
+4. **Parità con l'overlay** (`RichEditor`). Mentre editi, la box deve avere la
+   stessa geometria: aggiungi sopra l'editable un `<div>` non editabile,
+   `contentEditable={false}`, alto esattamente `imgH` e largo `imgW`, con lo
+   stesso `IMAGE_GAP` sotto. Senza questo la box salta al doppio click — è
+   esattamente la classe di bug di §3 della guida.
+
+5. **Op.** `setNodeImage { nodeId, imageId: string | null, prevImageId }`, con
+   inverso. **L'op porta solo l'id**, mai i byte: la history tiene 400 voci e
+   duplicare data URL da megabyte la farebbe esplodere. Le `AttachmentInfo`
+   vivono in `sheet.attachments`, indirizzate per contenuto (hash) così due
+   nodi con la stessa immagine la condividono.
+
+6. **Export.** `exportPng` è sincrono: prima di esportare attendi che tutte le
+   immagini referenziate siano `ready`, altrimenti l'esportazione esce senza.
+   Markdown export: `![alt](src)`.
+
+**Fatto quando.**
+- Test in `tests/measure.test.ts`: un nodo con immagine 200×100 e testo su una
+  riga misura `imgH + IMAGE_GAP + lineH + pad*2 + 4`; senza testo non ha gap;
+  `imageWidth` esplicita cambia altezza e larghezza in modo proporzionale.
+- Impostando `style.image` a mano da console l'immagine appare, la box cresce,
+  e il doppio click **non** cambia la geometria.
+- L'harness di parità resta a 0 divergenze.
+- `npm test` e `npm run typecheck` verdi.
+
+**Non fare.** Niente drop, niente paste, niente resize: sono T13 e T14. Non
+mettere i byte dell'immagine dentro gli op né dentro `MindNode`.
+
+---
+
+## T13 — Ingestione: drop e paste di immagini · P2 · dipende da T12
+
+**Obiettivo.** Trascinare un file immagine su un nodo, o incollarlo con un nodo
+selezionato, lo allega.
+
+**File.** `src/ui/CanvasView.tsx` · `src/editor/store.ts` ·
+`src/editor/imageImport.ts` (nuovo) · `tests/imageImport.test.ts` (nuovo)
+
+**Passi.**
+
+1. **Pipeline di import** (`imageImport.ts`), pura e testabile a parte:
+   - allowlist: `image/png`, `image/jpeg`, `image/gif`, `image/webp`.
+     **SVG escluso**: è un documento eseguibile, e la guida (§9 di
+     ARCHITECTURE) mette l'hardening XSS fra le cose differite — non è il
+     momento di aprire quella porta;
+   - rifiuta oltre `MAX_SOURCE_BYTES = 10 MB` con un messaggio;
+   - **ridimensiona sempre** oltre `MAX_STORED_PX = 1600` sul lato lungo,
+     ricomprimendo via `<canvas>` in JPEG q0.85 (PNG se ha canale alpha);
+   - restituisce `AttachmentInfo` con `w`/`h` **intrinseci del risultato**.
+
+   Il ridimensionamento non è un optional: le immagini finiscono come data URL
+   dentro il documento, e il README già segnala che a 10k nodi il vincolo è lo
+   storage (~3.6 MB in localStorage). Tre screenshot non compressi sfondano la
+   quota e il salvataggio fallisce.
+
+2. **Drop.** Handler `dragover` (con `preventDefault`, altrimenti il browser
+   apre il file) e `drop` su `.canvas-wrap` — **lo stesso elemento del wheel**,
+   e per lo stesso motivo: durante l'editing il puntatore è sopra l'overlay.
+   Hit-test del nodo sotto il cursore con `renderer.hitTest`. Nessun nodo sotto
+   → rifiuta con motivo.
+
+3. **Paste.** Con un nodo selezionato, `navigator.clipboard.read()` → se c'è un
+   `image/*` fra i tipi, allega invece di incollare testo. Va coordinato con
+   T10 se quello è già stato fatto.
+
+4. **Trace.** Ogni rifiuto deve dire perché — è la regola §4bis della guida:
+   ```ts
+   trace.ignored("drop", "no node under cursor");
+   trace.ignored("drop", "unsupported mime", { mime });
+   trace.ignored("drop", "too large", { bytes });
+   ```
+   e `trace.applied("drop:image", { bytes, w, h })` quando va a buon fine.
+
+5. **Quota.** Se `adapter.save` fallisce per quota, il toast deve dire che è
+   colpa delle immagini e quale documento, non un errore generico.
+
+**Fatto quando.** Test su `imageImport`: mime rifiutati, file troppo grande
+rifiutato, immagine grande ridimensionata sotto `MAX_STORED_PX` mantenendo le
+proporzioni. Drop su un nodo lo allega ed è undo-abile in **un** Ctrl+Z; drop
+sul vuoto non fa nulla e lascia una riga nel trace.
+
+**Non fare.** Non accettare SVG. Non salvare l'originale non ridimensionato.
+
+---
+
+## T14 — Ridimensionare l'immagine · P2 · dipende da T12
+
+**Obiettivo.** Maniglie per cambiare la dimensione dell'immagine dentro il nodo.
+
+**File.** `src/render/renderer.ts` · `src/ui/CanvasView.tsx` ·
+`src/editor/store.ts`
+
+**Passi.**
+1. Con il nodo selezionato e un'immagine presente, disegna una maniglia
+   nell'angolo in basso a destra dell'immagine. Riusa lo stile di quelle di
+   resize del nodo (bordo + alone bianco).
+2. `hitTestImageResize(state, x, y)` sul modello di `hitTestResize`.
+3. Il drag aggiorna `style.imageWidth` **con proporzioni bloccate**; clamp fra
+   `48` e la larghezza massima del testo del nodo. Doppio click sulla maniglia
+   riporta alla dimensione naturale (clampata a `MAX_IMAGE_W`).
+4. Un solo op alla fine del drag (come il resize del nodo), non uno per frame:
+   altrimenti un trascinamento riempie la history.
+
+**Fatto quando.** Il trascinamento ridimensiona con proporzioni costanti, il
+layout segue, un Ctrl+Z annulla l'intero gesto, e l'overlay in editing mostra
+la stessa dimensione.
 
 ---
 
