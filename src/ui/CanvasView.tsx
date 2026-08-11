@@ -395,6 +395,9 @@ export function CanvasView(): JSX.Element {
   // -------------------------------------------------------------------------
 
   let editStyle: CSSProperties | null = null;
+  // The overlay wears the node's painted colors; resolving them in the
+  // renderer keeps branch palettes in one place.
+  let editColors: { fill: string; text: string } | undefined;
   if (state.editingId) {
     const n = store.doc.node(state.editingId);
     if (n) {
@@ -405,9 +408,8 @@ export function CanvasView(): JSX.Element {
         top: y,
         width: m.w * state.camera.scale,
         height: m.h * state.camera.scale,
-        fontSize: (n.style.fontSize ?? 14) * state.camera.scale,
-        lineHeight: 1.2,
       };
+      editColors = rendererRef.current?.nodeColors(currentRenderState(), state.editingId) ?? undefined;
     }
   }
 
@@ -436,6 +438,7 @@ export function CanvasView(): JSX.Element {
           node={store.doc.node(state.editingId)!}
           style={editStyle}
           scale={state.camera.scale}
+          colors={editColors}
         />
       )}
     </div>

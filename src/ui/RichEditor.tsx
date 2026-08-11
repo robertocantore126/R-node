@@ -28,7 +28,7 @@ import { useStore } from "../editor/context";
 import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
 import { nodeRuns, plainToRuns } from "../core/text";
-import { BLOCK_GAP_FACTOR, LINE_HEIGHT_FACTOR, TEXT_INSET } from "../layout/measure";
+import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, LINE_HEIGHT_FACTOR, TEXT_INSET } from "../layout/measure";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
 import { htmlToRuns, sanitizeHtml } from "./pasteSanitizer";
 
@@ -39,7 +39,18 @@ const editorTheme = {
   textStrikethrough: "rnode-text-strike",
 };
 
-export function RichEditor({ node, style, scale }: { node: MindNode; style: CSSProperties; scale: number }): JSX.Element {
+export function RichEditor({
+  node,
+  style,
+  scale,
+  colors,
+}: {
+  node: MindNode;
+  style: CSSProperties;
+  scale: number;
+  /** Fill + text color the canvas paints this node with (see Renderer.nodeColors). */
+  colors?: { fill: string; text: string };
+}): JSX.Element {
   const store = useStore();
   const config = {
     namespace: "rnode-topic",
@@ -47,17 +58,28 @@ export function RichEditor({ node, style, scale }: { node: MindNode; style: CSSP
     theme: editorTheme,
     onError: (err: Error) => console.error("rich editor error", err),
   };
+  const ns = node.style;
   // The overlay is laid out in WORLD units and scaled as a whole with a CSS
   // transform: fonts, paddings, the border and the block gaps then match the
   // canvas pixel-for-pixel at every zoom. (Scaling each property separately
   // broke the WYSIWYG: heading font-size was absolute px and the padding was
   // screen px, so the editor text inflated and wrapped elsewhere.)
+  const decoration = [ns.underline ? "underline" : null, ns.strikethrough ? "line-through" : null].filter(Boolean).join(" ");
   const inner: CSSProperties = {
     width: Math.max(1, ((style.width as number) ?? 60) / scale),
     height: Math.max(1, ((style.height as number) ?? 28) / scale),
-    fontSize: node.style.fontSize ?? 14,
+    fontSize: ns.fontSize ?? 14,
     lineHeight: LINE_HEIGHT_FACTOR,
-    textAlign: (node.style.align === "left" ? "left" : "center") as CSSProperties["textAlign"],
+    textAlign: (ns.align === "left" ? "left" : "center") as CSSProperties["textAlign"],
+    // Everything the canvas paints the node with, so double-clicking a topic
+    // does not change how it looks: same face, same weight, same emphasis,
+    // same fill, same resolved text color.
+    fontFamily: ns.fontFamily ?? FONT_STACK,
+    fontWeight: ns.fontWeight ?? 400,
+    fontStyle: ns.italic ? "italic" : "normal",
+    textDecoration: decoration.length > 0 ? decoration : undefined,
+    background: colors?.fill,
+    color: colors?.text,
     transform: `scale(${scale})`,
     transformOrigin: "0 0",
   };
@@ -65,9 +87,12 @@ export function RichEditor({ node, style, scale }: { node: MindNode; style: CSSP
   // every block boundary (paragraph end, list item end) — the overlay applies
   // the identical rule via this CSS variable (see .topic-rich-editable).
   (inner as Record<string, string | number>)["--rnode-block-gap"] = `calc(${BLOCK_GAP_FACTOR} * ${LINE_HEIGHT_FACTOR}em)`;
+  // Bullet column width, the same constant wrapRunLines indents list text by.
+  (inner as Record<string, string | number>)["--rnode-bullet-w"] = `${BULLET_WIDTH_EM}em`;
   // The editable overlays the node's box EXACTLY like the canvas draws the
-  // text: same wrap width (boxW − pad·2 − TEXT_INSET) and the text block
-  // vertically centered (pad + 2 top/bottom, inside the 2px border).
+  // text: same wrap width (boxW − pad·2 − TEXT_INSET), and the block is
+  // centered vertically by .topic-rich-inner (justify-content: center) exactly
+  // as the renderer centers the bitmap.
   const pad = node.style.padding ?? 10;
   const editablePad: CSSProperties = {
     paddingTop: pad + 2,
@@ -78,9 +103,11 @@ export function RichEditor({ node, style, scale }: { node: MindNode; style: CSSP
 
   return (
     <div className="topic-rich-editor" style={{ left: style.left, top: style.top }}>
-      <div className="topic-rich-inner" style={inner}>
-        <LexicalComposer initialConfig={config}>
-          <Toolbar />
+      <LexicalComposer initialConfig={config}>
+        {/* Outside the scaled box on purpose: inside it the toolbar shrank
+            with the zoom (unreadable at 40%, huge at 300%). */}
+        <Toolbar />
+        <div className="topic-rich-inner" style={inner}>
           <RichTextPlugin
             contentEditable={
               <ContentEditable
@@ -94,12 +121,12 @@ export function RichEditor({ node, style, scale }: { node: MindNode; style: CSSP
             placeholder={null}
             ErrorBoundary={LexicalErrorBoundary}
           />
-          <ListPlugin />
-          <DraftSyncPlugin store={store} node={node} />
-          <PasteSanitizerPlugin />
-          <KeysPlugin store={store} />
-        </LexicalComposer>
-      </div>
+        </div>
+        <ListPlugin />
+        <DraftSyncPlugin store={store} node={node} />
+        <PasteSanitizerPlugin />
+        <KeysPlugin store={store} />
+      </LexicalComposer>
     </div>
   );
 }
