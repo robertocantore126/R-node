@@ -8,7 +8,7 @@
  */
 import type { MindNode, Sheet, StructureType, Orientation, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { BLOCK_GAP_FACTOR, createCanvasTextMeasurer, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, FONT_STACK, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
 import type { Camera } from "./viewport";
 
@@ -236,6 +236,26 @@ export class Renderer {
     if (n.type === "central") return theme.rootFill;
     const color = this.branchColor(theme, n, state.sheet);
     return n.type === "subtopic" ? theme.branchSoft[this.branchIndex(n, state.sheet)] : color;
+  }
+
+  /**
+   * The fill and text color a node is actually painted with. The editing
+   * overlay wears these so the box does not change appearance the moment you
+   * double-click it — resolving branch palettes here keeps the one source of
+   * truth in the renderer.
+   */
+  nodeColors(state: RenderState, id: string): { fill: string; text: string } | null {
+    const n = state.sheet.nodes[id];
+    if (!n) return null;
+    const theme = THEMES[state.themeName];
+    const fill =
+      n.style.fill ??
+      (n.type === "central"
+        ? theme.rootFill
+        : n.type === "subtopic"
+          ? theme.branchSoft[this.branchIndex(n, state.sheet)]
+          : this.branchColor(theme, n, state.sheet));
+    return { fill, text: n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text) };
   }
 
   private branchColor(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
@@ -469,7 +489,7 @@ export class Renderer {
     let totalH = 0;
     for (const line of lines) {
       const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
-      totalH += lh + (line.gapBefore ? lh * BLOCK_GAP_FACTOR : 0);
+      totalH += lh + (line.gapPx ?? 0);
     }
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.ceil(maxW * res));
@@ -479,7 +499,7 @@ export class Renderer {
     bctx.scale(res, res);
     bctx.textBaseline = "alphabetic";
 
-    const family = n.style.fontFamily ?? "system-ui, -apple-system, sans-serif";
+    const family = n.style.fontFamily ?? FONT_STACK;
     const baseWeight = n.style.fontWeight ?? 400;
     const strike = (n.style.strikethrough ?? false);
     const fontOf = (seg: { run: TextRun }): string => {
@@ -488,39 +508,29 @@ export class Renderer {
       const italic = (seg.run.italic ?? false) || (n.style.italic ?? false);
       return `${italic ? "italic " : ""}${bold ? 700 : baseWeight} ${runSize}px ${family}`;
     };
-    /** Real font metrics (per run) — the browser positions glyphs on the
-     * baseline with half-leading around the font's content area; the canvas
-     * must replicate that instead of centering the em box, or the node view
-     * drifts vertically from the editor's rendered text. */
-    const metricsOf = (runSize: number, font: string): { ascent: number; descent: number } => {
-      bctx.font = font;
-      const m = bctx.measureText("M");
-      const fallbackA = runSize * 0.8;
-      const fallbackD = runSize * 0.2;
-      const ascent = m.fontBoundingBoxAscent ?? fallbackA;
-      const descent = m.fontBoundingBoxDescent ?? fallbackD;
-      return { ascent: ascent > 0 ? ascent : fallbackA, descent: descent > 0 ? descent : fallbackD };
-    };
-
     let yCursor = 0;
     for (const line of lines) {
       const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
-      if (line.gapBefore) yCursor += lh * BLOCK_GAP_FACTOR;
+      yCursor += line.gapPx ?? 0;
 
-      // 1) line box: baseline = half-leading + max ascent (CSS line-box math)
-      let maxAscent = 0;
-      let maxDescent = 0;
-      for (const seg of line.segments) {
-        const runSize = seg.run.fontSize ?? size;
-        const m = metricsOf(runSize, fontOf(seg));
-        maxAscent = Math.max(maxAscent, m.ascent);
-        maxDescent = Math.max(maxDescent, m.descent);
+      // The line box and its baseline come from wrapRunLines, which builds
+      // them with the CSS rule (per-inline-box half-leading over every run
+      // plus the strut). Recomputing them here — with ONE half-leading for the
+      // whole line — is what used to drift from the editor on mixed sizes.
+      const baselineY = yCursor + (line.baseline ?? lh * 0.8);
+
+      // 2) draw the bullet in its own fixed-width column, then the text.
+      //    List items are ALWAYS left-aligned (as in the overlay's CSS):
+      //    centering a hanging indent is ill-defined and the two sides could
+      //    never agree on it.
+      const indent = line.indent ?? 0;
+      if (line.bullet) {
+        bctx.font = fontOf({ run: line.bullet.run });
+        bctx.fillStyle = line.bullet.run.color ?? color;
+        bctx.fillText(line.bullet.char, line.bullet.x, baselineY);
       }
-      const halfLeading = Math.max(0, (lh - (maxAscent + maxDescent)) / 2);
-      const baselineY = yCursor + halfLeading + maxAscent;
-
-      // 2) draw: left-aligned honors the bullet hanging indent; centered centers the line
-      let x = n.style.align === "left" ? (line.indent ?? 0) : (maxW - line.width) / 2;
+      const isList = indent > 0 || !!line.bullet;
+      let x = n.style.align === "left" || isList ? indent : (maxW - line.width) / 2;
       for (const seg of line.segments) {
         const runSize = seg.run.fontSize ?? size;
         const bold = (seg.run.bold ?? false) || baseWeight >= 700;

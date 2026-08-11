@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { $createLineBreakNode, $createParagraphNode, $createTextNode, $getRoot, createEditor } from "lexical";
+import { ListItemNode, ListNode } from "@lexical/list";
 import { editorStateToRuns, setEditorRuns } from "../src/ui/lexicalRuns";
+import type { TextRun } from "../src/core/types";
 
 // FORMAT_* bits mirroring Lexical's TextNode format flags.
 const F_BOLD = 1;
@@ -76,5 +78,51 @@ describe("lexicalRuns bridge", () => {
     const runs = editorStateToRuns(editor.getEditorState());
     expect(runs).toHaveLength(1);
     expect(runs[0].text).toBe("x");
+  });
+});
+
+describe("lexicalRuns round trip (runs → editor → runs)", () => {
+  async function roundTrip(runs: TextRun[]): Promise<TextRun[]> {
+    const editor = createEditor({ nodes: [ListNode, ListItemNode], onError: (e) => { throw e; } });
+    setEditorRuns(editor, runs);
+    await Promise.resolve();
+    return editorStateToRuns(editor.getEditorState());
+  }
+
+  const LIST: TextRun[] = [
+    { text: "one", listIndent: 1 },
+    { text: "\n" },
+    { text: "two", listIndent: 1 },
+    { text: "\n" },
+    { text: "nested", listIndent: 2 },
+  ];
+
+  it("keeps nested list depth (structural nesting and getIndent are one level, not two)", async () => {
+    const out = await roundTrip(LIST);
+    expect(out.filter((r) => r.listIndent).map((r) => r.listIndent)).toEqual([1, 1, 2]);
+  });
+
+  it("is idempotent: editing a title twice must not change it", async () => {
+    // The canvas lays out whatever comes back from here, so any drift between
+    // cycles shows up as the node silently growing/indenting on every edit.
+    const once = await roundTrip(LIST);
+    const twice = await roundTrip(once);
+    expect(twice).toEqual(once);
+    const thrice = await roundTrip(twice);
+    expect(thrice).toEqual(once);
+  });
+
+  it("does not accumulate the newline that closes a list", async () => {
+    const once = await roundTrip(LIST);
+    const twice = await roundTrip(once);
+    const tail = (rs: TextRun[]): string => rs.map((r) => r.text).join("").match(/\n*$/)![0];
+    expect(tail(twice)).toBe(tail(once));
+    expect(tail(once).length).toBeLessThanOrEqual(1);
+  });
+
+  it("keeps paragraphs separate across a round trip", async () => {
+    const out = await roundTrip([{ text: "first" }, { text: "second", paraGap: true }]);
+    expect(out.map((r) => r.text)).toEqual(["first", "second"]);
+    expect(out[1].paraGap).toBe(true);
   });
 });

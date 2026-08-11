@@ -95,19 +95,33 @@ function collectRuns(node: LexicalNode, runs: TextRun[], ctx: CollectCtx): void 
     return;
   }
   if ($isListNode(node)) {
+    const inner: TextRun[] = [];
     for (const child of (node as ElementNode).getChildren()) {
-      collectRuns(child, runs, { ...ctx, listDepth: ctx.listDepth + 1 });
+      collectRuns(child, inner, { ...ctx, listDepth: ctx.listDepth + 1 });
     }
+    // The newline after the LAST item is redundant — the list block ends there.
+    // Kept, every runs → editor → runs cycle appended one more, and a title
+    // that had been edited twice grew a blank line the canvas drew and the
+    // editor never showed.
+    for (const r of trimBlockNewline(inner)) pushRun(runs, r);
     return;
   }
   if ($isListItemNode(node)) {
-    const indent = Math.min(MAX_INDENT, ctx.listDepth + (node.getIndent() || 0));
+    // Structural nesting (ul > li > ul) and Lexical's own indent property are
+    // two spellings of the SAME level, not two levels to add up: buildList
+    // rebuilds nesting from listIndent, so summing them made the depth grow on
+    // every round trip. Take whichever spelling the editor used.
+    const indent = Math.min(MAX_INDENT, Math.max(ctx.listDepth, 1 + (node.getIndent() || 0)));
     const inner: TextRun[] = [];
     for (const child of (node as ElementNode).getChildren()) {
       if ($isListNode(child)) {
-        // nested list starts on its own line
+        // nested list starts on its own line. Recurse with ctx UNCHANGED: the
+        // $isListNode branch above already counts the level, and incrementing
+        // here too made every nesting level count twice (a level-2 item came
+        // back as listIndent 4 and the canvas indented it twice as far as the
+        // editor did).
         if (inner.length > 0) pushRun(inner, { text: "\n" });
-        collectRuns(child, inner, { ...ctx, listDepth: ctx.listDepth + 1 });
+        collectRuns(child, inner, ctx);
       } else {
         collectRuns(child, inner, { ...ctx, headingSize: undefined });
       }
@@ -170,17 +184,48 @@ function makeTextNode(text: string, run: TextRun): TextNode {
   return node;
 }
 
-/** One paragraph of runs: \n → LineBreakNode, styles per run. */
-function buildParagraph(runs: TextRun[]): LexicalNode {
-  const p = $createParagraphNode();
+/**
+ * Drop the newline that merely CLOSES a block — the block boundary is already
+ * the line break. Kept, it made Lexical emit a <br> plus its own "managed"
+ * linebreak, i.e. a blank line the editor showed and the canvas did not draw
+ * (wrapRunLines discards a trailing empty paragraph): a full extra line of
+ * drift on every list item and every pasted block.
+ */
+function trimBlockNewline(runs: TextRun[]): TextRun[] {
+  const out = runs.map((r) => ({ ...r }));
+  while (out.length > 0) {
+    const last = out[out.length - 1];
+    if (last.text === "") {
+      out.pop();
+      continue;
+    }
+    if (last.text.endsWith("\n")) {
+      last.text = last.text.slice(0, -1);
+      if (last.text === "") out.pop();
+    }
+    break;
+  }
+  return out;
+}
+
+/** Inline children for a block: \n → LineBreakNode, styles per run. */
+function inlineChildren(runs: TextRun[]): LexicalNode[] {
+  const out: LexicalNode[] = [];
   for (const run of runs) {
     const parts = run.text.split("\n");
     parts.forEach((seg, i) => {
-      if (i > 0) p.append($createLineBreakNode());
+      if (i > 0) out.push($createLineBreakNode());
       if (seg.length === 0) return;
-      p.append(makeTextNode(seg, run));
+      out.push(makeTextNode(seg, run));
     });
   }
+  return out;
+}
+
+/** One paragraph of runs: \n → LineBreakNode, styles per run. */
+function buildParagraph(runs: TextRun[]): LexicalNode {
+  const p = $createParagraphNode();
+  for (const child of inlineChildren(trimBlockNewline(runs))) p.append(child);
   return p;
 }
 
@@ -219,7 +264,10 @@ function buildList(group: TextRun[]): ListNode {
     const li = $createListItemNode();
     // strip listIndent/paraGap so the item content renders as plain text
     const clean = item.runs.map((r) => ({ ...r, listIndent: undefined, paraGap: undefined }));
-    li.append(buildParagraph(clean));
+    // INLINE children, never a nested <p>: a block child inside <li> pushes the
+    // bullet onto a line of its own (measured: a 17.5px item became 35px), so
+    // every list item cost the canvas a full extra line of drift.
+    for (const child of inlineChildren(trimBlockNewline(clean))) li.append(child);
     const childList = $createListNode("bullet");
     li.append(childList);
     stack[stack.length - 1].list.append(li);
@@ -229,11 +277,19 @@ function buildList(group: TextRun[]): ListNode {
   return root;
 }
 
+/**
+ * Drop the placeholder sub-lists buildList appends to every item. They hang off
+ * the ITEMS, not off the list, so the old version — which only looked at the
+ * list's own children (all ListItemNodes) — never removed a single one and
+ * every <li> shipped a dead empty <ul> the caret could fall into.
+ */
 function stripEmptyNestedLists(list: ListNode): void {
-  for (const child of (list as ElementNode).getChildren()) {
-    if ($isListNode(child)) {
-      if (child.getChildren().length === 0) child.remove();
-      else stripEmptyNestedLists(child);
+  for (const item of (list as ElementNode).getChildren()) {
+    if (!$isListItemNode(item)) continue;
+    for (const child of (item as ElementNode).getChildren()) {
+      if (!$isListNode(child)) continue;
+      if ((child as ElementNode).getChildren().length === 0) child.remove();
+      else stripEmptyNestedLists(child as ListNode);
     }
   }
 }

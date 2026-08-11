@@ -31,11 +31,19 @@ export interface TextMetricsInput {
 
 export interface TextMeasurer {
   measure(text: string, style: TextMetricsInput): { width: number };
+  /**
+   * Font ascent/descent around the baseline, in px. Needed to build line boxes
+   * the way CSS does (see `wrapRunLines`); when absent the caller falls back to
+   * a 0.8/0.2 split, which reproduces the old fontSize × LINE_HEIGHT_FACTOR
+   * behavior exactly.
+   */
+  metrics?(style: TextMetricsInput): { ascent: number; descent: number };
 }
 
 /** Deterministic fallback (no DOM): ~0.55 × fontSize per char. */
 export const HEURISTIC_MEASURER: TextMeasurer = {
   measure: (t, s) => ({ width: t.length * (s.fontSize * 0.55) }),
+  metrics: (s) => ({ ascent: s.fontSize * 0.8, descent: s.fontSize * 0.2 }),
 };
 
 let sharedCanvasMeasurer: TextMeasurer | null = null;
@@ -48,16 +56,31 @@ export function createCanvasTextMeasurer(): TextMeasurer {
   const ctx = canvas.getContext("2d");
   if (!ctx) return HEURISTIC_MEASURER;
   const cache = new Map<string, number>();
+  const metricsCache = new Map<string, { ascent: number; descent: number }>();
+  const fontOf = (s: TextMetricsInput): string =>
+    `${s.italic ? "italic " : ""}${s.fontWeight ?? 400} ${s.fontSize}px ${s.fontFamily ?? FONT_STACK}`;
   sharedCanvasMeasurer = {
     measure(text, s) {
       const key = `${s.fontWeight ?? 400}|${s.italic ? 1 : 0}|${s.fontSize}|${s.fontFamily ?? "system-ui"}|${text}`;
       const hit = cache.get(key);
       if (hit !== undefined) return { width: hit };
-      ctx.font = `${s.italic ? "italic " : ""}${s.fontWeight ?? 400} ${s.fontSize}px ${s.fontFamily ?? "system-ui, -apple-system, sans-serif"}`;
+      ctx.font = fontOf(s);
       const width = ctx.measureText(text).width;
       if (cache.size > 20_000) cache.clear();
       cache.set(key, width);
       return { width };
+    },
+    metrics(s) {
+      const font = fontOf(s);
+      const hit = metricsCache.get(font);
+      if (hit) return hit;
+      ctx.font = font;
+      const m = ctx.measureText("M");
+      const ascent = m.fontBoundingBoxAscent > 0 ? m.fontBoundingBoxAscent : s.fontSize * 0.8;
+      const descent = m.fontBoundingBoxDescent > 0 ? m.fontBoundingBoxDescent : s.fontSize * 0.2;
+      const out = { ascent, descent };
+      metricsCache.set(font, out);
+      return out;
     },
   };
   return sharedCanvasMeasurer;
@@ -70,6 +93,14 @@ export function createCanvasTextMeasurer(): TextMeasurer {
 export const TEXT_INSET = 6; // horizontal inset inside the topic box (both sides)
 export const LINE_HEIGHT_FACTOR = 1.25;
 /**
+ * The one font stack for topic text. Must stay identical to `--font` in
+ * styles.css: the canvas measured/drew with "system-ui, -apple-system,
+ * sans-serif" while the overlay inherited `--font`, so on any machine where
+ * those resolve differently the editor and the node used different faces —
+ * different metrics, different wrap, for no visible reason.
+ */
+export const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+/**
  * Block gap shared by BOTH renderers (single source of truth): every block
  * boundary (paragraph end, list item end) advances by this fraction of the
  * line height. The Lexical overlay mirrors it via --rnode-block-gap
@@ -80,23 +111,48 @@ export const BLOCK_GAP_FACTOR = 0.6;
 export const MIN_TOPIC_W = 84;
 export const MAX_TOPIC_W = 280;
 
+/**
+ * Width of the bullet column, in em of the list item's font size. Shared with
+ * the overlay as `--rnode-bullet-w`: the canvas indents the text by exactly
+ * this and the CSS hangs the item by exactly this, so a wrapped list item
+ * lines up identically on both sides.
+ *
+ * Measuring the glyph string ("•  ") instead — what this used to do — could
+ * never match the browser, because with `list-style` the marker width is
+ * UA-defined and no CSS length can be derived from it.
+ */
+export const BULLET_WIDTH_EM = 1.2;
+
+const BULLET_CHARS = ["•", "◦", "▪"];
+
+/** Bullet marker for a list item at `depth` (1 = top level). */
+export function bulletChar(depth: number): string {
+  return BULLET_CHARS[Math.min(BULLET_CHARS.length - 1, Math.max(0, depth - 1))];
+}
+
 /** One wrapped line of rich text: segments reference their source run. */
 export interface TextRunLine {
   segments: { text: string; run: TextRun }[];
+  /** Visible width — trailing whitespace excluded, as CSS does when centering. */
   width: number;
-  /** Line height in px (tallest run on the line). */
+  /** Line height in px — the CSS line box over every inline box on the line. */
   height?: number;
-  /** Horizontal offset for continuation lines of a bullet item (hanging indent). */
+  /** Distance from the line's top to its baseline (CSS half-leading applied). */
+  baseline?: number;
+  /** x where the TEXT starts (list items: depth × bullet width, every line). */
   indent?: number;
   /** Extra vertical gap before this line (paragraph boundary). */
   gapBefore?: boolean;
-}
-
-/** Bullet marker + indent prefix for a list item at `depth` (1 = top level). */
-export function listGlyph(depth: number): string {
-  if (depth <= 1) return "•  ";
-  if (depth === 2) return "  ◦  ";
-  return "  ".repeat(depth - 1) + "•  ";
+  /**
+   * The gap in px. Derived from the block's STRUT, never from this line's
+   * height: the overlay applies `margin-top: calc(0.6 * 1.25em)` on the block
+   * element, whose em is the topic's font size — a heading's size lives on an
+   * inner span and does not enlarge its own block gap. Sizing the gap from the
+   * line height made a heading after a paragraph sit 9px too low.
+   */
+  gapPx?: number;
+  /** First line of a list item: which marker to draw and where. */
+  bullet?: { char: string; x: number; run: TextRun };
 }
 
 function runMetrics(run: TextRun, style: Style): TextMetricsInput {
@@ -122,14 +178,51 @@ function runMetrics(run: TextRun, style: Style): TextMetricsInput {
  */
 export function wrapRunLines(runs: TextRun[], maxW: number, measurer: TextMeasurer, style: Style): TextRunLine[] {
   const widthOf = (text: string, run: TextRun): number => measurer.measure(text, runMetrics(run, style)).width;
+  /**
+   * The CSS strut: every line box is at least as tall as the block's own font
+   * size, even when every inline box on it is smaller. Without this a run of
+   * 10px text inside a 14px topic produced a 12.5px line on the canvas and a
+   * 17.5px line in the editor.
+   */
+  const strut = style.fontSize ?? 14;
+  /** `margin-top: calc(BLOCK_GAP_FACTOR * LINE_HEIGHT_FACTOR em)` on the block. */
+  const blockGapPx = strut * LINE_HEIGHT_FACTOR * BLOCK_GAP_FACTOR;
 
-  // 1) Split the run stream into paragraphs at literal \n (each paragraph is
-  //    a segment list that may span multiple runs — emphasis survives a break).
-  const paragraphs: { text: string; run: TextRun; paraGap: boolean }[][] = [[]];
+  /**
+   * One inline box's extent above and below the baseline, CSS-style: the
+   * leading (line-height − content height) is split in half around the font's
+   * content area. A line box is then max(above) + max(below) over EVERY inline
+   * box on the line, the strut included — not `tallest font-size × 1.25`,
+   * which put a 26px heading 1px off from the browser on every line.
+   */
+  const boxOf = (m: TextMetricsInput): { above: number; below: number } => {
+    const met = measurer.metrics ? measurer.metrics(m) : { ascent: m.fontSize * 0.8, descent: m.fontSize * 0.2 };
+    const half = (m.fontSize * LINE_HEIGHT_FACTOR - (met.ascent + met.descent)) / 2;
+    return { above: met.ascent + half, below: met.descent + half };
+  };
+  const strutBox = boxOf({ fontSize: strut, fontFamily: style.fontFamily, fontWeight: style.fontWeight, italic: style.italic });
+
+  // 1) Split the run stream into paragraphs (each paragraph is a segment list
+  //    that may span multiple runs — emphasis survives a break). A paragraph
+  //    ends at a literal \n, and ALSO at a run that opens a new block.
+  interface Seg {
+    text: string;
+    run: TextRun;
+    paraGap: boolean;
+  }
+  const paragraphs: Seg[][] = [[]];
+  const openParagraph = (): void => {
+    if (paragraphs[paragraphs.length - 1].length > 0) paragraphs.push([]);
+  };
   for (const run of runs) {
     const parts = run.text.split("\n");
     for (let i = 0; i < parts.length; i++) {
       if (i > 0) paragraphs.push([]);
+      // A paraGap/listIndent run starts a new block even WITHOUT a newline:
+      // editorStateToRuns marks a root-child boundary with paraGap alone, so
+      // without this two typed paragraphs ran together on one canvas line
+      // while the editor showed them as two separate <p>.
+      else if (run.paraGap || run.listIndent !== undefined) openParagraph();
       if (parts[i].length > 0) {
         // only the first segment of the run carries the paragraph-gap flag
         paragraphs[paragraphs.length - 1].push({ text: parts[i], run, paraGap: i === 0 && !!run.paraGap });
@@ -137,18 +230,47 @@ export function wrapRunLines(runs: TextRun[], maxW: number, measurer: TextMeasur
     }
   }
 
+  /** Longest prefix of `text` that fits `budget` (at least one character). */
+  const fitPrefix = (text: string, run: TextRun, budget: number): number => {
+    let lo = 1;
+    let hi = text.length;
+    let best = 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (widthOf(text.slice(0, mid), run) <= budget) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return best;
+  };
+
   const out: TextRunLine[] = [];
-  let emittedParas = 0;
-  for (const para of paragraphs) {
+  let emittedBlocks = 0;
+  // Blank paragraphs are only real blank lines when content follows them; the
+  // trailing ones are just the newlines that close the last block. Tolerating
+  // any number of them keeps documents written by older builds (which could
+  // accumulate "\n\n") rendering the same as the editor shows them.
+  let lastContentIdx = -1;
+  for (let i = 0; i < paragraphs.length; i++) if (paragraphs[i].length > 0) lastContentIdx = i;
+  for (let pi = 0; pi < paragraphs.length; pi++) {
+    const para = paragraphs[pi];
     // Bullet metadata for this paragraph (first listIndent run wins).
     let bulletRun: TextRun | null = null;
     for (const seg of para) if (seg.run.listIndent) { bulletRun = seg.run; break; }
-    const glyph = bulletRun ? listGlyph(bulletRun.listIndent!) : null;
-    const glyphW = glyph && bulletRun ? widthOf(glyph, bulletRun) : 0;
+    const depth = bulletRun?.listIndent ?? 0;
+    // Text column of a list item: depth × bullet width on EVERY line (the
+    // marker sits in the column to its left). Mirrors the CSS padding-left +
+    // negative text-indent on .topic-rich-editable li.
+    const bulletW = BULLET_WIDTH_EM * (bulletRun?.fontSize ?? strut);
+    const textIndent = depth * bulletW;
+    const budget = Math.max(1, maxW - textIndent);
     // Block boundary → fixed gap. A paragraph flagged paraGap OR a list item
     // (bulletRun) starts a new block; the very first block of the topic has
     // no leading gap. The overlay applies the same rule with --rnode-block-gap.
-    const gapBefore = (para.length > 0 && (para[0].paraGap || !!bulletRun)) && emittedParas > 0;
+    const gapBefore = (para.length === 0 ? false : para[0].paraGap || !!bulletRun) && emittedBlocks > 0;
 
     // 2) Tokenize the paragraph into whitespace-separated fragments (whitespace
     //    kept). A word may span runs (bold "he" + plain "llo" stays one token)
@@ -162,46 +284,95 @@ export function wrapRunLines(runs: TextRun[], maxW: number, measurer: TextMeasur
 
     const startOutLen = out.length;
     let line: { text: string; run: TextRun }[] = [];
-    let lineWidth = 0;
-    let firstLine = true; // the glyph lives on the first line only
-    let lineMaxSize = 0;
+    let lineWidth = 0; // includes trailing whitespace
+    let visibleWidth = 0; // excludes it — this is what CSS centers
+    let firstLine = true; // the marker lives on the first line only
+    let lineAbove = strutBox.above;
+    let lineBelow = strutBox.below;
+    const grow = (run: TextRun): void => {
+      const bx = boxOf(runMetrics(run, style));
+      lineAbove = Math.max(lineAbove, bx.above);
+      lineBelow = Math.max(lineBelow, bx.below);
+    };
     const push = (): void => {
       if (line.length === 0) return;
-      const height = Math.max(1, lineMaxSize) * LINE_HEIGHT_FACTOR;
-      const indent = glyph ? (firstLine ? 0 : glyphW) : 0;
-      out.push({ segments: line, width: lineWidth, height, indent, gapBefore: gapBefore && firstLine });
+      // Trailing whitespace hangs past the line end in CSS: it must not count
+      // towards the width, or every centered wrapped line sits half a space
+      // off and the measured box is a couple of px too wide.
+      while (line.length > 0 && /^\s+$/.test(line[line.length - 1].text)) line.pop();
+      out.push({
+        segments: line,
+        width: visibleWidth,
+        height: lineAbove + lineBelow,
+        baseline: lineAbove,
+        indent: textIndent,
+        gapBefore: gapBefore && firstLine,
+        gapPx: gapBefore && firstLine ? blockGapPx : undefined,
+        bullet: bulletRun && firstLine ? { char: bulletChar(depth), x: Math.max(0, textIndent - bulletW), run: bulletRun } : undefined,
+      });
       line = [];
       lineWidth = 0;
-      lineMaxSize = 0;
+      visibleWidth = 0;
+      lineAbove = strutBox.above;
+      lineBelow = strutBox.below;
       firstLine = false;
     };
 
     for (const tok of tokens) {
-      const isSpace = /^\s+$/.test(tok.text);
-      if (isSpace) {
+      if (/^\s+$/.test(tok.text)) {
         if (line.length > 0) {
           line.push(tok);
           lineWidth += widthOf(tok.text, tok.run);
         }
         continue; // leading/collapsed whitespace skipped
       }
-      const w = widthOf(tok.text, tok.run);
-      const budget = firstLine && glyph ? maxW - glyphW : maxW;
-      if (line.length > 0 && lineWidth + w > budget) push();
-      if (glyph && firstLine && line.length === 0) {
-        // prepend the bullet marker to the first line
-        line.push({ text: glyph, run: bulletRun! });
-        lineWidth += glyphW;
-        lineMaxSize = Math.max(lineMaxSize, bulletRun!.fontSize ?? style.fontSize ?? 14);
+      let rest = tok.text;
+      // A token longer than the whole column must break mid-word, exactly as
+      // `overflow-wrap: break-word` does in the overlay. Without this the
+      // canvas drew past its bitmap (clipping the tail) while the editor let
+      // it overflow the box.
+      for (;;) {
+        const w = widthOf(rest, tok.run);
+        if (lineWidth + w <= budget || (line.length === 0 && w <= budget)) {
+          line.push({ text: rest, run: tok.run });
+          lineWidth += w;
+          visibleWidth = lineWidth;
+          grow(tok.run);
+          break;
+        }
+        if (line.length > 0) {
+          push();
+          continue; // retry the whole token on a fresh line
+        }
+        const k = fitPrefix(rest, tok.run, budget);
+        if (k >= rest.length) {
+          line.push({ text: rest, run: tok.run });
+          lineWidth += w;
+          visibleWidth = lineWidth;
+          grow(tok.run);
+          break;
+        }
+        const head = rest.slice(0, k);
+        line.push({ text: head, run: tok.run });
+        lineWidth += widthOf(head, tok.run);
+        visibleWidth = lineWidth;
+        grow(tok.run);
+        push();
+        rest = rest.slice(k);
       }
-      line.push(tok);
-      lineWidth += w;
-      lineMaxSize = Math.max(lineMaxSize, tok.run.fontSize ?? style.fontSize ?? 14);
     }
     push();
-    if (out.length > startOutLen) emittedParas++;
+    if (out.length > startOutLen) {
+      emittedBlocks++;
+    } else if (pi < lastContentIdx) {
+      // An empty paragraph is a real, visible blank line in the editor (the
+      // canvas used to swallow it). A trailing empty paragraph is just the
+      // newline that closes the last block, so it is not emitted.
+      out.push({ segments: [], width: 0, height: strutBox.above + strutBox.below, baseline: strutBox.above, indent: textIndent, gapBefore, gapPx: gapBefore ? blockGapPx : undefined });
+      emittedBlocks++;
+    }
   }
-  if (out.length === 0) out.push({ segments: [], width: 0, height: (style.fontSize ?? 14) * LINE_HEIGHT_FACTOR });
+  if (out.length === 0) out.push({ segments: [], width: 0, height: strutBox.above + strutBox.below, baseline: strutBox.above });
   return out;
 }
 
@@ -240,10 +411,11 @@ export function measureTopic(n: MindNode, measurer: TextMeasurer = HEURISTIC_MEA
   const textW = Math.max(24, maxW - pad * 2 - TEXT_INSET);
   const runs = nodeRuns(n.title, n.titleRuns);
   const lines = wrapRunLines(runs, textW, measurer, style);
-  const maxLineW = lines.reduce((acc, l) => Math.max(acc, l.width), 0);
+  // the list indent is part of the line's extent, not free space
+  const maxLineW = lines.reduce((acc, l) => Math.max(acc, (l.indent ?? 0) + l.width), 0);
 
   let w = style.width ? Math.max(MIN_TOPIC_W, style.width) : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET));
-  let h = style.height ?? Math.max(28, lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapBefore ? (l.height ?? fontSize * LINE_HEIGHT_FACTOR) * BLOCK_GAP_FACTOR : 0), 0) + pad * 2 + 4);
+  let h = style.height ?? Math.max(28, lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapPx ?? 0), 0) + pad * 2 + 4);
 
   const shape = style.shape ?? "rounded";
   if (shape === "circle") {
