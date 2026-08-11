@@ -343,6 +343,12 @@ contiene il testo finale corretto alla fine.
 
 ---
 
+> **I task T12a–T15 assumono le scelte A1+B1 di
+> [ADR-001](ADR-001-immagini-e-piattaforma.md)** — archivio asset separato,
+> due varianti per immagine, decodifica governata nel renderer. Quella
+> decisione è ancora **aperta**: se cambia (per esempio verso un renderer
+> WebGPU), questi quattro task vanno rivisti prima di eseguirli.
+
 ## T12a — Archivio degli asset (fuori dal documento) · P2
 
 **Obiettivo.** Un archivio di blob separato dal documento, indirizzato per
