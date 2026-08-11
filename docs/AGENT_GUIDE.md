@@ -184,16 +184,46 @@ Cosa contiene, e perché conta:
 | `op`, `layout` con durata | quale sottosistema è rallentato |
 | `invariant`, `error` | arrivano con i venti eventi che li hanno preceduti |
 
-Regola per chi scrive codice: **ogni `return` anticipato in un handler di input
-deve dire perché**.
+### Leggere una cattura
+
+Il JSON ha un campo `README` che si spiega da solo, poi `counts` e `events` in
+ordine cronologico. `t` sono i millisecondi dal caricamento della pagina, `n` è
+quanti eventi identici consecutivi sono stati fusi in quella voce.
+
+Ordine di lettura consigliato:
+
+1. **`input` con `outcome: "ignored"`** — se il sintomo è «non succede niente»,
+   la risposta è quasi sempre qui, con il motivo già scritto.
+2. **`error` e `invariant`** — arrivano con la loro cronologia davanti.
+3. **`render`** — è la voce che separa due bug che sembrano identici:
+   - `linksDrawn < links` → il renderer **non ha disegnato**: bug di culling;
+   - `linksDrawn === links` ma l'utente non vede nulla → ha disegnato e non si
+     vede: bug di pittura (colore, spessore sub-pixel, ordine di disegno).
+   Lo stesso vale per `relsDrawn/rels` e `visible/nodes`.
+4. **`op` e `layout`** con le durate, se il sintomo è lentezza.
+
+Esempio reale — la rotella che non funzionava in editing:
+
+```
+INPUT wheel:pan applied x1
+EDIT  start
+INPUT wheel ignored(editing) x1     ← la risposta
+```
+
+### Regola per chi scrive codice
+
+**Ogni `return` anticipato in un handler di input deve dire perché.**
 
 ```ts
 if (this.state.editingId) return trace.ignored("wheel", "editing");
 ```
 
 Un `return` muto rende un comportamento voluto indistinguibile da un difetto,
-e nessuna segnalazione a parole può colmare quella differenza. Il tracer è
-disattivato nelle build di produzione: ogni chiamata esce su un booleano.
+e nessuna segnalazione a parole può colmare quella differenza. Stessa regola
+per il renderer: se salti qualcosa, conta quanto ne hai saltato.
+
+Il tracer è disattivato nelle build di produzione: ogni chiamata esce su un
+booleano. Istruzioni per catturare: [README](../README.md#reporting-a-bug).
 
 ---
 

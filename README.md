@@ -235,6 +235,40 @@ because it has no layout engine. Automating it is task T2 in
 
 ---
 
+## Reporting a bug
+
+Don't describe the symptom — capture it. While running `npm run dev` the app
+records its own decisions in a rolling buffer.
+
+**When something looks wrong, press `Ctrl+Shift+D`.** You are asked what you
+expected (optional, one line), and a `rnode-trace-*.json` file downloads.
+Attach that file. It carries the last few hundred events: which inputs were
+acted on, which were deliberately ignored *and why*, what the renderer
+actually drew each frame, how long layout took, and any errors — with the
+events that preceded them.
+
+For a clean capture of one specific problem, open the console and clear the
+buffer immediately before reproducing:
+
+```js
+__rnodeTrace.clear()   // then reproduce the bug, then press Ctrl+Shift+D
+```
+
+Other console entry points: `__rnodeTrace.capture()` returns the same bundle
+as an object (handy for inspecting in place), `__rnodeTrace.download()` skips
+the prompt, `__rnodeTrace.enabled` tells you whether recording is on.
+
+The tracer is **development-only** — it is compiled out of production builds,
+so a `npm run build` bundle records nothing.
+
+Why this instead of a written report: the decisive facts are invisible from
+outside the app. "The connector lines disappear when I pan" cannot tell anyone
+whether the renderer skipped them or drew them where you could not see them —
+two different bugs. A capture answers that in one line. How to read one is in
+[docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) §4bis.
+
+---
+
 ## Roadmap
 
 - **Phase 1 — Core editor (done):** document model, ops + undo/redo, canvas
