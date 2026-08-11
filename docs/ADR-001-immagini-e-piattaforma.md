@@ -149,10 +149,31 @@ Serve `bitmap.close()` esplicito. Con `new Image()` quel controllo non esiste.
 ### 3.3 Rischio di perdita dati
 
 [V, comportamento della piattaforma] I browser **possono cancellare
-IndexedDB** sotto pressione di spazio se l'origine non è marcata persistente.
-`navigator.storage.persist()` è una *richiesta*, non una garanzia. Per
-centinaia di originali insostituibili è un rischio reale, ed è un argomento
-per il desktop più forte della quota.
+IndexedDB**. Ma il rischio **non è uniforme**: dipende da come l'app viene
+distribuita, e va valutato per canale invece che in astratto.
+
+| Canale | Rischio | Perché |
+|---|---|---|
+| Chromium, `persist()` concesso o installata come PWA | **basso** | l'origine diventa persistente e non viene sfrattata automaticamente sotto pressione di spazio |
+| Chromium, sito normale senza `persist()` | **medio** | storage "best-effort", sfrattabile quando lo spazio scarseggia |
+| Safari, sito non installato | **alto** | l'ITP cancella lo storage scrivibile da script dopo ~7 giorni senza interazione, e `persist()` non protegge |
+| Firefox | **medio** | `persist()` richiede un permesso esplicito all'utente |
+| Desktop (Tauri) | **nullo** | file veri, nessuna politica di eviction |
+
+`navigator.storage.persist()` resta una *richiesta*, non una garanzia: su
+Chromium viene concessa in base a euristiche (installazione, engagement), non
+su domanda.
+
+Conseguenza per la decisione: **questa casella non si può riempire senza
+sapere il canale di distribuzione**. Se R-node vive come app installata o
+desktop, l'argomento perde peso; se deve funzionare come sito aperto in Safari,
+diventa il rischio principale — centinaia di originali insostituibili
+cancellati dopo una settimana di inattività.
+
+Nota su un numero ricorrente: la quota "~60% dello spazio disco" è
+**specifica di Chrome**. Firefox usa criteri diversi e Safari si attesta intorno
+a ~1GB prima di chiedere conferma. Ogni conclusione del tipo "sul web la quota
+basta" vale su Chromium e va riverificata altrove.
 
 ---
 
@@ -315,13 +336,37 @@ Legenda: ✅ risolve · ➖ neutro · ❌ non risolve o peggiora.
 
 | | Quota | Eviction §3.3 | Memoria decodifica | Fluidità import | Costo | Rischio manutenzione |
 |---|---|---|---|---|---|---|
-| **A1** Canvas2D + IndexedDB | ✅ | ❌ | ✅ (a mano) | ➖ | Basso | Basso |
-| **A2** + WebGPU | ✅ | ❌ | ✅✅ (mipmap) | ➖ | Alto | **Alto** (2 renderer) |
-| **A3** + Worker | ✅ | ❌ | ➖ | ✅ | Basso-medio | Basso |
-| **B1** Tauri + fs | ✅✅ | ✅ | ❌ | ➖ | Basso-medio | Medio (2 target) |
-| **B2** + pipeline Rust | ✅✅ | ✅ | ➖ | ✅✅ | Medio | Medio |
+| **A1** Canvas2D + IndexedDB | ✅ (Chrome) | dipende dal canale | ✅ (a mano) | ➖ | Basso | Basso |
+| **A2** + WebGPU | ✅ (Chrome) | dipende dal canale | ✅✅ (mipmap) | ➖ | Alto | **Alto** (2 renderer) |
+| **A3** + Worker | ✅ (Chrome) | dipende dal canale | ➖ **come A1** | ✅ | Basso-medio | Basso |
+| **B1** Tauri + fs | ✅✅ | ✅ | eredita dalla webview | ➖ | Basso-medio | Medio (2 target) |
+| **B2** + pipeline Rust | ✅✅ | ✅ | eredita dalla webview | ✅✅ | Medio | Medio |
 | **B3** + WebGPU | ✅✅ | ✅ | ✅✅ | ✅✅ | Alto | Alto |
 | **C** Nativo | ✅✅ | ✅ | ✅✅ | ✅✅ | **Altissimo** | **Altissimo** |
+| **D** Composizione OS | ✅✅ | ✅ | ✅✅ | ✅✅ | **Altissimo** | **Ingestibile** |
+
+Tre avvertenze su come si legge questa tabella, perché da sola induce in errore.
+
+**Il Worker non riduce la memoria.** A3 sposta *dove* avviene la decodifica,
+non *quanto* pesa la bitmap: una 1024×768 occupa 3MB nel worker esattamente
+come nel thread principale. Su quell'asse A3 è **uguale** ad A1, non migliore.
+
+**Tauri non peggiora né migliora la memoria: la eredita.** B1 e B2 valgono
+quanto vale la strategia lato web che ci gira dentro.
+
+**L'opzione D fallisce sull'interazione, non sull'import.** Comporre una
+finestra nativa sopra una webview significa due loop di rendering da
+sincronizzare a ogni scroll e zoom, più z-order, click-through, DPI misti fra
+monitor e tearing del compositore. L'import in Rust andrebbe benissimo: è
+l'interazione a rompersi.
+
+> ⚠️ **Questa tabella nasconde la variabile che decide.** Su queste sei
+> colonne C e B3 vincono quasi ovunque, perché la colonna che escluderebbe C
+> non esiste: **quanto editing di testo bisogna riscrivere**. Shaping, line
+> breaking Unicode, bidi, caret, selezione, IME. In webview lo dà il browser;
+> in nativo sono anni-persona, compressi qui dentro la parola "Altissimo".
+> Chi ottimizza la tabella sceglie il nativo. **Leggere §8 prima di
+> concludere.**
 
 ---
 
