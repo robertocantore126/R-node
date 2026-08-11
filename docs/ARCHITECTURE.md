@@ -4,6 +4,11 @@ Status: **Phase 1 (core editor) in progress.** AI services and the full
 security model are explicitly deferred per the product owner; the seams for
 both exist but are not built.
 
+> This file describes the **structure and the plan**. Before changing code,
+> read [AGENT_GUIDE.md](AGENT_GUIDE.md) — the invariants, the editor↔canvas
+> parity contract and the definition of done — and take work from
+> [ROADMAP.md](ROADMAP.md), in order.
+
 ## 1. Product requirements (v0.1 scope)
 
 A visual thinking workspace: mind maps, trees, org charts, timelines,
@@ -16,7 +21,9 @@ Acceptance for Phase 1:
 - Every edit is undoable/redoable (single gesture = single undo step).
 - Maps stay readable as they grow (layout never overlaps).
 - Canvas and Outliner stay synchronized.
-- Local autosave survives reload; nothing silently lost.
+- Saving is explicit (Ctrl+S) and nothing is silently lost: there is no
+  autosave timer. `saveNow()` writes through the storage adapter AND the
+  portable `.rnode.json`.
 - The interface is original (no Xmind assets or pixel layouts).
 
 ## 2. Information architecture
@@ -142,7 +149,7 @@ DOCX, PPTX, OPML, FreeMind, MindManager, OCR, background workers.
 
 - **Phase 1 (now):** document model, ops + undo/redo, one sheet, central/main/
   subtopic/floating, canvas renderer, keyboard + mouse, zoom/pan, drag-drop
-  with drop indicator, autosave, outliner, inspector, palette, tests.
+  with drop indicator, manual save, outliner, inspector, palette, tests.
 - **Phase 2:** themes/styles, markers, labels, notes (rich), boundaries,
   summaries, relationships UI, callouts, attachments.
 - **Phase 3:** logic/tree/org/timeline/fishbone/matrix/treetable/mixed.
