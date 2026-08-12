@@ -416,6 +416,88 @@ Dettagli di esecuzione (archiviati): [archive/PIANO-IMMAGINI.md](archive/PIANO-I
 
 ---
 
+## T21 — Quattro cose che il codice fa e nessuno guarda · P1
+
+Emerse da una revisione del **codice** (non dei documenti) il 2026-08-12, e
+verificate una per una. Sono un gruppo coerente: funzionalità che esistono ma
+non vengono invocate, o che non si difendono da sole.
+
+**File**: `src/persist/assets.ts` · `src/editor/store.ts` · `src/ui/Palette.tsx`
+· `src/render/renderer.ts` · i rispettivi test.
+
+### A — `collectOrphans` non lo chiama nessuno
+
+Esiste, è testato, e nel codice compare **solo dentro commenti** che lo
+descrivono come «the GC». Nessun comando, nessun pulsante. Quindi gli asset
+orfani si accumulano per sempre: cancelli un nodo con immagine e i byte restano
+nel `.rnode`, che **cresce e non torna mai indietro**. T12a lo aveva specificato
+come comando esplicito; il comando non è mai stato collegato.
+
+- [ ] `AssetStore.size(id): Promise<number>` — somma dei byte di tutti i livelli
+      (in SQLite è una `SUM(length(bytes))`, quindi esatta e non stimata)
+- [ ] comando nella palette: esegue `collectOrphans`, mostra **quante schede,
+      quanti blob e quanti byte** si recuperano, e chiede conferma
+- [ ] le **schede** orfane si rimuovono con un op (modificano il documento,
+      quindi undo-abili); i **blob** si cancellano dopo, e questo non è undo-abile
+
+> **La conferma deve dirlo.** Dopo la cancellazione dei blob, un undo
+> ripristinerebbe le schede senza i byte. La finestra deve dichiarare che
+> l'operazione non è annullabile — come fa qualunque comando di purge.
+
+### B — `saveNow` non ha una guardia
+
+Non esiste alcun `isSaving`. Due Ctrl+S rapidi si sovrappongono: su desktop
+significa due selettori di file, o una scrittura mentre un'altra sta ancora
+copiando asset.
+
+- [ ] coda a **una posizione**: se arriva una richiesta mentre un salvataggio
+      è in corso, segnala «in attesa» e riesegui **una** volta alla fine
+
+> **Non basta un return anticipato.** Scartare la seconda richiesta perde le
+> modifiche fatte fra l'inizio del primo salvataggio e la seconda pressione:
+> l'utente vede «Saved» e ha su disco una versione vecchia.
+
+### C — `adoptFile` salta in silenzio
+
+`if (!meta || !original || !large || !small) continue; // referenced but absent`
+
+Salvi con nome, un asset manca, e il file nuovo referenzia un id che non
+contiene — senza dire niente. Saltare è giusto (far fallire l'intero
+salvataggio per un'immagine sarebbe peggio); **il silenzio no**.
+
+- [ ] `adoptFile` restituisce quanti asset non ha potuto copiare
+- [ ] il chiamante lo riporta all'utente con il numero
+
+### D — La cache del testo si sfratta per numero, non per byte
+
+`textCache` ha un limite di **5000 voci** con rimozione FIFO. Ma le bitmap del
+testo hanno dimensioni molto diverse (larghezza del nodo × altezza × risoluzione²):
+5000 canvas offscreen possono valere centinaia di MB, e il limite non se ne
+accorge. È la stessa critica che ha portato la cache delle immagini a un budget
+in byte — la cache del testo è rimasta indietro.
+
+- [ ] budget in byte (`canvas.width * canvas.height * 4`), stessa forma di
+      `IMAGE_BUDGET`
+- [ ] **LRU vera**: `delete` + `set` sull'hit, come già fa `imageCache`
+      (oggi la FIFO può sfrattare il nodo che stai guardando)
+
+> Tocca le stesse righe di **T6** (la chiave calcolata con `JSON.stringify` a
+> ogni frame). Conviene fare T6 subito dopo, non prima: così la chiave nuova
+> nasce già dentro la politica di sfratto nuova.
+
+### Fatto quando
+
+- Un test verifica che dopo aver cancellato un nodo con immagine,
+  `collectOrphans` riporta quell'asset, e che il comando ne recupera i byte.
+- Un test verifica che due `saveNow` concorrenti producono **due** scritture,
+  la seconda con il contenuto più recente.
+- Un test verifica che `adoptFile` riporta il numero di asset saltati.
+- Un test verifica che la `textCache` sfratta al superamento del budget in byte
+  e che un hit rinfresca la ricenza.
+- `npm run typecheck` e `npm test` verdi.
+
+---
+
 ## Fuori roadmap (decisione del proprietario)
 
 Non iniziare senza richiesta esplicita:
