@@ -77,6 +77,8 @@ export interface Style {
   shadow?: boolean;
   icon?: string;
   image?: string; // attachment id
+  /** Display width of the image in world units; height follows the aspect ratio. */
+  imageWidth?: number;
   link?: string;
   padding?: number;
   align?: "left" | "center";

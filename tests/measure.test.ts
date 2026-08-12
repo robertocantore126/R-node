@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { BULLET_WIDTH_EM, measureNode, MIN_TOPIC_W, wrapRunLines, HEURISTIC_MEASURER } from "../src/layout/measure";
+import { BULLET_WIDTH_EM, IMAGE_GAP, imageResolver, MAX_IMAGE_W, measureNode, MIN_TOPIC_W, wrapRunLines, HEURISTIC_MEASURER } from "../src/layout/measure";
 import { DocumentModel } from "../src/core/doc";
-import type { MindNode, TextRun } from "../src/core/types";
+import { DEFAULT_STRUCTURE, type MindNode, type Sheet, type TextRun } from "../src/core/types";
 
 function lineHeights(runs: TextRun[], maxW = 200): number[] {
   return wrapRunLines(runs, maxW, HEURISTIC_MEASURER, { fontSize: 14 }).map((l) => l.height ?? 14 * 1.25);
@@ -188,5 +188,69 @@ describe("topic extent (observable model)", () => {
     // space off and made the measured box wider than the text.
     const [line] = wrapRunLines([{ text: "word   " }], 400, HEURISTIC_MEASURER, { fontSize: 14 });
     expect(line.width).toBeCloseTo(HEURISTIC_MEASURER.measure("word", { fontSize: 14 }).width, 5);
+  });
+});
+
+describe("topic extent with an image (T12-1)", () => {
+  const resolve = () => ({ w: 200, h: 100 });
+
+  it("image 200x100 + one text line: imgH + IMAGE_GAP + lineH + pad*2 + 4", () => {
+    const e = measureNode(node({ title: "Hi", style: { image: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(e.w).toBe(Math.max(MIN_TOPIC_W, 200 + 10 * 2)); // image wider than text
+    expect(e.h).toBeCloseTo(100 + IMAGE_GAP + 14 * 1.25 + 10 * 2 + 4, 5);
+  });
+
+  it("image-only node: no IMAGE_GAP, no empty text line", () => {
+    const e = measureNode(node({ title: "", style: { image: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(e.h).toBeCloseTo(100 + 10 * 2 + 4, 5);
+  });
+
+  it("explicit imageWidth changes width and height proportionally", () => {
+    const e = measureNode(
+      node({ title: "", style: { image: "img1", imageWidth: 120 } }),
+      HEURISTIC_MEASURER,
+      resolve
+    );
+    expect(e.w).toBe(120 + 10 * 2);
+    expect(e.h).toBeCloseTo(120 * (100 / 200) + 10 * 2 + 4, 5); // imgH = 60
+  });
+
+  it("an image larger than MAX_IMAGE_W is capped at it (proportions kept)", () => {
+    const e = measureNode(
+      node({ title: "", style: { image: "big" } }),
+      HEURISTIC_MEASURER,
+      () => ({ w: 2000, h: 1000 })
+    );
+    expect(e.w).toBe(MAX_IMAGE_W + 10 * 2);
+    expect(e.h).toBeCloseTo((MAX_IMAGE_W * 1000) / 2000 + 10 * 2 + 4, 5);
+  });
+
+  it("without a resolver (or unresolvable id) the node measures as text-only", () => {
+    const withImg = node({ title: "Hi", style: { image: "img1" } });
+    const plain = node({ title: "Hi" });
+    expect(measureNode(withImg)).toEqual(measureNode(plain));
+    expect(measureNode(withImg, HEURISTIC_MEASURER, () => null)).toEqual(measureNode(plain));
+  });
+
+  it("imageResolver reads the sheet's attachment cards", () => {
+    const sheet: Sheet = {
+      sheetId: "s1",
+      title: "T",
+      structure: DEFAULT_STRUCTURE,
+      rootNodeId: "r",
+      nodes: {},
+      relationships: [],
+      boundaries: [],
+      summaries: [],
+      callouts: [],
+      labels: [],
+      zones: [],
+      attachments: [{ id: "a1", mime: "image/png", w: 200, h: 100, bytes: 10 }],
+      comments: [],
+      presentation: {},
+    };
+    const resolveImg = imageResolver(sheet);
+    expect(resolveImg("a1")).toEqual({ w: 200, h: 100 });
+    expect(resolveImg("missing")).toBeNull();
   });
 });

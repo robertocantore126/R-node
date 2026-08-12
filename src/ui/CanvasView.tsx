@@ -4,7 +4,7 @@ import { viewSize } from "../editor/view";
 import { setExportPngHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { screenToWorld, worldToScreen } from "../render/viewport";
-import { measureNode } from "../layout/mindmap";
+import { imageResolver, measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import type { MindNode } from "../core/types";
@@ -585,7 +585,9 @@ export function CanvasView(): JSX.Element {
   if (state.editingId) {
     const n = store.doc.node(state.editingId);
     if (n) {
-      const m = measureNode(n, overlayMeasurer);
+      // The overlay box must match the canvas box: same measurer, same image
+      // resolver (invariant I9) — otherwise the node jumps on double-click.
+      const m = measureNode(n, overlayMeasurer, imageResolver(store.sheet));
       const { x, y } = worldToScreen(state.camera, viewSize.w, viewSize.h, n.position.x, n.position.y);
       editStyle = {
         left: x,

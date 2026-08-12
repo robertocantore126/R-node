@@ -8,7 +8,7 @@
  */
 import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { createCanvasTextMeasurer, FONT_STACK, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, FONT_STACK, imageResolver, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
@@ -85,8 +85,11 @@ export class Renderer {
     const cx = camera.x, cy = camera.y;
     const out: Placed[] = [];
 
+    // Nodes with images must be measured with the sheet's attachment cards
+    // (invariant I9): the layout, the renderer and the overlay all agree.
+    const resolveImage = imageResolver(state.sheet);
     const add = (n: MindNode): void => {
-      const m = measureNode(n, this.measurer);
+      const m = measureNode(n, this.measurer, resolveImage);
       const x = n.position.x;
       const y = n.position.y;
       const visible =
