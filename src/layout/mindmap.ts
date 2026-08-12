@@ -43,7 +43,27 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   // Nodes with images must be measured with the sheet's attachment cards or
   // the layout would place them at text-only size (invariant I9).
   const resolveImage = imageResolver(sheet);
-  const size = (n: MindNode): { w: number; h: number } => measureNode(n, measurer, resolveImage);
+  /**
+   * One measurement per node per run.
+   *
+   * The traversal asks for a node's size from several places — subtree height,
+   * subtree width, the placement pass — and measured 187,592 times for 8,001
+   * nodes, twenty-three times each. A cache inside measureTopic made each of
+   * those cheap but could not make them go away, and the sum was still ~120ms
+   * of a ~190ms layout.
+   *
+   * Keyed by id, thrown away with the run: within ONE layout the document
+   * cannot change, so this cannot go stale by construction.
+   */
+  const extents = new Map<string, { w: number; h: number }>();
+  const size = (n: MindNode): { w: number; h: number } => {
+    let e = extents.get(n.id);
+    if (e === undefined) {
+      e = measureNode(n, measurer, resolveImage);
+      extents.set(n.id, e);
+    }
+    return e;
+  };
   const gap = Math.max(6, st.branchSpacing);
 
   const isAuto = (id: string): boolean => {
