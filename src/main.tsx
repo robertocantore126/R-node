@@ -4,6 +4,7 @@ import { App } from "./App";
 import { EditorStore } from "./editor/store";
 import { StoreContext } from "./editor/context";
 import { LocalStorageAdapter, TauriStorageAdapter } from "./persist/storage";
+import { generateStressMap, type StressOptions } from "./dev/stress";
 import "./styles.css";
 
 // Same runtime switch as the asset factory (T19): the Tauri webview carries
@@ -15,7 +16,15 @@ const adapter =
 const store = new EditorStore(adapter);
 
 // Dev-only debug handle for performance spikes / automated testing.
-(window as unknown as Record<string, unknown>).__rnode = { store };
+(window as unknown as Record<string, unknown>).__rnode = {
+  store,
+  /** Build a punishing map in place — see src/dev/stress.ts. */
+  stress: (opts?: StressOptions) =>
+    generateStressMap(store, {
+      ...opts,
+      onProgress: (f, label) => console.info(`[stress] ${Math.round(f * 100)}% — ${label}`),
+    }),
+};
 
 void store.init().then(() => {
   createRoot(document.getElementById("root")!).render(
