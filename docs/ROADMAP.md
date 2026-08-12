@@ -483,7 +483,104 @@ un `Op` o nella history.
 
 ---
 
-## T12 — Immagini nei nodi: modello, misura, disegno · P2 · dipende da T12a
+## T12b — Correzioni a T12a, prima di costruirci sopra · P2 · dipende da T12a
+
+**Obiettivo.** Chiudere tre difetti di T12a. **Due sono errori della specifica,
+non dell'implementazione**: il codice esistente è fedele a quanto era scritto,
+quindi non c'è niente da difendere — c'è da cambiare il contratto.
+
+**Perché adesso.** T12 costruisce sul modello e sul contratto di T12a. Se
+partono storti, il difetto si propaga in `measureTopic` e nel renderer, dove
+costa dieci volte tanto correggerlo.
+
+**File.** `src/core/types.ts` · `src/persist/assets.ts` · `tests/assets.test.ts`
+
+### Todo
+
+- [ ] **F1 — `collectOrphans` ha una radice di troppo**
+- [ ] **F2 — togliere `displayW`/`displayH` da `AttachmentInfo`**
+- [ ] **F3 — rendere atomico `put`**
+- [ ] **F4 — gestire `onblocked` in `openDb`**
+
+### F1 — le radici del GC sono solo i nodi
+
+Oggi `collectOrphans` tratta anche `sheet.attachments` come radice. Ma le
+schede in `attachments` sono **spazzatura anch'esse** quando il nodo che le
+usava non c'è più: usandole come radice, il caso reale (cancelli un nodo, la
+scheda resta) non viene mai raccolto, e il blob resta protetto per sempre.
+
+Nuovo contratto:
+
+```ts
+/** Unica sorgente di verità su "quale asset è in uso". */
+export function referencedAssetIds(sheet: Sheet): Set<string>;
+
+export interface OrphanReport {
+  /** schede in sheet.attachments che nessun nodo referenzia */
+  cards: string[];
+  /** id nell'archivio che nessun nodo referenzia */
+  blobs: string[];
+}
+
+export function collectOrphans(sheet: Sheet, store: AssetStore): Promise<OrphanReport>;
+```
+
+- le radici sono **solo** `node.style.image` su tutti i nodi dello sheet;
+- `referencedAssetIds` esiste come funzione a sé perché domani altri elementi
+  (callout, boundary) potrebbero referenziare immagini: si aggiungono **lì**,
+  in un punto solo;
+- `collectOrphans` continua a **non cancellare niente**. Resta una funzione di
+  sola lettura.
+
+### F2 — `displayW`/`displayH` non descrivono più nulla
+
+`AttachmentInfo` porta ancora quei due campi dal disegno a **due** varianti.
+Ora i livelli sono tre e **quello da usare si sceglie dinamicamente in base
+allo zoom**, quindi "display" non identifica più una dimensione.
+
+Rimuovili. Al documento servono solo `w`/`h` dell'**originale**: le proporzioni
+si ricavano da lì, e la dimensione a schermo è `style.imageWidth` (T14).
+Aggiorna i test che li costruiscono.
+
+### F3 — `put` deve decidere dentro una sola transazione
+
+Oggi il controllo di esistenza e la scrittura sono due transazioni separate:
+due `put` concorrenti dello stesso contenuto passano entrambi il controllo. I
+blob sono identici quindi non si corrompe nulla, ma i `meta` possono differire
+(per esempio `name`) e vince l'ultimo, mentre il commento promette *"first
+write wins"*.
+
+Falli in **una sola transazione `readwrite`**: `get(id)`, e solo se assente
+`put(record)`.
+
+> Non usare `add()` con cattura dell'errore: in IndexedDB una richiesta fallita
+> **aborta la transazione** a meno di chiamare `preventDefault()` sull'evento
+> di errore. È un dettaglio che si dimentica e produce un bug intermittente.
+
+### F4 — `openDb` non deve poter restare appeso
+
+Manca `req.onblocked`. Oggi non può scattare (`DB_VERSION` è 1), ma al primo
+cambio di versione con un'altra scheda aperta la promise **non si risolve mai**
+e l'app si pianta senza errore. Aggiungi il gestore e **rigetta** con un
+messaggio chiaro, invece di aspettare per sempre.
+
+### Fatto quando
+
+- Un test dimostra F1: sheet con un nodo che referenzia A, una scheda in
+  `attachments` per B senza nodo, e C solo nell'archivio → `cards` contiene B,
+  `blobs` contiene B **e** C, e dopo la chiamata i tre asset sono ancora tutti
+  presenti e leggibili.
+- Un test dimostra F3: due `put` concorrenti (`Promise.all`) dello stesso
+  contenuto con `name` diversi → un solo record, e il `name` è quello del
+  primo.
+- `npm run typecheck` e `npm test` verdi.
+
+**Non fare.** Non cancellare nulla dentro `collectOrphans`. Non toccare il
+renderer, il layout o l'interfaccia: sono T12 e seguenti.
+
+---
+
+## T12 — Immagini nei nodi: modello, misura, disegno · P2 · dipende da T12b
 
 **Obiettivo.** Un nodo può portare un'immagine, mostrata **sopra** il testo,
 dentro la stessa box.
@@ -613,7 +710,14 @@ selezionato, lo allega.
    - **deriva la variante `display`** a `1024px` sul lato lungo (JPEG q0.85,
      PNG se ha canale alpha), via `<canvas>` o `createImageBitmap` con
      `resizeWidth`;
-   - passa entrambe a `AssetStore.put` e restituisce l'`AttachmentInfo`.
+   - passa i livelli a `AssetStore.put` e restituisce l'`AttachmentInfo`.
+
+   **Dove far girare l'hashing.** `AssetStore.put` calcola lo SHA-256 leggendo
+   l'originale intero in un `ArrayBuffer`. Con originali ad alta risoluzione
+   sono decine di MB copiati **sul thread principale** a ogni import, e
+   l'interfaccia si blocca. Sposta lettura, hashing e ridimensionamento in un
+   **Web Worker** (o in Rust, quando Tauri gira): è il punto in cui l'import di
+   venti immagini in un colpo passa da fastidioso a inaccettabile.
 
    Le due varianti servono a cose diverse e non sono negoziabili: l'originale
    perché l'hai chiesto tu, la `display` perché è l'unica che il canvas
