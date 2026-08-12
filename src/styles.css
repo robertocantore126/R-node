@@ -515,6 +515,23 @@ textarea:focus {
   touch-action: none;
 }
 
+/* Ghost preview of an image dragged from outside (Explorer / browser):
+   follows the cursor over the map until the drop lands. Pure preview —
+   never intercepts the pointer, so the drop still reaches the canvas. */
+.ext-drop-ghost {
+  position: absolute;
+  z-index: 30;
+  pointer-events: none;
+  width: 150px;
+  height: 110px;
+  object-fit: contain;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  opacity: 0.9;
+}
+
 /* Rich-text topic editor (Lexical overlay — exactly one at any time).
    The OUTER box only positions; the INNER box is laid out in world units and
    scaled with a transform, so fonts, paddings, border and gaps match the

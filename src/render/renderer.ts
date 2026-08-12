@@ -34,6 +34,18 @@ export interface RenderState {
   summarySel?: string | null;
   /** Node whose image is selected (mutually exclusive with node selection). */
   imageSel?: string | null;
+  /**
+   * Ghost preview of an image being dragged over the map (internal
+   * reassignment): the image bitmap follows the cursor, semi-transparent,
+   * until the drop lands. x/y are world coords of the cursor.
+   */
+  ghostImage?: { imageId: string; x: number; y: number; nodeId: string } | null;
+  /**
+   * Marquee drag preview: ids of the topics inside the drag box — they wear
+   * the selection ring BEFORE the release commits them (the box itself is a
+   * DOM overlay; this is the live "what will be selected" feedback).
+   */
+  marqueeSel?: Set<string> | null;
   showHidden?: boolean; // export: include collapsed subtrees
 }
 
@@ -249,6 +261,10 @@ export class Renderer {
       const target = byId.get(state.drop.nodeId);
       if (target) this.drawDropIndicator(theme, target, state.drop.mode);
     }
+
+    // 6) ghost preview of an image being dragged (internal reassignment) —
+    // on top of everything, centered on the cursor, before the drop lands.
+    if (state.ghostImage) this.drawGhostImage(theme, state.ghostImage);
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
@@ -475,6 +491,16 @@ export class Renderer {
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
+    }
+    // Marquee preview ring: the topic is inside the drag box but not yet
+    // committed — same ring as selection, no resize handles (it is not
+    // really selected until the release).
+    if (!selected && state.marqueeSel?.has(n.id)) {
+      ctx.strokeStyle = theme.selection;
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([]);
+      const pad = 3;
+      ctx.strokeRect(p.x - pad, p.y - pad, p.w + pad * 2, p.h + pad * 2);
     }
     // Image selection ring: the image is selected (not the node) — outline
     // around the image so Backspace/Delete knows what it will remove.
@@ -715,6 +741,43 @@ export class Renderer {
     } finally {
       if (this.inflight.delete(key)) this.inflightCount--;
     }
+  }
+
+  /**
+   * Ghost of the image being dragged to another node: the already-cached
+   * bitmap, semi-transparent, centered on the cursor with a dashed outline.
+   * Reuses the same bucket/level logic as drawImage so the preview is sharp
+   * at the current zoom; if the bitmap isn't decoded yet, starts a decode
+   * and draws nothing (a repaint brings it in when ready).
+   */
+  private drawGhostImage(theme: RenderTheme, ghost: { imageId: string; x: number; y: number; nodeId: string }): void {
+    const ctx = this.ctx;
+    if (!this.resolveImage) return;
+    const att = this.resolveImage(ghost.imageId);
+    if (!att || att.w <= 0) return;
+    const imgW = Math.min(att.w, MAX_IMAGE_W);
+    const imgH = (imgW * att.h) / att.w;
+    const neededPx = imgW * this.curScale * this.dpr;
+    const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
+    const level: AssetLevel = bucket <= 256 ? "small" : "large";
+    const key = `${ghost.imageId}@${bucket}`;
+    const entry = this.imageCache.get(key);
+    if (!entry) {
+      if (!this.inflight.has(key) && this.inflightCount < this.MAX_INFLIGHT) {
+        this.startDecode(key, ghost.imageId, ghost.nodeId, level, bucket);
+      }
+      return;
+    }
+    const x = ghost.x - imgW / 2;
+    const y = ghost.y - imgH / 2;
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
+    ctx.strokeStyle = theme.selection;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(x, y, imgW, imgH);
+    ctx.restore();
   }
 
   /** LRU eviction under the byte budget. Only ever called between frames. */

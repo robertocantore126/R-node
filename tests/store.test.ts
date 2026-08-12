@@ -651,6 +651,86 @@ describe("canvas resize drag", () => {
     expect(after.position.y).toBe(300);
   });
 
+  describe("live node drag (fluid repositioning)", () => {
+    it("a main topic follows the cursor and commits at the drop point, subtree settled immediately, one undo", () => {
+      const store = new EditorStore(memoryAdapter);
+      store.createChild();
+      store.cancelEdit(); // leave the auto-opened editor
+      const root = store.doc.node(store.sheet.rootNodeId)!;
+      const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+      // give the main a child
+      store.select(main.id);
+      store.createChild();
+      store.cancelEdit();
+      const child = store.doc.node(main.childrenIds[0])!;
+      // Pin the main at a known spot and settle the child relative to it:
+      // fresh nodes carry pre-layout positions, so the baseline must come
+      // from a settled layout.
+      store.doc.node(main.id)!.position = { x: 200, y: 100, manual: true };
+      store.beginNodeDrag(main.id);
+      store.setNodeDragDraft(main.id, 200, 100); // same spot, but settles the layout
+      store.resetNodeDragDraft(main.id); // no-op: nothing changed, child stays settled
+      const offBefore = { x: child.position.x - 200, y: child.position.y - 100 };
+
+      store.beginNodeDrag(main.id);
+      store.setNodeDragDraft(main.id, 700, 350);
+      // live follow: the main is pinned at the draft spot and the subtree
+      // keeps its offset (it slid with the pointer)
+      expect(store.doc.node(main.id)!.position.x).toBe(700);
+      expect(store.doc.node(main.id)!.position.y).toBe(350);
+      const offDuring = { x: child.position.x - 700, y: child.position.y - 350 };
+      expect(offDuring).toEqual(offBefore);
+
+      store.commitNodeDrag(main.id, null, "floating", 700, 350);
+
+      const after = store.doc.node(main.id)!;
+      expect(after.position).toEqual({ x: 700, y: 350, manual: true });
+      // the subtree is settled IMMEDIATELY — no 30ms debounce window where
+      // the child is still anchored to the main's old slot (release glitch)
+      const offAfter = { x: child.position.x - 700, y: child.position.y - 350 };
+      expect(offAfter).toEqual(offDuring);
+
+      // one undo restores the exact pre-drag state
+      store.undo();
+      expect(store.doc.node(main.id)!.position).toEqual({ x: 200, y: 100, manual: true });
+    });
+
+    it("leaving the free-position zone mid-drag restores the pinned position", () => {
+      const store = new EditorStore(memoryAdapter);
+      store.createChild();
+      store.cancelEdit(); // leave the auto-opened editor
+      const root = store.doc.node(store.sheet.rootNodeId)!;
+      const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+      store.doc.node(main.id)!.position = { x: 123, y: 456, manual: true };
+
+      store.beginNodeDrag(main.id);
+      store.setNodeDragDraft(main.id, 700, 350);
+      store.resetNodeDragDraft(main.id);
+      expect(store.doc.node(main.id)!.position).toEqual({ x: 123, y: 456, manual: true });
+    });
+
+    it("a subtopic drag never pins an absolute position (deep nodes stay in the auto layout)", () => {
+      const store = new EditorStore(memoryAdapter);
+      store.createChild();
+      store.cancelEdit();
+      const root = store.doc.node(store.sheet.rootNodeId)!;
+      const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+      store.select(main.id);
+      store.createChild();
+      store.cancelEdit();
+      const sub = store.doc.node(main.childrenIds[0])!;
+
+      store.beginNodeDrag(sub.id);
+      store.setNodeDragDraft(sub.id, 999, 888);
+      store.commitNodeDrag(sub.id, null, "floating", 999, 888);
+
+      const after = store.doc.node(sub.id)!;
+      expect(after.position.manual).toBe(false);
+      expect(after.position.x).not.toBe(999);
+      expect(after.position.y).not.toBe(888);
+    });
+  });
+
   it("creates a group only from at least two sibling topics, undoable", () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();
