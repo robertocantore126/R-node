@@ -11,6 +11,7 @@
 use rusqlite::Connection;
 use serde::Serialize;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 
@@ -94,6 +95,79 @@ fn delete_document(state: State<Db>, document_id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Root of the asset store: `<app-data>/assets`, one directory per asset id
+/// (a SHA-256 hex string), containing `original`, `large`, `small` and the
+/// `meta` JSON. Content-addressed: the same image imported twice occupies
+/// one directory.
+fn asset_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data dir: {e}"))?;
+    Ok(dir.join("assets"))
+}
+
+/// A path segment from the frontend must never escape the assets tree.
+/// Ids are hex SHA-256 and levels come from our own enum, but a hostile or
+/// corrupt caller must not be able to write outside `assets/`.
+fn safe_component(part: &str) -> Result<(), String> {
+    if part.is_empty()
+        || part == "."
+        || part == ".."
+        || part.contains(['/', '\\', '\0'])
+        || part.contains("..")
+    {
+        return Err(format!("unsafe path component: {part:?}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn put_asset(app: AppHandle, id: String, level: String, bytes: Vec<u8>) -> Result<(), String> {
+    safe_component(&id)?;
+    safe_component(&level)?;
+    let file = asset_dir(&app)?.join(&id).join(&level);
+    let parent = file.parent().ok_or("no parent dir")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    fs::write(&file, bytes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_asset(app: AppHandle, id: String, level: String) -> Result<Option<Vec<u8>>, String> {
+    safe_component(&id)?;
+    safe_component(&level)?;
+    let file = asset_dir(&app)?.join(&id).join(&level);
+    if !file.is_file() {
+        return Ok(None); // the AssetStore contract: get of a missing id -> null
+    }
+    fs::read(&file).map(Some).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_asset(app: AppHandle, id: String) -> Result<(), String> {
+    safe_component(&id)?;
+    let dir = asset_dir(&app)?.join(&id);
+    if dir.is_dir() {
+        fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_assets(app: AppHandle) -> Result<Vec<String>, String> {
+    let dir = asset_dir(&app)?;
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                out.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -106,7 +180,11 @@ pub fn run() {
             list_documents,
             load_document,
             save_document,
-            delete_document
+            delete_document,
+            put_asset,
+            get_asset,
+            delete_asset,
+            list_assets
         ])
         .run(tauri::generate_context!())
         .expect("error while running r-node");

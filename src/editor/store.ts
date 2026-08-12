@@ -20,7 +20,7 @@ import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewp
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
-import { IndexedDbAssetStore } from "../persist/assets";
+import { getAssetStore } from "../persist/assets";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
 
 declare global {
@@ -1328,7 +1328,7 @@ export class EditorStore {
       trace.ignored("drop", "decode failed", { error: String(err) });
       return { ok: false, reason: String(err) };
     }
-    const assetStore = new IndexedDbAssetStore();
+    const assetStore = getAssetStore();
     const id = await assetStore.put(imported.levels, imported.meta);
     this.attachImage(nodeId, {
       id,

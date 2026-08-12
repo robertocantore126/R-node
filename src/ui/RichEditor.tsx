@@ -30,7 +30,7 @@ import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
 import { nodeRuns, plainToRuns } from "../core/text";
 import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, IMAGE_GAP, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, TEXT_INSET } from "../layout/measure";
-import { IndexedDbAssetStore } from "../persist/assets";
+import { getAssetStore } from "../persist/assets";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
 import { htmlToRuns, sanitizeHtml } from "./pasteSanitizer";
 
@@ -163,7 +163,7 @@ export function RichEditor({
 // sitting above the editable exactly where the canvas draws the image.
 // ---------------------------------------------------------------------------
 
-const overlayAssetStore = new IndexedDbAssetStore();
+const overlayAssetStore = getAssetStore();
 
 function NodeImageBlock({ id, imgW, imgH, left, top }: { id: string; imgW: number; imgH: number; left: number; top: number }): JSX.Element {
   const [url, setUrl] = useState<string | null>(null);

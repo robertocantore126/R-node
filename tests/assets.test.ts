@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   IndexedDbAssetStore,
   collectOrphans,
+  getAssetStore,
   referencedAssetIds,
   sha256Hex,
   type AssetBlob,
@@ -235,5 +236,17 @@ describe("collectOrphans", () => {
 
     const sheet = makeSheet({ nodes: { n1: nodeWithImage("n1", id) } });
     expect(await collectOrphans(sheet, store)).toEqual({ cards: [], blobs: [] });
+  });
+});
+
+describe("getAssetStore", () => {
+  it("returns the same singleton instance every call", () => {
+    const a = getAssetStore();
+    const b = getAssetStore();
+    expect(a).toBe(b);
+  });
+
+  it("picks IndexedDB when no Tauri global is present (the node test env)", () => {
+    expect(getAssetStore()).toBeInstanceOf(IndexedDbAssetStore);
   });
 });

@@ -9,7 +9,7 @@
 import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
 import { createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
-import { IndexedDbAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
+import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
@@ -45,7 +45,7 @@ interface Placed {
 }
 
 /** One asset store for the whole app; overridable per-Renderer in tests. */
-const sharedAssetStore: AssetStore = new IndexedDbAssetStore();
+const sharedAssetStore: AssetStore = getAssetStore();
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;

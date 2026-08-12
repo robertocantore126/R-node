@@ -164,6 +164,102 @@ export class IndexedDbAssetStore implements AssetStore {
 }
 
 /**
+ * Tauri v2 exposes its API as `window.__TAURI__` when `withGlobalTauri` is
+ * enabled in tauri.conf.json. That global is the detection switch for the
+ * desktop build: it exists only inside the WebView2 window, never in a plain
+ * browser tab — exactly what the factory needs.
+ */
+type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+declare global {
+  interface Window {
+    __TAURI__?: {
+      core: {
+        invoke: TauriInvoke;
+      };
+    };
+  }
+}
+
+/**
+ * Desktop implementation: the three levels are real files under
+ * `<app-data>/assets/<id>/<level>` (ADR-001 §12 chooses B1 — original files
+ * the user keeps, not a browser cache the OS can evict). `meta` lives next to
+ * them as a JSON file, written through the same command. No migration from
+ * IndexedDB: the data there is dev data and regenerates (PIANO passo 10).
+ */
+export class TauriAssetStore implements AssetStore {
+  private metaCache = new Map<string, AssetMeta>();
+
+  private invoke(): TauriInvoke {
+    const api = typeof window !== "undefined" ? window.__TAURI__ : undefined;
+    if (!api) throw new Error("TauriAssetStore used outside the Tauri webview");
+    return api.core.invoke;
+  }
+
+  async put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string> {
+    const id = await sha256Hex(await levels.original.blob.arrayBuffer());
+    const invoke = this.invoke();
+    for (const level of ["original", "large", "small"] as const) {
+      const bytes = new Uint8Array(await levels[level].blob.arrayBuffer());
+      await invoke("put_asset", { id, level, bytes });
+    }
+    const full: AssetMeta = { ...meta, id };
+    await invoke("put_asset", {
+      id,
+      level: "meta",
+      bytes: new TextEncoder().encode(JSON.stringify(full)),
+    });
+    this.metaCache.set(id, full);
+    return id;
+  }
+
+  async get(id: string, level: AssetLevel): Promise<Blob | null> {
+    const invoke = this.invoke();
+    const bytes = (await invoke("get_asset", { id, level })) as number[] | null;
+    if (!bytes) return null;
+    const mime = this.metaCache.get(id)?.mime;
+    return new Blob([new Uint8Array(bytes)], mime ? { type: mime } : undefined);
+  }
+
+  async meta(id: string): Promise<AssetMeta | null> {
+    const cached = this.metaCache.get(id);
+    if (cached) return cached;
+    const bytes = (await this.invoke()("get_asset", { id, level: "meta" })) as number[] | null;
+    if (!bytes) return null;
+    const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(bytes))) as AssetMeta;
+    this.metaCache.set(id, meta);
+    return meta;
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.invoke()("delete_asset", { id });
+    this.metaCache.delete(id);
+  }
+
+  async list(): Promise<string[]> {
+    return (await this.invoke()("list_assets")) as string[];
+  }
+}
+
+/**
+ * The one factory every caller must use. The three former `new
+ * IndexedDbAssetStore()` sites (store.ts, renderer.ts, RichEditor.tsx) each
+ * opened their OWN database: images written through one store were invisible
+ * to the others. A singleton also means the desktop build and the web build
+ * each pick their backend exactly once, at first use.
+ */
+let sharedStore: AssetStore | null = null;
+
+export function getAssetStore(): AssetStore {
+  if (!sharedStore) {
+    const tauri = typeof window !== "undefined" && !!window.__TAURI__;
+    sharedStore = tauri ? new TauriAssetStore() : new IndexedDbAssetStore();
+  }
+  return sharedStore;
+}
+
+/**
  * The single source of truth for "which asset is in use". The roots are the
  * nodes alone: an `attachments` card whose node is gone is garbage too, so
  * it must never act as a root. Future referrers (callouts, boundaries) are
