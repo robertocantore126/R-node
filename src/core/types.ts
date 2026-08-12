@@ -77,6 +77,8 @@ export interface Style {
   shadow?: boolean;
   icon?: string;
   image?: string; // attachment id
+  /** Display width of the image in world units; height follows the aspect ratio. */
+  imageWidth?: number;
   link?: string;
   padding?: number;
   align?: "left" | "center";
@@ -252,6 +254,33 @@ export const DEFAULT_STRUCTURE: StructureConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+/**
+ * Metadata card for an image attached to the map, kept INSIDE the document.
+ * The bytes never live here: they are stored in the AssetStore (IndexedDB),
+ * addressed by content — `id` is the SHA-256 of the original file and the
+ * key of the asset in the store. `Style.image` on a node references the same
+ * id, so one asset can be shared by many nodes.
+ */
+export interface AttachmentInfo {
+  id: string; // SHA-256 of the original bytes — the key in the AssetStore
+  mime: string; // image/png | image/jpeg | image/gif | image/webp
+  w: number; // intrinsic pixels of the ORIGINAL
+  h: number;
+  bytes: number; // weight of the original, shown to the user
+  name?: string;
+  alt?: string;
+  /**
+   * The original bytes are gone: the asset came from a compact .rnode.zip
+   * import, which carries only display levels (AGENT_GUIDE I11). A complete
+   * export of this document exports the resized level and must say so.
+   */
+  originalLost?: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Sheet & Document
 // ---------------------------------------------------------------------------
 
@@ -268,7 +297,7 @@ export interface Sheet {
   callouts: unknown[];
   labels: string[];
   zones: unknown[];
-  attachments: unknown[];
+  attachments: AttachmentInfo[];
   comments: unknown[];
   presentation: Record<string, unknown>;
 }

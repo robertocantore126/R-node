@@ -15,7 +15,7 @@
  *    overlay from the store camera on every render, so the overlay stays
  *    glued to the node even while the map moves under it.
  */
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { LexicalComposer } from "@lexical/react/LexicalComposer";
 import { ContentEditable } from "@lexical/react/LexicalContentEditable";
 import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
@@ -29,7 +29,8 @@ import { useStore } from "../editor/context";
 import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
 import { nodeRuns, plainToRuns } from "../core/text";
-import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, LINE_HEIGHT_FACTOR, TEXT_INSET } from "../layout/measure";
+import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, IMAGE_GAP, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, TEXT_INSET } from "../layout/measure";
+import { getAssetStore } from "../persist/assets";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
 import { htmlToRuns, sanitizeHtml } from "./pasteSanitizer";
 
@@ -102,6 +103,17 @@ export function RichEditor({
     paddingRight: pad + TEXT_INSET - 2,
   };
 
+  // A node image reserves its rect above the editable (T12-3): without it the
+  // box's text would sit where the image is and the box would jump at the
+  // double click. Geometry mirrors measureTopic/renderer: imgW from
+  // style.imageWidth (capped at MAX_IMAGE_W), imgH by aspect ratio, IMAGE_GAP
+  // below — all in world units (the inner is scaled as a whole).
+  const card = node.style.image ? store.sheet.attachments.find((a) => a.id === node.style.image) : undefined;
+  const hasImage = !!card && card.w > 0;
+  const imgW = hasImage ? node.style.imageWidth ?? Math.min(card!.w, MAX_IMAGE_W) : 0;
+  const imgH = hasImage ? (imgW * card!.h) / card!.w : 0;
+  const boxW = Math.max(1, ((style.width as number) ?? 60) / scale);
+
   return (
     <div className="topic-rich-editor" style={{ left: style.left, top: style.top }}>
       <LexicalComposer initialConfig={config}>
@@ -109,11 +121,25 @@ export function RichEditor({
             with the zoom (unreadable at 40%, huge at 300%). */}
         <Toolbar />
         <div className="topic-rich-inner" style={inner}>
+          {hasImage && <NodeImageBlock id={node.style.image!} imgW={imgW} imgH={imgH} left={(boxW - imgW) / 2} top={pad} />}
           <RichTextPlugin
             contentEditable={
               <ContentEditable
                 className="topic-rich-editable"
-                style={editablePad}
+                style={
+                  hasImage
+                    ? {
+                        ...editablePad,
+                        // The text lives below the image, in the remaining
+                        // region — same placement the canvas gives it.
+                        position: "absolute",
+                        top: imgH + IMAGE_GAP,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                      }
+                    : editablePad
+                }
                 ariaLabel="Edit topic"
                 spellCheck={false}
                 onBlur={() => store.commitEdit()}
@@ -128,6 +154,50 @@ export function RichEditor({
         <PasteSanitizerPlugin />
         <KeysPlugin store={store} />
       </LexicalComposer>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Reserved image block (T12-3): non-editable, sized to the node's image rect,
+// sitting above the editable exactly where the canvas draws the image.
+// ---------------------------------------------------------------------------
+
+function NodeImageBlock({ id, imgW, imgH, left, top }: { id: string; imgW: number; imgH: number; left: number; top: number }): JSX.Element {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let created: string | null = null;
+    void (async () => {
+      // Resolved here, at use time: the store singleton must be picked in the
+      // running environment, not at module scope (T18-D).
+      const blob = await getAssetStore().get(id, "large");
+      if (cancelled || !blob) return;
+      created = URL.createObjectURL(blob);
+      setUrl(created);
+    })();
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [id]);
+  return (
+    <div
+      contentEditable={false}
+      style={{
+        position: "absolute",
+        top,
+        left,
+        width: imgW,
+        height: imgH,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
+        borderRadius: 4,
+      }}
+    >
+      {url && <img src={url} alt="" draggable={false} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }} />}
     </div>
   );
 }

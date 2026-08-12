@@ -31,6 +31,8 @@ export function Palette(): JSX.Element | null {
       { label: "Save document", hint: "Ctrl+S", run: () => void store.saveNow() },
       { label: "Open file…", hint: "Ctrl+O", run: () => void store.loadFile() },
       { label: "Export as JSON", hint: "Ctrl+E", run: () => store.exportJson() },
+      { label: "Export with images (.rnode.zip)", hint: "", run: () => void store.exportRnodeZip("complete") },
+      { label: "Export with images, compact (.rnode.zip)", hint: "", run: () => void store.exportRnodeZip("compact") },
       { label: "Export as Markdown", hint: "", run: () => store.exportMarkdown() },
       { label: "Export as PNG", hint: "", run: () => runExportPng() },
       { label: "Toggle outline panel", hint: "", run: () => store.toggleOutliner() },

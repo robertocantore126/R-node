@@ -15,7 +15,7 @@
  *  - the renderer injects a canvas-backed measurer (real `measureText`);
  *  - pure layout code and tests default to a deterministic heuristic.
  */
-import type { MindNode, Style, TextRun } from "../core/types";
+import type { MindNode, Sheet, Style, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
 
 // ---------------------------------------------------------------------------
@@ -110,6 +110,10 @@ export const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-se
 export const BLOCK_GAP_FACTOR = 0.6;
 export const MIN_TOPIC_W = 84;
 export const MAX_TOPIC_W = 280;
+/** Default display width of a node image in world units (Xmind-style cap). */
+export const MAX_IMAGE_W = 240;
+/** Vertical gap between a node's image and its text, in world units. */
+export const IMAGE_GAP = 6;
 
 /**
  * Width of the bullet column, in em of the list item's font size. Shared with
@@ -394,12 +398,29 @@ export interface Extent {
 }
 
 /**
+ * Resolve an attachment id to the ORIGINAL image's pixel size. Built from the
+ * sheet's metadata cards in one place (invariant I9): every caller that
+ * measures a node — layout, renderer, overlay — uses the same resolver, so
+ * the three never disagree on a node's extent.
+ */
+export function imageResolver(sheet: Sheet): (id: string) => { w: number; h: number } | null {
+  const byId = new Map<string, { w: number; h: number }>();
+  for (const att of sheet.attachments) byId.set(att.id, { w: att.w, h: att.h });
+  return (id: string) => byId.get(id) ?? null;
+}
+
+/**
  * Observable model:
  *   width(topic)  = width(text, wrapped) + paddingLeft + paddingRight + shapeAllowance
  *   height(topic) = height(lines)        + paddingTop  + paddingBottom  + shapeAllowance
- * Explicit style.width/height overrides win; images/notes are added in Phase 2+.
+ * Explicit style.width/height overrides win; an image (when resolvable) adds
+ * its box above the text, separated by IMAGE_GAP.
  */
-export function measureTopic(n: MindNode, measurer: TextMeasurer = HEURISTIC_MEASURER): Extent {
+export function measureTopic(
+  n: MindNode,
+  measurer: TextMeasurer = HEURISTIC_MEASURER,
+  resolveImage?: (id: string) => { w: number; h: number } | null,
+): Extent {
   const style = n.style;
   if (style.width && style.height) return { w: style.width, h: style.height };
 
@@ -414,8 +435,27 @@ export function measureTopic(n: MindNode, measurer: TextMeasurer = HEURISTIC_MEA
   // the list indent is part of the line's extent, not free space
   const maxLineW = lines.reduce((acc, l) => Math.max(acc, (l.indent ?? 0) + l.width), 0);
 
+  // Image above the text: width from style.imageWidth (or the original's,
+  // capped at MAX_IMAGE_W), height keeps the aspect ratio. Unresolvable ids
+  // (no card in sheet.attachments) measure as if the node had no image.
+  let imgW = 0;
+  let imgH = 0;
+  if (style.image && resolveImage) {
+    const att = resolveImage(style.image);
+    if (att && att.w > 0) {
+      imgW = style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+      imgH = (imgW * att.h) / att.w;
+    }
+  }
+  // An empty title still yields one strut line; "has text" means real content.
+  const hasText = lines.some((l) => l.segments.length > 0);
+  const textH = lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapPx ?? 0), 0);
+
   let w = style.width ? Math.max(MIN_TOPIC_W, style.width) : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET));
-  let h = style.height ?? Math.max(28, lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapPx ?? 0), 0) + pad * 2 + 4);
+  if (imgW > 0) w = Math.max(w, imgW + pad * 2);
+  // With an image the box is imgH + (gap + text only if real text) + padding;
+  // without one, the previous formula is untouched (the strut line included).
+  let h = style.height ?? Math.max(28, imgH > 0 ? imgH + (hasText ? IMAGE_GAP + textH : 0) + pad * 2 + 4 : textH + pad * 2 + 4);
 
   const shape = style.shape ?? "rounded";
   if (shape === "circle") {
@@ -432,6 +472,6 @@ export function measureTopic(n: MindNode, measurer: TextMeasurer = HEURISTIC_MEA
   return { w, h };
 }
 
-export function measureNode(n: MindNode, measurer?: TextMeasurer): Extent {
-  return measureTopic(n, measurer);
+export function measureNode(n: MindNode, measurer?: TextMeasurer, resolveImage?: (id: string) => { w: number; h: number } | null): Extent {
+  return measureTopic(n, measurer, resolveImage);
 }

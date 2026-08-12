@@ -62,7 +62,7 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       store.togglePalette();
     } else if (s.relFrom) {
       store.clearRelFrom();
-    } else if (s.selection.length > 0) {
+    } else if (s.selection.length > 0 || s.imageSel) {
       store.clearSelection();
     }
     return true;
@@ -127,7 +127,10 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
     case "delete": {
       e.preventDefault();
       const s = store.getSnapshot();
-      if (s.relSel) store.deleteSelectedRelationship();
+      // An image selected inside its node: Backspace/Delete removes ONLY the
+      // image reference — never the node.
+      if (s.imageSel) store.deleteSelectedImage();
+      else if (s.relSel) store.deleteSelectedRelationship();
       else if (s.groupSel) store.deleteGroup(s.groupSel);
       else if (s.summarySel) store.deleteSummary(s.summarySel);
       else store.deleteSelection();

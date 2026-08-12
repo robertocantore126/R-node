@@ -8,7 +8,8 @@
  */
 import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { createCanvasTextMeasurer, FONT_STACK, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
@@ -31,6 +32,8 @@ export interface RenderState {
   relSel?: string | null;
   groupSel?: string | null;
   summarySel?: string | null;
+  /** Node whose image is selected (mutually exclusive with node selection). */
+  imageSel?: string | null;
   showHidden?: boolean; // export: include collapsed subtrees
 }
 
@@ -62,10 +65,45 @@ export class Renderer {
   private textHits = 0;
   private textMisses = 0;
 
-  constructor(canvas: HTMLCanvasElement) {
+  /** Per-frame attachment resolver (invariant I9): set from state.sheet. */
+  private resolveImage: ((id: string) => { w: number; h: number } | null) | null = null;
+  /** Node ids with an image that were visible in the last painted frame. */
+  private visibleImageNodes = new Set<string>();
+  /**
+   * Image bitmap cache (ADR-001 §12): decoded at the level closest to the
+   * current zoom, LRU with a byte budget (w×h×4 per bitmap, 128MB cap).
+   * Evicted bitmaps are closed — ImageBitmap memory is not JS heap and the
+   * GC cannot free it predictably.
+   */
+  private imageCache = new Map<string, { bitmap: ImageBitmap; bytes: number }>();
+  private imageBytes = 0;
+  private imageFailed = new Set<string>();
+  /** Decodes in flight, key → requesting nodeId (a finished one for a node
+   * that scrolled off is closed immediately, never cached). */
+  private inflight = new Map<string, string>();
+  private inflightCount = 0;
+  private readonly IMAGE_BUDGET = 128 * 1024 * 1024;
+  private readonly MAX_INFLIGHT = 5;
+  /** Decode-size buckets. The max is the width of the `large` level: decoding
+   *  wider than the stored source costs memory and adds no detail. */
+  private readonly IMAGE_BUCKET_MIN = 128;
+  private readonly IMAGE_BUCKET_MAX = 1024;
+  private assetStore: AssetStore;
+  private onRepaint: (() => void) | null = null;
+
+  constructor(
+    canvas: HTMLCanvasElement,
+    opts: { assetStore?: AssetStore; onRepaint?: () => void } = {}
+  ) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2d context unavailable");
     this.ctx = ctx;
+    // Resolved at construction, not at module scope: getAssetStore() is a
+    // singleton that sticks on first call, and module init may run before
+    // Tauri injects window.__TAURI__ — the backend must be picked when the
+    // renderer is actually created, in the running environment.
+    this.assetStore = opts.assetStore ?? getAssetStore();
+    this.onRepaint = opts.onRepaint ?? null;
   }
 
   resize(canvas: HTMLCanvasElement, cssW: number, cssH: number): void {
@@ -85,8 +123,11 @@ export class Renderer {
     const cx = camera.x, cy = camera.y;
     const out: Placed[] = [];
 
+    // Nodes with images must be measured with the sheet's attachment cards
+    // (invariant I9): the layout, the renderer and the overlay all agree.
+    this.resolveImage = imageResolver(state.sheet);
     const add = (n: MindNode): void => {
-      const m = measureNode(n, this.measurer);
+      const m = measureNode(n, this.measurer, this.resolveImage ?? undefined);
       const x = n.position.x;
       const y = n.position.y;
       const visible =
@@ -137,6 +178,9 @@ export class Renderer {
     this.textMisses = 0;
 
     const placed = this.placedNodes(state);
+    this.visibleImageNodes = new Set(
+      placed.filter((p) => p.visible && !!p.node.style.image).map((p) => p.node.id)
+    );
     const byId = new Map(placed.map((p) => [p.node.id, p]));
 
     // Viewport in world units, with the same 40px margin placedNodes uses.
@@ -208,6 +252,10 @@ export class Renderer {
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
+    // Evict only at the end of the frame: a closed bitmap still referenced by
+    // the current paint would throw.
+    this.evictToBudget();
+
     // Per-frame counters: they are what separates "not drawn" from "drawn but
     // invisible" when someone reports something missing on screen.
     trace.render(
@@ -221,6 +269,12 @@ export class Renderer {
         linksDrawn,
         textHits: this.textHits,
         textMisses: this.textMisses,
+        imgVisible: placed.filter(
+          (p) => p.visible && !!p.node.style.image && !!this.resolveImage?.(p.node.style.image)
+        ).length,
+        imgCached: this.imageCache.size,
+        imgBytes: this.imageBytes,
+        imgInflight: this.inflightCount,
       },
       (typeof performance !== "undefined" ? performance.now() : 0) - tStart
     );
@@ -403,6 +457,37 @@ export class Renderer {
         ctx.stroke();
       }
     }
+    // Image resize handle (T14): bottom-right corner of the image, same
+    // outline style as the width handles. Same rect as imageWorldRect. Drawn
+    // for a selected node OR a selected IMAGE (the image is then the focus —
+    // resize must stay reachable without reselecting the node).
+    if (selected || state.imageSel === n.id) {
+      const hs = 9;
+      const ir = this.imageWorldRect(state, n.id);
+      if (ir) {
+        const hx = ir.x + ir.w - hs / 2;
+        const hy = ir.y + ir.h - hs / 2;
+        this.roundRect(ctx, hx, hy, hs, hs, 2);
+        ctx.strokeStyle = theme.background;
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+    }
+    // Image selection ring: the image is selected (not the node) — outline
+    // around the image so Backspace/Delete knows what it will remove.
+    if (state.imageSel === n.id) {
+      const ir = this.imageWorldRect(state, n.id);
+      if (ir) {
+        const pad = 3;
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([]);
+        ctx.strokeRect(ir.x - pad, ir.y - pad, ir.w + pad * 2, ir.h + pad * 2);
+      }
+    }
     if (state.hoverId === n.id && !selected) {
       ctx.strokeStyle = theme.selection;
       ctx.lineWidth = 1.5;
@@ -422,9 +507,13 @@ export class Renderer {
       ctx.fill();
     }
 
-    // text (rich, bitmap-cached). The node being edited is skipped: the
-    // HTML overlay owns it, no ghosting.
-    if (!editing) this.drawText(theme, p, textColor);
+    // image between shape and text (ADR-001 §12); skipped while editing —
+    // the HTML overlay owns it, no double-render (same rule as the text).
+    const imgH = this.imageH(p);
+    if (!editing) {
+      this.drawImage(p);
+      this.drawText(theme, p, textColor, imgH);
+    }
 
     // collapsed badge (mirror to the left when the branch is left-side)
     if (n.collapsed && n.childrenIds.length > 0) {
@@ -512,7 +601,17 @@ export class Renderer {
     ctx.closePath();
   }
 
-  private drawText(_theme: RenderTheme, p: Placed, color: string): void {
+  /** Height of the node's image in world units (0 = none), matching measureTopic. */
+  private imageH(p: Placed): number {
+    const n = p.node;
+    if (!n.style.image || !this.resolveImage) return 0;
+    const att = this.resolveImage(n.style.image);
+    if (!att || att.w <= 0) return 0;
+    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    return (imgW * att.h) / att.w;
+  }
+
+  private drawText(_theme: RenderTheme, p: Placed, color: string, imgH = 0): void {
     const n = p.node;
     const pad = n.style.padding ?? 10;
     const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
@@ -532,9 +631,102 @@ export class Renderer {
       }
     }
     const totalH = entry.h;
-    const startY = p.y + p.h / 2 - totalH / 2;
+    // With an image above, the text occupies the space below it and centers
+    // inside that area; otherwise it centers in the whole box (as before).
+    const startY =
+      imgH > 0
+        ? p.y + pad + imgH + IMAGE_GAP + Math.max(0, (p.h - pad * 2 - imgH - IMAGE_GAP - totalH) / 2)
+        : p.y + p.h / 2 - totalH / 2;
     const startX = p.x + pad;
     if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, startX, startY, entry.w, entry.h);
+  }
+
+  /**
+   * Draw the node's image into its reserved rect (cached bitmap), or start a
+   * decode. Sync by design: no await inside the paint path.
+   */
+  private drawImage(p: Placed): void {
+    const n = p.node;
+    const imageId = n.style.image;
+    if (!imageId || !this.resolveImage) return;
+    const att = this.resolveImage(imageId);
+    if (!att || att.w <= 0) return;
+    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    const imgH = (imgW * att.h) / att.w;
+    // Decode at the size THIS image is painted at, not at the size it happens
+    // to be stored at. Driving the choice from the global zoom alone put every
+    // bitmap on the 1024px level above zoom 0.5 on a retina screen — 3MB each,
+    // so fifty visible image nodes blew the budget and the cache thrashed.
+    const neededPx = imgW * this.curScale * this.dpr;
+    // Quantised to powers of two: an exact size would mint a new cache key on
+    // every micro-change of zoom and nothing would ever hit.
+    const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
+    // Smallest stored level that can serve the bucket. The original is never
+    // decoded: the hard 1024px cap of ADR-001 §12 is enforced here.
+    const level: AssetLevel = bucket <= 256 ? "small" : "large";
+    // The BUCKET keys the cache, not the level — with a variable decode size,
+    // keying by level would reuse a 384px bitmap when 900 are needed and leave
+    // that image blurred with nothing to invalidate it.
+    const key = `${imageId}@${bucket}`;
+
+    const entry = this.imageCache.get(key);
+    if (entry) {
+      // LRU refresh (Map insertion order = recency).
+      this.imageCache.delete(key);
+      this.imageCache.set(key, entry);
+      const x = p.x + (p.w - imgW) / 2;
+      const y = p.y + (n.style.padding ?? 10);
+      this.ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
+      return;
+    }
+    if (this.imageFailed.has(key)) return; // corrupt/unavailable: not per frame
+    if (this.inflight.has(key) || this.inflightCount >= this.MAX_INFLIGHT) return;
+    this.startDecode(key, imageId, n.id, level, bucket);
+  }
+
+  private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel, bucket: number): Promise<void> {
+    this.inflight.set(key, nodeId);
+    this.inflightCount++;
+    try {
+      const blob = await this.assetStore.get(assetId, level);
+      if (!blob) {
+        this.imageFailed.add(key);
+        return;
+      }
+      // resizeWidth downsamples DURING decode: the full-resolution surface is
+      // never materialised. Height is omitted on purpose — the browser derives
+      // it from the aspect ratio, and passing both risks distortion.
+      const bitmap = await createImageBitmap(blob, { resizeWidth: bucket, resizeQuality: "high" });
+      if (!this.visibleImageNodes.has(nodeId)) {
+        // The requesting node scrolled off while decoding: close immediately,
+        // never cache it.
+        bitmap.close();
+        return;
+      }
+      const bytes = bitmap.width * bitmap.height * 4;
+      this.imageCache.set(key, { bitmap, bytes });
+      this.imageBytes += bytes;
+      this.evictToBudget();
+      // A repaint lets the fresh bitmap appear without waiting for the next
+      // user gesture (and starts the next pending decodes).
+      this.onRepaint?.();
+    } catch {
+      this.imageFailed.add(key);
+    } finally {
+      if (this.inflight.delete(key)) this.inflightCount--;
+    }
+  }
+
+  /** LRU eviction under the byte budget. Only ever called between frames. */
+  private evictToBudget(): void {
+    while (this.imageBytes > this.IMAGE_BUDGET && this.imageCache.size > 0) {
+      const first = this.imageCache.entries().next().value;
+      if (!first) break;
+      const [k, v] = first as [string, { bitmap: ImageBitmap; bytes: number }];
+      this.imageCache.delete(k);
+      this.imageBytes -= v.bytes;
+      v.bitmap.close();
+    }
   }
 
   private textCacheKey(n: MindNode, color: string, maxW: number, res: number): string {
@@ -873,6 +1065,62 @@ export class Renderer {
    * Returns { id, side } or null. Checked before the body hit test so the
    * handles win even where they overlap the node edge.
    */
+  /**
+   * Hit test for the image resize handle (T14): a small square on the
+   * bottom-right corner of the node's image, same grab-box style as
+   * hitTestResize. Only when the node has an image and is selected.
+   */
+  hitTestImageResize(state: RenderState, worldX: number, worldY: number): string | null {
+    const hs = 12;
+    const ids = new Set(state.selection);
+    if (state.imageSel) ids.add(state.imageSel);
+    for (const id of ids) {
+      if (state.editingId === id) continue;
+      const rect = this.imageWorldRect(state, id);
+      if (!rect) continue;
+      const hx = rect.x + rect.w - hs / 2;
+      const hy = rect.y + rect.h - hs / 2;
+      if (worldX >= hx && worldX <= hx + hs && worldY >= hy && worldY <= hy + hs) return id;
+    }
+    return null;
+  }
+
+  /** World-space rect of the node's image (same formula as drawImage), or null. */
+  imageWorldRect(state: RenderState, id: string): { x: number; y: number; w: number; h: number } | null {
+    const p = this.placedNodes(state).find((p) => p.node.id === id);
+    if (!p) return null;
+    return this.imageRectForPlaced(p);
+  }
+
+  /** World-space rect of the image of an already-placed node, or null. */
+  private imageRectForPlaced(p: Placed): { x: number; y: number; w: number; h: number } | null {
+    const n = p.node;
+    const imageId = n.style.image;
+    if (!imageId || !this.resolveImage) return null;
+    const att = this.resolveImage(imageId);
+    if (!att || att.w <= 0) return null;
+    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    const imgH = (imgW * att.h) / att.w;
+    return { x: p.x + (p.w - imgW) / 2, y: p.y + (n.style.padding ?? 10), w: imgW, h: imgH };
+  }
+
+  /**
+   * Hit test for the image INSIDE a node: the image is a selectable target
+   * of its own (select → Backspace deletes only it; drag moves it to another
+   * node). Checked before the node-body hit test so the image wins inside
+   * its own rect.
+   */
+  hitTestImage(state: RenderState, worldX: number, worldY: number): string | null {
+    const placed = this.placedNodes(state).filter((p) => p.visible);
+    for (let i = placed.length - 1; i >= 0; i--) {
+      const r = this.imageRectForPlaced(placed[i]);
+      if (r && worldX >= r.x && worldX <= r.x + r.w && worldY >= r.y && worldY <= r.y + r.h) {
+        return placed[i].node.id;
+      }
+    }
+    return null;
+  }
+
   hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {
     const hs = 12; // grab box slightly larger than the drawn 9px handle
     for (const id of state.selection) {

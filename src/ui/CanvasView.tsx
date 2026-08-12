@@ -4,12 +4,22 @@ import { viewSize } from "../editor/view";
 import { setExportPngHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { screenToWorld, worldToScreen } from "../render/viewport";
-import { measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer, MIN_TOPIC_W } from "../layout/measure";
+import { imageResolver, measureNode } from "../layout/mindmap";
+import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
-import type { MindNode } from "../core/types";
+import type { MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { installTrace, trace } from "../dev/trace";
+import { fetchImageAsFile, firstImageFile, firstUriFromList } from "../editor/externalImage";
+
+/**
+ * Accept OS file drags (Explorer) and browser image-URL drags (text/uri-list);
+ * anything else (text, links) is left to the browser default.
+ */
+function acceptsExternalDrop(dt: DataTransfer): boolean {
+  const types = [...dt.types];
+  return types.includes("Files") || types.includes("text/uri-list");
+}
 
 /**
  * Paint synchronously on every store change. rAF is unreliable in embedded
@@ -36,6 +46,12 @@ interface DragState {
   resizeStartWorldX: number;
   resizeStartWidth: number;
   resizeStartX: number;
+  /** Image resize (T14): dragging the image corner handle. */
+  imgResizing: string | null;
+  imgResizeStartWorldX: number;
+  imgResizeStartWidth: number;
+  /** Image move: dragging a selected image onto another node. */
+  imgDragging: string | null;
   /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
   marqueeStartX: number | null;
   marqueeStartY: number | null;
@@ -50,6 +66,17 @@ function shapeWidthAllowance(n: MindNode): number {
 }
 
 const overlayMeasurer = createCanvasTextMeasurer();
+
+/** `imageResolver` memoized on the sheet it was built from. */
+let lastResolverSheet: Sheet | null = null;
+let lastResolver: ReturnType<typeof imageResolver> | null = null;
+function overlayImageResolver(sheet: Sheet): ReturnType<typeof imageResolver> {
+  if (lastResolverSheet !== sheet || !lastResolver) {
+    lastResolverSheet = sheet;
+    lastResolver = imageResolver(sheet);
+  }
+  return lastResolver;
+}
 
 export function CanvasView(): JSX.Element {
   const store = useStore();
@@ -72,6 +99,10 @@ export function CanvasView(): JSX.Element {
     resizeStartWorldX: 0,
     resizeStartWidth: 0,
     resizeStartX: 0,
+    imgResizing: null,
+    imgResizeStartWorldX: 0,
+    imgResizeStartWidth: 0,
+    imgDragging: null,
     marqueeStartX: null,
     marqueeStartY: null,
     marqueeActive: false,
@@ -86,6 +117,7 @@ export function CanvasView(): JSX.Element {
   const [panning, setPanning] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [resizeHover, setResizeHover] = useState(false);
+  const [imgResizeHover, setImgResizeHover] = useState(false);
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const paint = useCallback(() => {
@@ -107,6 +139,7 @@ export function CanvasView(): JSX.Element {
       relSel: s.relSel,
       groupSel: s.groupSel,
       summarySel: s.summarySel,
+      imageSel: s.imageSel,
     };
     renderer.render(rs);
   }, [store]);
@@ -118,7 +151,9 @@ export function CanvasView(): JSX.Element {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const renderer = new Renderer(canvas);
+    // Image decodes finish asynchronously; the repaint callback brings them
+    // on screen without waiting for the next user gesture.
+    const renderer = new Renderer(canvas, { onRepaint: schedule });
     rendererRef.current = renderer;
 
     const ro = new ResizeObserver(() => {
@@ -259,6 +294,23 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
 
+    // Image resize (T14): grab the corner handle on the node's image. Same
+    // precedence as the width handle — before the body hit test.
+    const imgResizeHit = s.relFrom ? null : renderer.hitTestImageResize(rs, world.x, world.y);
+    if (imgResizeHit) {
+      const n = store.doc.node(imgResizeHit)!;
+      const att = n.style.image ? store.sheet.attachments.find((a) => a.id === n.style.image) : undefined;
+      drag.imgResizing = imgResizeHit;
+      drag.imgResizeStartWorldX = world.x;
+      // imageWidth may be unset — resolve the natural width like the renderer.
+      drag.imgResizeStartWidth = n.style.imageWidth ?? (att ? Math.min(att.w, MAX_IMAGE_W) : 0);
+      store.beginImageResize(imgResizeHit);
+      store.select(imgResizeHit, { additive: false });
+      setResizing(true);
+      setResizeHover(false);
+      return;
+    }
+
     // Xmind-style width resize: grab the handle on the selected node's edge.
     // Checked BEFORE the body hit test so the handle wins on the edge line
     // (skipped while a relationship target is being picked).
@@ -275,6 +327,22 @@ export function CanvasView(): JSX.Element {
       store.select(resizeHit.id, { additive: false });
       setResizing(true);
       setResizeHover(false);
+      return;
+    }
+
+    // Image body hit (before the node body hit test): the image inside a
+    // node is a selectable target of its own — a click selects it, a drag
+    // moves it onto another node. Skipped while picking a relationship
+    // target, like the resize handles.
+    const imgHit = s.relFrom ? null : renderer.hitTestImage(rs, world.x, world.y);
+    if (imgHit) {
+      const rect = renderer.imageWorldRect(rs, imgHit);
+      drag.grabOffsetX = rect ? world.x - rect.x : 0;
+      drag.grabOffsetY = rect ? world.y - rect.y : 0;
+      store.selectImage(imgHit);
+      drag.imgDragging = imgHit;
+      drag.dragging = null;
+      drag.marqueeStartX = null;
       return;
     }
 
@@ -336,6 +404,14 @@ export function CanvasView(): JSX.Element {
     drag.lastX = x;
     drag.lastY = y;
 
+    if (drag.imgResizing) {
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const dx = world.x - drag.imgResizeStartWorldX;
+      store.setImageResizeDraft(drag.imgResizing, drag.imgResizeStartWidth + dx);
+      drag.moved = true;
+      return;
+    }
     if (drag.resizing) {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
@@ -381,14 +457,32 @@ export function CanvasView(): JSX.Element {
       });
       return;
     }
+    // Image move: the dragged image highlights the node under the pointer as
+    // its new home (the "child" drop indicator); the source node is never a
+    // target. Threshold before feedback, same as node dragging.
+    if (drag.imgDragging) {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const hit = rendererRef.current!.hitTest(currentRenderState(), world.x, world.y);
+      if (hit && hit !== drag.imgDragging) {
+        store.setDrop({ mode: "child", nodeId: hit });
+      } else {
+        store.setDrop({ mode: "none", nodeId: drag.imgDragging });
+      }
+      return;
+    }
     if (!drag.dragging) {
       const p = localPoint(e);
       const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, p.x, p.y);
       const renderer = rendererRef.current;
       const rs = currentRenderState();
       const rh = renderer?.hitTestResize(rs, w.x, w.y) ?? null;
+      const ih = renderer?.hitTestImageResize(rs, w.x, w.y) ?? null;
       setResizeHover(!!rh);
-      store.setHover(rh ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
+      setImgResizeHover(!!ih);
+      store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
     }
     if (!drag.dragging) return;
     if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
@@ -436,6 +530,13 @@ export function CanvasView(): JSX.Element {
       setMarquee(null);
       return;
     }
+    if (drag.imgResizing) {
+      store.commitImageResize();
+      drag.imgResizing = null;
+      drag.moved = false;
+      setResizing(false);
+      return;
+    }
     if (drag.resizing) {
       store.commitResize();
       drag.resizing = null;
@@ -448,6 +549,20 @@ export function CanvasView(): JSX.Element {
       drag.panning = false;
       drag.dragging = null;
       setPanning(false);
+      return;
+    }
+    // Image move dropped: assign the image to the highlighted node. A plain
+    // click (no move) only leaves the image selected — never moves it.
+    if (drag.imgDragging) {
+      if (drag.moved) {
+        const drop = store.getSnapshot().drop;
+        if (drop && drop.mode !== "none" && drop.nodeId !== drag.imgDragging) {
+          store.assignImageToNode(drag.imgDragging, drop.nodeId);
+        }
+      }
+      store.setDrop(null);
+      drag.imgDragging = null;
+      drag.moved = false;
       return;
     }
     if (drag.dragging && drag.moved) {
@@ -585,7 +700,11 @@ export function CanvasView(): JSX.Element {
   if (state.editingId) {
     const n = store.doc.node(state.editingId);
     if (n) {
-      const m = measureNode(n, overlayMeasurer);
+      // The overlay box must match the canvas box: same measurer, same image
+      // resolver (invariant I9) — otherwise the node jumps on double-click.
+      // Memoized on the sheet: building it inline reallocated the map on every
+      // render, which is invisible at 20 nodes and is not at 5.000.
+      const m = measureNode(n, overlayMeasurer, overlayImageResolver(store.sheet));
       const { x, y } = worldToScreen(state.camera, viewSize.w, viewSize.h, n.position.x, n.position.y);
       editStyle = {
         left: x,
@@ -609,7 +728,16 @@ export function CanvasView(): JSX.Element {
         ref={canvasRef}
         className="canvas"
         style={{
-          cursor: resizing || resizeHover ? "ew-resize" : panning ? "grabbing" : state.mode === "pan" ? "grab" : "default",
+          cursor:
+            imgResizeHover || dragRef.current.imgResizing
+              ? "nwse-resize"
+              : resizing || resizeHover
+                ? "ew-resize"
+                : panning
+                  ? "grabbing"
+                  : state.mode === "pan"
+                    ? "grab"
+                    : "default",
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -617,9 +745,55 @@ export function CanvasView(): JSX.Element {
         onPointerLeave={() => {
           store.setHover(null);
           setResizeHover(false);
+          setImgResizeHover(false);
         }}
         onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}
+        onDragOver={(e) => {
+          // Accept the drop (T13-2): without preventDefault the browser would
+          // navigate away on drop. Highlight the node under the cursor while
+          // dragging so the user sees the target.
+          if (!acceptsExternalDrop(e.dataTransfer)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          const { x, y } = localPoint(e as unknown as RPointerEvent);
+          const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+          const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+          store.setHover(hit);
+        }}
+        onDragLeave={() => {
+          if (!dragRef.current?.dragging) store.setHover(null);
+        }}
+        onDrop={async (e) => {
+          // External sources: an OS file (Explorer, or a browser image that
+          // Chromium materializes as a temp file) OR a browser image URL
+          // (text/uri-list, the only payload some browsers hand over).
+          if (!acceptsExternalDrop(e.dataTransfer)) return;
+          e.preventDefault();
+          const { x, y } = localPoint(e as unknown as RPointerEvent);
+          const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+          const target = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+          store.setHover(null);
+          if (!target) {
+            store.toast("Drop the image on a topic");
+            return;
+          }
+          let file = firstImageFile(e.dataTransfer.files);
+          if (!file) {
+            const url = firstUriFromList(e.dataTransfer.getData("text/uri-list"));
+            if (!url) {
+              store.toast("Drop an image file or a browser image on a topic");
+              return;
+            }
+            file = await fetchImageAsFile(url);
+            if (!file) {
+              store.toast("Could not load the image from its URL");
+              return;
+            }
+          }
+          const res = await store.attachImageFile(target, file);
+          if (!res.ok) store.toast(res.reason ?? "Could not import image");
+        }}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
       {marquee && (

@@ -24,9 +24,9 @@
  *  - freeform: nothing — manual positions only.
  */
 import type { MindNode, Sheet } from "../core/types";
-import { measureNode, type TextMeasurer } from "./measure";
+import { imageResolver, measureNode, type TextMeasurer } from "./measure";
 
-export { measureNode } from "./measure";
+export { imageResolver, measureNode } from "./measure";
 export type { Extent, TextMeasurer } from "./measure";
 
 export interface LayoutResult {
@@ -40,7 +40,10 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   const root = sheet.nodes[sheet.rootNodeId];
   if (!root) return { positions, bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 } };
 
-  const size = (n: MindNode): { w: number; h: number } => measureNode(n, measurer);
+  // Nodes with images must be measured with the sheet's attachment cards or
+  // the layout would place them at text-only size (invariant I9).
+  const resolveImage = imageResolver(sheet);
+  const size = (n: MindNode): { w: number; h: number } => measureNode(n, measurer, resolveImage);
   const gap = Math.max(6, st.branchSpacing);
 
   const isAuto = (id: string): boolean => {

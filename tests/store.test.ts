@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EditorStore } from "../src/editor/store";
+import { EditorStore, docFileBaseName, portableFileKey } from "../src/editor/store";
 import { makeOp, type Op } from "../src/core/ops";
 import type { StorageAdapter } from "../src/persist/storage";
 
@@ -8,6 +8,29 @@ const memoryAdapter: StorageAdapter = {
   async load() { return []; },
   async save() { /* no-op */ },
 };
+
+describe("portableFileKey", () => {
+  it("derives a distinct key per format for the same document", () => {
+    const json = portableFileKey("doc-1", "json");
+    const zip = portableFileKey("doc-1", "zip");
+    expect(json).not.toBe(zip);
+    expect(json).toBe("r-node.file-handle.doc-1:json");
+    expect(zip).toBe("r-node.file-handle.doc-1:zip");
+  });
+
+  it("does not collide across documents", () => {
+    expect(portableFileKey("doc-1", "json")).not.toBe(portableFileKey("doc-2", "json"));
+  });
+});
+
+describe("docFileBaseName", () => {
+  it("makes a filesystem-safe name out of the GUI title", () => {
+    expect(docFileBaseName("Vacation Plan")).toBe("Vacation_Plan");
+    expect(docFileBaseName("R-node — Roadmap")).toBe("R-node_Roadmap");
+    expect(docFileBaseName("a:b*?c\"d<e>f|g")).toBe("a_b_c_d_e_f_g");
+    expect(docFileBaseName("")).toBe("Untitled map");
+  });
+});
 
 describe("new topic defaults", () => {
   it("gives every newly created topic a useful editable title", () => {
@@ -339,6 +362,102 @@ describe("save / load file", () => {
   });
 });
 
+describe("image selection, delete and move", () => {
+  const IMG_ID = "f".repeat(64);
+  const card = { id: IMG_ID, mime: "image/png", w: 10, h: 10, bytes: 3 };
+
+  function twoMainTopics(store: EditorStore): [string, string] {
+    store.createChild();
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    return [root.childrenIds[0], root.childrenIds[1]];
+  }
+
+  it("selects the image exclusively: clears node selection, and a node select clears it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a] = twoMainTopics(store);
+    store.attachImage(a, card);
+
+    store.select(a);
+    expect(store.getSnapshot().selection).toEqual([a]);
+
+    store.selectImage(a);
+    const s = store.getSnapshot();
+    expect(s.imageSel).toBe(a);
+    expect(s.selection).toEqual([]);
+
+    // Selecting the node again drops the image selection.
+    const root = store.sheet.rootNodeId;
+    store.select(root);
+    expect(store.getSnapshot().imageSel).toBeNull();
+  });
+
+  it("deleteSelectedImage removes only the image (node survives) and undo restores it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a] = twoMainTopics(store);
+    store.attachImage(a, card);
+    store.selectImage(a);
+
+    store.deleteSelectedImage();
+    const node = store.doc.node(a)!;
+    expect(node.style.image).toBeUndefined();
+    expect(node).toBeDefined(); // the node itself is NOT deleted
+    expect(store.getSnapshot().imageSel).toBeNull();
+    // The attachment card stays: GC is explicit (collectOrphans).
+    expect(store.sheet.attachments.some((c) => c.id === IMG_ID)).toBe(true);
+
+    store.undo();
+    expect(store.doc.node(a)!.style.image).toBe(IMG_ID);
+  });
+
+  it("deleteSelectedImage on a node without an image is a no-op", () => {
+    const store = new EditorStore(memoryAdapter);
+    // The root has no image and the store still has zero ops in history.
+    store.selectImage(store.sheet.rootNodeId);
+    store.deleteSelectedImage();
+    expect(store.getSnapshot().canUndo).toBe(false); // no op was created
+  });
+
+  it("assignImageToNode moves the image between nodes as ONE undoable batch", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a, b] = twoMainTopics(store);
+    store.attachImage(a, card);
+
+    store.assignImageToNode(a, b);
+    expect(store.doc.node(a)!.style.image).toBeUndefined();
+    expect(store.doc.node(b)!.style.image).toBe(IMG_ID);
+    // The image on the target stays selected.
+    expect(store.getSnapshot().imageSel).toBe(b);
+
+    store.undo();
+    expect(store.doc.node(a)!.style.image).toBe(IMG_ID);
+    expect(store.doc.node(b)!.style.image).toBeUndefined();
+    store.redo();
+    expect(store.doc.node(a)!.style.image).toBeUndefined();
+    expect(store.doc.node(b)!.style.image).toBe(IMG_ID);
+  });
+
+  it("assignImageToNode no-ops for the same node, an image-less source, or a missing target", () => {
+    const store = new EditorStore(memoryAdapter);
+    const rootId = store.sheet.rootNodeId;
+    store.createChild();
+    const main = store.doc.node(rootId)!.childrenIds[0];
+    store.attachImage(main, card);
+    expect(store.doc.node(main)!.style.image).toBe(IMG_ID);
+
+    store.assignImageToNode(main, main); // same node
+    store.assignImageToNode("missing", main); // missing source
+    store.assignImageToNode(rootId, main); // image-less source
+    expect(store.doc.node(main)!.style.image).toBe(IMG_ID);
+
+    // None of the no-ops pushed history: one undo reverts the attach itself.
+    store.undo();
+    expect(store.doc.node(main)!.style.image).toBeUndefined();
+    store.redo();
+    expect(store.doc.node(main)!.style.image).toBe(IMG_ID);
+  });
+});
+
 describe("canvas resize drag", () => {
   it("commits a live width drag as ONE setStyle op with exact undo", () => {
     const store = new EditorStore(memoryAdapter);
@@ -424,6 +543,55 @@ describe("canvas resize drag", () => {
 
     store.undo();
     expect(store.doc.node(main.id)!.style.width).toBeUndefined();
+  });
+
+  it("commits an image width drag as ONE setStyle op with exact undo", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = store.sheet.rootNodeId;
+    const before = { ...store.doc.node(id)!.style };
+
+    store.beginImageResize(id);
+    store.setImageResizeDraft(id, 200);
+    store.setImageResizeDraft(id, 180);
+    expect(store.doc.node(id)!.style.imageWidth).toBe(180);
+    store.commitImageResize();
+
+    const node = store.doc.node(id)!;
+    expect(node.style.imageWidth).toBe(180);
+
+    store.undo();
+    expect(store.doc.node(id)!.style).toEqual(before);
+  });
+
+  it("clamps the image width to 48px minimum and no-ops on a click without drag", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = store.sheet.rootNodeId;
+    store.beginImageResize(id);
+    store.setImageResizeDraft(id, 10); // below the 48 floor
+    expect(store.doc.node(id)!.style.imageWidth).toBe(48);
+    store.commitImageResize();
+    expect(store.doc.node(id)!.style.imageWidth).toBe(48);
+
+    // pointer-down/up with no move must not create an op
+    const before = { ...store.doc.node(id)!.style };
+    store.beginImageResize(id);
+    store.commitImageResize();
+    expect(store.doc.node(id)!.style).toEqual(before);
+  });
+
+  it("resetImageWidth removes the custom width in one undoable op", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = store.sheet.rootNodeId;
+    store.beginImageResize(id);
+    store.setImageResizeDraft(id, 220);
+    store.commitImageResize();
+    expect(store.doc.node(id)!.style.imageWidth).toBe(220);
+
+    store.resetImageWidth(id);
+    expect(store.doc.node(id)!.style.imageWidth).toBeUndefined();
+
+    store.undo();
+    expect(store.doc.node(id)!.style.imageWidth).toBe(220);
   });
 
   it("dragging a subtopic onto empty canvas does not pin an absolute position", () => {
@@ -615,5 +783,34 @@ describe("canvas resize drag", () => {
     await store.copySelectionOutline();
     expect(writes).toHaveLength(1);
     expect(writes[0]).toBe("A\n  A1\nB");
+  });
+
+  it("attachImage registers the card once and undo removes the reference, keeping the card", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    const card = { id: "sha-img", mime: "image/png", w: 400, h: 300, bytes: 1234, name: "pic.png" };
+
+    store.attachImage(main.id, card);
+    expect(store.sheet.attachments).toHaveLength(1);
+    expect(store.doc.node(main.id)!.style.image).toBe("sha-img");
+
+    // Same image on a second node: still one card.
+    store.attachImage(root.id, card);
+    expect(store.sheet.attachments).toHaveLength(1);
+    expect(store.doc.node(root.id)!.style.image).toBe("sha-img");
+
+    // One undo per op removes the references, and the shared card stays —
+    // removing it on undo could break another user of the same image;
+    // collectOrphans is the GC.
+    store.undo();
+    expect(store.doc.node(root.id)!.style.image).toBeUndefined();
+    store.undo();
+    expect(store.doc.node(main.id)!.style.image).toBeUndefined();
+    expect(store.sheet.attachments).toHaveLength(1);
+
+    // No image bytes ever entered the document.
+    expect(JSON.stringify(store.sheet.attachments)).not.toContain("\"image\":");
   });
 });

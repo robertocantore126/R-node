@@ -23,6 +23,7 @@ export type Op =
   | { opId: string; actorId: string; ts: string; type: "deleteNode"; id: string; parentId: string | null; index: number; subtree: MindNode[]; removedRelationships: Relationship[] }
   | { opId: string; actorId: string; ts: string; type: "setTitle"; id: string; title: string; prev: string; titleRuns?: TextRun[]; prevRuns?: TextRun[] }
   | { opId: string; actorId: string; ts: string; type: "setStyle"; id: string; style: Style; prev: Style }
+  | { opId: string; actorId: string; ts: string; type: "setNodeImage"; nodeId: string; imageId: string | null; prevImageId: string | null }
   | { opId: string; actorId: string; ts: string; type: "setPosition"; id: string; x: number; y: number; manual: boolean; offsetX?: number; offsetY?: number; prev: Position }
   | { opId: string; actorId: string; ts: string; type: "setCollapsed"; id: string; collapsed: boolean; prev: boolean }
   | { opId: string; actorId: string; ts: string; type: "moveNode"; id: string; fromParentId: string | null; fromIndex: number; toParentId: string | null; toIndex: number }
@@ -130,6 +131,16 @@ export function applyOp(sheet: Sheet, op: Op): void {
     case "setStyle":
       nodes[op.id].style = { ...op.style };
       break;
+    case "setNodeImage": {
+      const node = nodes[op.nodeId];
+      if (!node) break;
+      // The op carries ONLY the id — never image bytes (ADR-001 §12).
+      const style = { ...node.style };
+      if (op.imageId) style.image = op.imageId;
+      else delete style.image;
+      node.style = style;
+      break;
+    }
     case "setPosition":
       nodes[op.id].position = { x: op.x, y: op.y, manual: op.manual, offsetX: op.offsetX, offsetY: op.offsetY };
       break;
@@ -229,6 +240,8 @@ export function inverseOf(op: Op, meta?: OpMeta): Op[] {
       return [makeOp<Op & { type: "setTitle" }>("setTitle", { id: op.id, title: op.prev, prev: op.title, titleRuns: op.prevRuns, prevRuns: op.titleRuns }, m)];
     case "setStyle":
       return [makeOp<Op & { type: "setStyle" }>("setStyle", { id: op.id, style: op.prev, prev: op.style }, m)];
+    case "setNodeImage":
+      return [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: op.nodeId, imageId: op.prevImageId, prevImageId: op.imageId }, m)];
     case "setPosition":
       return [makeOp<Op & { type: "setPosition" }>("setPosition", {
         id: op.id,

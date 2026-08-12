@@ -69,14 +69,61 @@ export class LocalStorageAdapter implements StorageAdapter {
   }
 }
 
-/** Placeholder for the desktop build — wired to Tauri commands when Rust lands. */
+/**
+ * Desktop: the document is ONE `.rnode` file (a SQLite database, T20). The
+ * document JSON lives in its `document` table; the images are served by
+ * TauriAssetStore from the same file. The path is mutable state set by
+ * open/save-as — the same pattern as the asset store, so a file switch never
+ * re-creates anything. No localStorage on desktop: the document survives
+ * even if the webview profile is wiped.
+ */
 export class TauriStorageAdapter implements StorageAdapter {
-  readonly label = "sqlite (rust)";
-  async load(): Promise<RnodeDocument[]> {
-    // window.__TAURI__ ? await invoke("list_documents") : []
-    return [];
+  readonly label = "document file (rust)";
+  private root: string | null = null;
+
+  /** The document file this adapter serves. Null = nothing chosen yet. */
+  setRoot(path: string | null): void {
+    this.root = path;
   }
-  async save(_docs: RnodeDocument[]): Promise<void> {
-    // await invoke("save_document", { doc })
+
+  get hasRoot(): boolean {
+    return this.root !== null;
+  }
+
+  /** The current document path, or null before the first open/save-as. */
+  get currentPath(): string | null {
+    return this.root;
+  }
+
+  private invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+    if (typeof window === "undefined" || !window.__TAURI__) {
+      throw new Error("TauriStorageAdapter used outside the Tauri webview");
+    }
+    return window.__TAURI__.core.invoke(cmd, args);
+  }
+
+  /** Read the document from `<path>` WITHOUT switching this adapter's path. */
+  async readDocumentAt(path: string): Promise<RnodeDocument | null> {
+    try {
+      const text = (await this.invoke("read_document", { path })) as string | null;
+      if (!text) return null;
+      const doc = JSON.parse(text) as RnodeDocument;
+      return Array.isArray(doc.sheets) ? doc : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async load(): Promise<RnodeDocument[]> {
+    if (!this.root) return [];
+    const doc = await this.readDocumentAt(this.root);
+    return doc ? [doc] : [];
+  }
+
+  async save(docs: RnodeDocument[]): Promise<void> {
+    const doc = docs[0];
+    if (!doc) return;
+    if (!this.root) throw new Error("TauriStorageAdapter: no document file chosen");
+    await this.invoke("write_document", { path: this.root, data: JSON.stringify(doc) });
   }
 }

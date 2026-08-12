@@ -151,7 +151,9 @@ accetta qualunque cosa in scrittura: è un invito a inventare schemi incoerenti.
 **File.** `src/core/types.ts` · eventuali punti che li inizializzano.
 
 **Passi.**
-1. Cambia i sei campi da `unknown[]` a `never[]`.
+1. Cambia a `never[]` **cinque** campi: `boundaries`, `summaries`, `callouts`,
+   `zones`, `comments`. **Lascia stare `attachments`**: è l'unico che sta per
+   avere un consumatore vero, e lo tipizza T12.
 2. Aggiungi sopra un commento: sono feature di Fase 2–3, si tipizzano quando si
    progettano, e `never[]` costringe a una decisione esplicita.
 
@@ -338,6 +340,489 @@ composizione.
 
 **Fatto quando.** Il draft non viene aggiornato durante la composizione e
 contiene il testo finale corretto alla fine.
+
+---
+
+## T0 — Bring-up di Tauri · prerequisito di T12a–T15
+
+**Obiettivo.** Compilare e avviare la shell desktop già presente, e verificare
+che il percorso di persistenza SQLite funzioni end-to-end.
+
+**Perché.** [ADR-001](ADR-001-immagini-e-piattaforma.md) §12 sceglie B1: gli
+asset vivono su filesystem, non in IndexedDB, perché centinaia di originali
+insostituibili non possono dipendere da uno storage che il browser può
+cancellare. `src-tauri/` esiste ed espone già `list_documents`,
+`load_document`, `save_document`, `delete_document` — **ma non è mai stato
+compilato**.
+
+Va fatto come passo **separato**, prima e non insieme alle immagini: se
+qualcosa non funziona devi sapere che è l'ambiente, non il tuo codice.
+
+> **Questo task richiede un'installazione di sistema e va eseguito dal
+> proprietario**, non da un agente: `rustup` installa una toolchain.
+
+**Passi.**
+1. Installa Rust da [rustup.rs](https://rustup.rs) — per-utente, senza
+   privilegi di amministratore:
+   ```
+   rustup default stable
+   ```
+2. Installa la CLI di Tauri:
+   ```
+   cargo install tauri-cli --locked
+   ```
+3. Dalla cartella del progetto:
+   ```
+   npm install
+   cargo tauri dev
+   ```
+   La prima compilazione è lunga. Su Windows serve WebView2, presente di
+   serie su Windows 11.
+4. Nell'app che si apre: crea un documento, scrivi qualcosa, salva, chiudi,
+   riapri. Deve ritrovare tutto.
+5. Se il passo 4 fallisce, il problema è nel percorso `TauriStorageAdapter` di
+   `src/persist/storage.ts` o nei comandi di `src-tauri/src/lib.rs`: **è il
+   momento di scoprirlo**, non quando ci saranno anche le immagini.
+
+**Fatto quando.** `cargo tauri dev` avvia l'app, un documento sopravvive a
+chiusura e riapertura, e `npm test` resta verde (il core non deve essere
+cambiato).
+
+**Non fare.** Non toccare le immagini in questo task. Non rimuovere
+`LocalStorageAdapter`: serve ancora al target web e all'harness di parità.
+
+---
+
+> **I task T12a–T15 implementano la decisione A1+B1 di
+> [ADR-001](ADR-001-immagini-e-piattaforma.md) §12** — archivio asset separato
+> dal documento, originale più livelli a 256px e 1024px, decodifica al livello
+> corrispondente allo zoom con tetto duro a 1024px e budget in byte.
+>
+> **Nota su T12a**: l'interfaccia e l'implementazione IndexedDB **non
+> dipendono da T0** e si possono scrivere subito. L'implementazione su
+> filesystem arriva quando Tauri compila.
+
+## T12a — Archivio degli asset (fuori dal documento) · P2
+
+**Obiettivo.** Un archivio di blob separato dal documento, indirizzato per
+contenuto, dietro un'interfaccia con due implementazioni possibili.
+
+**Perché prima di tutto il resto.** Le immagini **non possono stare dentro il
+documento**. Oggi si salva con `JSON.stringify(docs)` in localStorage: quota
+reale ~5MB, e una mappa da 10k nodi ne occupa già ~3.6. Il base64 gonfia i
+byte del 33%. L'obiettivo dichiarato sono **centinaia di immagini**: non ci
+sta di un ordine di grandezza, e un documento da decine di MB blocca il thread
+principale a ogni `JSON.parse`. Se questo task non viene per primo, ogni
+immagine già allegata va poi migrata.
+
+**File.** `src/persist/assets.ts` (nuovo) · `src/core/types.ts` ·
+`tests/assets.test.ts` (nuovo)
+
+**Passi.**
+
+1. **Interfaccia**, sullo stesso modello di `StorageAdapter` che esiste già.
+   Tre rappresentazioni per asset, come deciso in ADR-001 §12: l'originale
+   intatto e due livelli derivati (1024px e 256px sul lato lungo).
+   ```ts
+   /** "original" = intatto · "large" = 1024px · "small" = 256px, lato lungo */
+   export type AssetLevel = "original" | "large" | "small";
+
+   export interface AssetBlob { blob: Blob; w: number; h: number }
+
+   export interface AssetMeta {
+     id: string;          // SHA-256 dell'originale
+     mime: string;
+     w: number;           // dimensioni dell'originale
+     h: number;
+     bytes: number;       // peso dell'originale
+     name?: string;
+   }
+
+   export interface AssetStore {
+     /** I livelli arrivano già pronti: generarli è compito di T13. */
+     put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string>;
+     get(id: string, level: AssetLevel): Promise<Blob | null>;
+     meta(id: string): Promise<AssetMeta | null>;
+     delete(id: string): Promise<void>;
+     list(): Promise<string[]>;
+   }
+   ```
+   **Questo task non genera i livelli**: li riceve già pronti e li conserva.
+   La pipeline che li produce (ridimensionamento, ricompressione) è T13, e sta
+   fuori di qui perché richiede un canvas e quindi non è testabile in Node.
+2. **`IndexedDbAssetStore`** come default: unica implementazione richiesta da
+   questo task. IndexedDB immagazzina `Blob` **nativi** — niente base64, niente
+   inflazione — e la quota è di centinaia di MB fino a GB. Un object store
+   `assets` con chiave l'id, valore `{ original, display, meta }`.
+3. **Indirizzamento per contenuto**: l'id è lo SHA-256 del file originale
+   (`crypto.subtle.digest`). La stessa immagine allegata a 50 nodi occupa
+   spazio **una volta sola**, e non esistono collisioni di nomi.
+4. **Due varianti per asset**, ed è il punto che concilia i due requisiti:
+   - `original` — il file come importato, mai ricompresso. È la sorgente di
+     verità: lo slider di T14 e l'export ad alta qualità partono da qui.
+   - `display` — derivata all'import, **1024px sul lato lungo**, JPEG q0.85
+     (PNG se ha canale alpha). È l'unica che il canvas decodifica mai.
+
+   Un nodo mostra al massimo poche centinaia di unità world: decodificare
+   l'originale da 4000px per disegnarlo a 240 significa tenere in RAM decine di
+   volte i pixel che finiscono a schermo. Con centinaia di immagini è la
+   differenza fra una mappa fluida e una che fa scattare lo scorrimento.
+5. **Conteggio dei riferimenti e GC.** `sheet.attachments` elenca gli id usati;
+   una funzione `collectOrphans(sheet)` restituisce gli id nell'archivio che
+   nessun nodo referenzia più. Va invocata **esplicitamente** (comando, non
+   automatismo): cancellare byte come effetto collaterale di un undo è il tipo
+   di comportamento che distrugge dati.
+
+**Fatto quando.** Test su `AssetStore` con un `fake-indexeddb`: `put` due volte
+lo stesso contenuto restituisce lo stesso id e non duplica; `get` restituisce
+le due varianti; `delete` rimuove; `collectOrphans` trova solo gli id non
+referenziati. `npm test` e `npm run typecheck` verdi.
+
+**Non fare.** Niente data URL da nessuna parte. Nessun byte in `MindNode`, in
+un `Op` o nella history.
+
+---
+
+## T12b — Correzioni a T12a, prima di costruirci sopra · P2 · dipende da T12a
+
+**Obiettivo.** Chiudere tre difetti di T12a. **Due sono errori della specifica,
+non dell'implementazione**: il codice esistente è fedele a quanto era scritto,
+quindi non c'è niente da difendere — c'è da cambiare il contratto.
+
+**Perché adesso.** T12 costruisce sul modello e sul contratto di T12a. Se
+partono storti, il difetto si propaga in `measureTopic` e nel renderer, dove
+costa dieci volte tanto correggerlo.
+
+**File.** `src/core/types.ts` · `src/persist/assets.ts` · `tests/assets.test.ts`
+
+### Todo
+
+- [ ] **F1 — `collectOrphans` ha una radice di troppo**
+- [ ] **F2 — togliere `displayW`/`displayH` da `AttachmentInfo`**
+- [ ] **F3 — rendere atomico `put`**
+- [ ] **F4 — gestire `onblocked` in `openDb`**
+
+### F1 — le radici del GC sono solo i nodi
+
+Oggi `collectOrphans` tratta anche `sheet.attachments` come radice. Ma le
+schede in `attachments` sono **spazzatura anch'esse** quando il nodo che le
+usava non c'è più: usandole come radice, il caso reale (cancelli un nodo, la
+scheda resta) non viene mai raccolto, e il blob resta protetto per sempre.
+
+Nuovo contratto:
+
+```ts
+/** Unica sorgente di verità su "quale asset è in uso". */
+export function referencedAssetIds(sheet: Sheet): Set<string>;
+
+export interface OrphanReport {
+  /** schede in sheet.attachments che nessun nodo referenzia */
+  cards: string[];
+  /** id nell'archivio che nessun nodo referenzia */
+  blobs: string[];
+}
+
+export function collectOrphans(sheet: Sheet, store: AssetStore): Promise<OrphanReport>;
+```
+
+- le radici sono **solo** `node.style.image` su tutti i nodi dello sheet;
+- `referencedAssetIds` esiste come funzione a sé perché domani altri elementi
+  (callout, boundary) potrebbero referenziare immagini: si aggiungono **lì**,
+  in un punto solo;
+- `collectOrphans` continua a **non cancellare niente**. Resta una funzione di
+  sola lettura.
+
+### F2 — `displayW`/`displayH` non descrivono più nulla
+
+`AttachmentInfo` porta ancora quei due campi dal disegno a **due** varianti.
+Ora i livelli sono tre e **quello da usare si sceglie dinamicamente in base
+allo zoom**, quindi "display" non identifica più una dimensione.
+
+Rimuovili. Al documento servono solo `w`/`h` dell'**originale**: le proporzioni
+si ricavano da lì, e la dimensione a schermo è `style.imageWidth` (T14).
+Aggiorna i test che li costruiscono.
+
+### F3 — `put` deve decidere dentro una sola transazione
+
+Oggi il controllo di esistenza e la scrittura sono due transazioni separate:
+due `put` concorrenti dello stesso contenuto passano entrambi il controllo. I
+blob sono identici quindi non si corrompe nulla, ma i `meta` possono differire
+(per esempio `name`) e vince l'ultimo, mentre il commento promette *"first
+write wins"*.
+
+Falli in **una sola transazione `readwrite`**: `get(id)`, e solo se assente
+`put(record)`.
+
+> Non usare `add()` con cattura dell'errore: in IndexedDB una richiesta fallita
+> **aborta la transazione** a meno di chiamare `preventDefault()` sull'evento
+> di errore. È un dettaglio che si dimentica e produce un bug intermittente.
+
+### F4 — `openDb` non deve poter restare appeso
+
+Manca `req.onblocked`. Oggi non può scattare (`DB_VERSION` è 1), ma al primo
+cambio di versione con un'altra scheda aperta la promise **non si risolve mai**
+e l'app si pianta senza errore. Aggiungi il gestore e **rigetta** con un
+messaggio chiaro, invece di aspettare per sempre.
+
+### Fatto quando
+
+- Un test dimostra F1: sheet con un nodo che referenzia A, una scheda in
+  `attachments` per B senza nodo, e C solo nell'archivio → `cards` contiene B,
+  `blobs` contiene B **e** C, e dopo la chiamata i tre asset sono ancora tutti
+  presenti e leggibili.
+- Un test dimostra F3: due `put` concorrenti (`Promise.all`) dello stesso
+  contenuto con `name` diversi → un solo record, e il `name` è quello del
+  primo.
+- `npm run typecheck` e `npm test` verdi.
+
+**Non fare.** Non cancellare nulla dentro `collectOrphans`. Non toccare il
+renderer, il layout o l'interfaccia: sono T12 e seguenti.
+
+---
+
+## T12 — Immagini nei nodi: modello, misura, disegno · P2 · dipende da T12b
+
+**Obiettivo.** Un nodo può portare un'immagine, mostrata **sopra** il testo,
+dentro la stessa box.
+
+**Perché prima di T13/T14.** Ingestione (drop/paste) e resize sono inutili
+finché il modello non esiste e la box non si misura giusta. Questo task non
+aggiunge **nessuna** interazione: si verifica impostando `style.image` a mano.
+
+> **Conflitto con T4.** T4 dice di portare i campi non implementati di `Sheet` a
+> `never[]`. `attachments` è il primo ad avere un consumatore reale: **escludilo
+> da T4** e tipizzalo qui.
+
+**File.** `src/core/types.ts` · `src/core/ops.ts` · `src/layout/measure.ts` ·
+`src/render/renderer.ts` · `src/ui/RichEditor.tsx` · `src/editor/store.ts` ·
+`tests/measure.test.ts`
+
+**Passi.**
+
+1. **Modello.** In `types.ts`:
+   ```ts
+   export interface AttachmentInfo {
+     id: string;        // SHA-256 del contenuto: la chiave nell'AssetStore
+     mime: string;      // image/png | image/jpeg | image/gif | image/webp
+     w: number;         // pixel intrinseci dell'ORIGINALE
+     h: number;
+     displayW: number;  // pixel della variante che il canvas decodifica
+     displayH: number;
+     bytes: number;     // originale, per mostrare il peso all'utente
+     name?: string;
+     alt?: string;
+   }
+   ```
+   **Nessun byte qui dentro**: i blob vivono nell'AssetStore di T12a e questa è
+   solo la scheda anagrafica, che sta nel documento. `Style.image` esiste già ed
+   è l'id: **non aggiungere un secondo campo**. Aggiungi
+   `Style.imageWidth?: number` (larghezza di visualizzazione in unità world;
+   l'altezza segue le proporzioni dell'originale).
+
+   **`w`/`h` sono obbligatori nel modello.** Senza le dimensioni intrinseche il
+   layout non può misurare il nodo finché l'immagine non è decodificata, e ogni
+   ricaricamento del documento farebbe saltare tutte le posizioni.
+
+2. **Misura** (`measureTopic`). Se il nodo ha un'immagine risolvibile:
+   - `imgW = style.imageWidth ?? min(att.w, MAX_IMAGE_W)` con `MAX_IMAGE_W = 240`;
+   - `imgH = imgW * att.h / att.w`;
+   - la larghezza della box è `max(larghezza del testo, imgW + pad*2)`;
+   - l'altezza è `imgH + IMAGE_GAP + altezza del testo + pad*2 + 4`, con
+     `IMAGE_GAP = 6` esportata come costante condivisa;
+   - se il testo è vuoto, niente `IMAGE_GAP` e niente riga vuota.
+
+   `measureTopic` è puro e non può leggere `sheet.attachments`: passa la
+   risoluzione come parametro opzionale, es.
+   `measureTopic(n, measurer, resolveImage?: (id) => {w,h} | null)`. Chi chiama
+   (layout, renderer, overlay) fornisce la stessa funzione — **se i tre non la
+   passano tutti, le misure divergono** e l'invariante I9 salta.
+
+3. **Disegno** (`renderer.drawNode`). L'immagine va **fra la forma e il testo**.
+   Il renderer è sincrono, le immagini no: serve una cache con stato.
+   ```ts
+   private bitmaps = new Map<string, ImageBitmap>();   // LRU, max ~100
+   ```
+   - decodifica **solo la variante `display`** e **solo per i nodi visibili**:
+     il renderer culla già i nodi, quindi aprire una mappa con 500 immagini
+     deve costare quanto aprirne una senza;
+   - usa `createImageBitmap(blob)` — decodifica fuori dal thread principale e
+     restituisce un oggetto che `drawImage` accetta direttamente, senza data
+     URL né `<img>` intermedi;
+   - miss → avvia la decodifica, e al termine **richiama un repaint** (callback
+     passata al Renderer dal CanvasView). Finché non è pronta non disegnare
+     nulla: lo spazio è già riservato dalla misura, quindi non c'è salto;
+   - sfratto **LRU con `bitmap.close()`**: libera la memoria in modo
+     deterministico, cosa che con `new Image()` non puoi fare. Con centinaia di
+     immagini è ciò che tiene la RAM sotto controllo.
+
+   **Non** decodificare a ogni frame, **non** usare `await` dentro il disegno,
+   **non** toccare mai la variante `original`: il renderer resta sincrono e non
+   deve mai vedere i pixel a piena risoluzione.
+
+4. **Parità con l'overlay** (`RichEditor`). Mentre editi, la box deve avere la
+   stessa geometria: aggiungi sopra l'editable un `<div>` non editabile,
+   `contentEditable={false}`, alto esattamente `imgH` e largo `imgW`, con lo
+   stesso `IMAGE_GAP` sotto. Senza questo la box salta al doppio click — è
+   esattamente la classe di bug di §3 della guida.
+
+5. **Op.** `setNodeImage { nodeId, imageId: string | null, prevImageId }`, con
+   inverso. **L'op porta solo l'id**, mai i byte: la history tiene 400 voci e
+   duplicare data URL da megabyte la farebbe esplodere. Le `AttachmentInfo`
+   vivono in `sheet.attachments`, indirizzate per contenuto (hash) così due
+   nodi con la stessa immagine la condividono.
+
+6. **Export.** `exportPng` è sincrono: prima di esportare attendi che tutte le
+   immagini referenziate siano `ready`, altrimenti l'esportazione esce senza.
+   Markdown export: `![alt](src)`.
+
+**Fatto quando.**
+- Test in `tests/measure.test.ts`: un nodo con immagine 200×100 e testo su una
+  riga misura `imgH + IMAGE_GAP + lineH + pad*2 + 4`; senza testo non ha gap;
+  `imageWidth` esplicita cambia altezza e larghezza in modo proporzionale.
+- Impostando `style.image` a mano da console l'immagine appare, la box cresce,
+  e il doppio click **non** cambia la geometria.
+- L'harness di parità resta a 0 divergenze.
+- `npm test` e `npm run typecheck` verdi.
+
+**Non fare.** Niente drop, niente paste, niente resize: sono T13 e T14. Non
+mettere i byte dell'immagine dentro gli op né dentro `MindNode`.
+
+---
+
+## T13 — Ingestione: drop e paste di immagini · P2 · dipende da T12
+
+**Obiettivo.** Trascinare un file immagine su un nodo, o incollarlo con un nodo
+selezionato, lo allega.
+
+**File.** `src/ui/CanvasView.tsx` · `src/editor/store.ts` ·
+`src/editor/imageImport.ts` (nuovo) · `tests/imageImport.test.ts` (nuovo)
+
+**Passi.**
+
+1. **Pipeline di import** (`imageImport.ts`), pura e testabile a parte:
+   - allowlist: `image/png`, `image/jpeg`, `image/gif`, `image/webp`.
+     **SVG escluso**: è un documento eseguibile, e la guida (§9 di
+     ARCHITECTURE) mette l'hardening XSS fra le cose differite — non è il
+     momento di aprire quella porta;
+   - rifiuta oltre `MAX_SOURCE_BYTES = 25 MB` con un messaggio;
+   - **conserva l'originale così com'è**, senza ricomprimerlo: è la sorgente di
+     verità per lo slider di T14 e per l'export ad alta qualità;
+   - **deriva la variante `display`** a `1024px` sul lato lungo (JPEG q0.85,
+     PNG se ha canale alpha), via `<canvas>` o `createImageBitmap` con
+     `resizeWidth`;
+   - passa i livelli a `AssetStore.put` e restituisce l'`AttachmentInfo`.
+
+   **Dove far girare l'hashing.** `AssetStore.put` calcola lo SHA-256 leggendo
+   l'originale intero in un `ArrayBuffer`. Con originali ad alta risoluzione
+   sono decine di MB copiati **sul thread principale** a ogni import, e
+   l'interfaccia si blocca. Sposta lettura, hashing e ridimensionamento in un
+   **Web Worker** (o in Rust, quando Tauri gira): è il punto in cui l'import di
+   venti immagini in un colpo passa da fastidioso a inaccettabile.
+
+   Le due varianti servono a cose diverse e non sono negoziabili: l'originale
+   perché l'hai chiesto tu, la `display` perché è l'unica che il canvas
+   decodifica. Decodificare un originale da 4000px per disegnarlo a 240 unità
+   world tiene in RAM decine di volte i pixel che finiscono a schermo, e con
+   centinaia di immagini è esattamente lì che l'app inizia a scattare.
+
+2. **Drop.** Handler `dragover` (con `preventDefault`, altrimenti il browser
+   apre il file) e `drop` su `.canvas-wrap` — **lo stesso elemento del wheel**,
+   e per lo stesso motivo: durante l'editing il puntatore è sopra l'overlay.
+   Hit-test del nodo sotto il cursore con `renderer.hitTest`. Nessun nodo sotto
+   → rifiuta con motivo.
+
+3. **Paste.** Con un nodo selezionato, `navigator.clipboard.read()` → se c'è un
+   `image/*` fra i tipi, allega invece di incollare testo. Va coordinato con
+   T10 se quello è già stato fatto.
+
+4. **Trace.** Ogni rifiuto deve dire perché — è la regola §4bis della guida:
+   ```ts
+   trace.ignored("drop", "no node under cursor");
+   trace.ignored("drop", "unsupported mime", { mime });
+   trace.ignored("drop", "too large", { bytes });
+   ```
+   e `trace.applied("drop:image", { bytes, w, h })` quando va a buon fine.
+
+5. **Quota.** Se `adapter.save` fallisce per quota, il toast deve dire che è
+   colpa delle immagini e quale documento, non un errore generico.
+
+**Fatto quando.** Test su `imageImport`: mime rifiutati, file troppo grande
+rifiutato, immagine grande ridimensionata sotto `MAX_STORED_PX` mantenendo le
+proporzioni. Drop su un nodo lo allega ed è undo-abile in **un** Ctrl+Z; drop
+sul vuoto non fa nulla e lascia una riga nel trace.
+
+**Non fare.** Non accettare SVG. Non salvare l'originale non ridimensionato.
+
+---
+
+## T14 — Ridimensionare l'immagine (slider + maniglia) · P2 · dipende da T12
+
+**Obiettivo.** Cambiare la dimensione con cui l'immagine è mostrata nel nodo,
+senza toccare i byte immagazzinati.
+
+**File.** `src/ui/Inspector.tsx` · `src/render/renderer.ts` ·
+`src/ui/CanvasView.tsx` · `src/editor/store.ts`
+
+**Passi.**
+1. **Slider nell'Inspector** (il pannello esiste già), visibile solo quando il
+   nodo selezionato ha un'immagine. Va da `48` alla larghezza massima del nodo
+   e scrive `style.imageWidth`; accanto, la dimensione in px e un pulsante
+   «dimensione naturale».
+2. **Maniglia sul canvas**, angolo in basso a destra dell'immagine, con
+   `hitTestImageResize(state, x, y)` sul modello di `hitTestResize`. Stesso
+   stile delle maniglie del nodo (bordo + alone bianco).
+3. Proporzioni **sempre bloccate**: `imageWidth` è l'unico valore memorizzato,
+   l'altezza si ricava da `att.h / att.w`.
+4. **Un solo op alla fine del gesto** — al rilascio dello slider o del drag,
+   non a ogni frame: altrimenti un trascinamento riempie la history di 400
+   voci e l'undo diventa inutilizzabile.
+5. Ingrandendo oltre la risoluzione della variante `display`, l'immagine
+   sgrana. Se dà fastidio, genera una seconda variante più grande su richiesta
+   dall'originale — **ma non decodificare l'originale per disegnare**.
+
+**Fatto quando.** Slider e maniglia producono lo stesso risultato, le
+proporzioni restano costanti, il layout segue, un Ctrl+Z annulla l'intero
+gesto, e l'overlay in editing mostra la stessa dimensione.
+
+---
+
+## T15 — Documento portabile con immagini (`.rnode.zip`) · P2 · dipende da T12a
+
+**Obiettivo.** Un singolo file da mandare via mail o chat, che contiene la
+mappa e le sue immagini.
+
+**Perché.** Con le immagini fuori dal documento, un `.rnode.json` inviato a
+qualcun altro arriva **senza immagini**: i nodi ci sono, i riquadri sono
+vuoti. È la conseguenza diretta e inevitabile di T12a, e va chiusa prima che
+qualcuno ci sbatta.
+
+**File.** `src/editor/exportBridge.ts` · `src/editor/store.ts` ·
+`package.json` (una libreria zip, es. `fflate`)
+
+**Passi.**
+1. Formato container, lo stesso schema di `.xmind` e `.docx`:
+   ```
+   document.json          il documento, identico a oggi
+   assets/<id>.<ext>      un file per asset referenziato
+   ```
+2. **Due modalità di export**, perché il peso cambia di un ordine di grandezza:
+   - **completo** — include gli originali: fedele, ma con centinaia di immagini
+     può fare centinaia di MB;
+   - **compatto** — include solo le varianti `display`: qualche decina di MB,
+     visivamente identico a schermo.
+
+   Mostra la dimensione stimata **prima** di generare, non dopo.
+3. In import, estrai gli asset dentro l'`AssetStore` e apri il documento. Gli
+   id sono hash del contenuto, quindi reimportare due volte lo stesso file
+   **non duplica** nulla.
+4. `.rnode.json` continua a funzionare per i documenti senza immagini.
+
+**Fatto quando.** Export → import in un profilo browser pulito restituisce la
+mappa con tutte le immagini. Un documento senza immagini esporta ancora come
+`.rnode.json`. La stima di dimensione è entro il 10% del file prodotto.
+
+**Non fare.** Non riscrivere lo zip a ogni salvataggio: è un formato di
+scambio, non il formato di lavoro.
 
 ---
 

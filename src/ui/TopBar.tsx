@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import { runExportPng } from "../editor/exportBridge";
+import { referencedAssetIds } from "../persist/assets";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
 
@@ -106,6 +107,18 @@ export function TopBar(): JSX.Element {
           {exportOpen && (
             <div className="menu">
               <button onClick={() => { store.exportJson(); setExportOpen(false); }}>JSON (.rnode.json)</button>
+              {/* Only offered when there is something to carry: a .rnode.zip of
+                  an image-less map is just document.json in a container. */}
+              {referencedAssetIds(store.sheet).size > 0 && (
+                <>
+                  <button onClick={() => { void store.exportRnodeZip("complete"); setExportOpen(false); }}>
+                    With images — originals (.rnode.zip)
+                  </button>
+                  <button onClick={() => { void store.exportRnodeZip("compact"); setExportOpen(false); }}>
+                    With images — compact (.rnode.zip)
+                  </button>
+                </>
+              )}
               <button onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
               <button onClick={() => { runExportPng(); setExportOpen(false); }}>PNG image</button>
               <div className="menu-sep" />

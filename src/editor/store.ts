@@ -12,14 +12,17 @@ import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type Group, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type Group, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
-import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
+import { LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
+import { getAssetStore, referencedAssetIds, TauriAssetStore } from "../persist/assets";
+import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
+import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
 
 declare global {
   interface Window {
@@ -28,6 +31,43 @@ declare global {
       types?: { description?: string; accept: Record<string, string[]> }[];
     }) => Promise<FileSystemFileHandle>;
   }
+}
+
+/** Human-readable size for the pre-export estimate toast. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export type PortableFormat = "json" | "zip";
+
+/**
+ * Storage key of the picked file handle for a document+format pair. The
+ * portable format of a document CHANGES when images appear or disappear
+ * (save switches between .rnode.json and .rnode.zip): a key on the docId
+ * alone would silently write zip bytes into the user's .json file. One
+ * handle per format means removing the images later goes back to the
+ * original file, and the format switch merely re-asks where to save.
+ */
+export function portableFileKey(docId: string, format: PortableFormat): string {
+  return `r-node.file-handle.${docId}:${format}`;
+}
+
+/**
+ * Filesystem-safe base name for a document title. The name typed in the GUI
+ * is the name of the real file (desktop .rnode and the portable saves): the
+ * save dialog is pre-filled with it and a later rename renames the file.
+ */
+export function docFileBaseName(title: string): string {
+  const base = title.replace(/[^\w-]+/g, "_").trim();
+  return base || "Untitled map";
+}
+
+/** Directory of a file path (with trailing separator), or "" when none. */
+function pathDirname(p: string): string {
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i < 0 ? "" : p.slice(0, i + 1);
 }
 
 /**
@@ -86,6 +126,9 @@ export interface EditorState {
   relSel: string | null;
   groupSel: string | null;
   summarySel: string | null;
+  /** The node whose IMAGE is selected (image selection is exclusive: the
+   *  node itself is not in `selection` then). Null = no image selected. */
+  imageSel: string | null;
 }
 
 export class EditorStore {
@@ -100,6 +143,14 @@ export class EditorStore {
    * OVERWRITE the .rnode.json the user picked instead of re-downloading.
    * Handles are persisted in IndexedDB to survive reloads.
    */
+  /**
+   * Sanitized document title when the current desktop root was established
+   * (open or save-as). A rename in the GUI changes the title; on save the
+   * REAL file is renamed to match ONLY when the title moved away from this
+   * baseline — a file opened with a different internal title is never
+   * silently renamed on the first save. Null = no desktop root yet.
+   */
+  private rootTitleBase: string | null = null;
   private fileHandles = new Map<string, FileSystemFileHandle>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
@@ -126,6 +177,7 @@ export class EditorStore {
    * the exact pre-drag state.
    */
   private resizeState: { nodeId: string; original: Style; origPos: Position } | null = null;
+  private imageResizeState: { nodeId: string; original: Style } | null = null;
   /** Canvas-backed measurer: layout and renderer agree on every topic size. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
 
@@ -186,6 +238,7 @@ export class EditorStore {
       relSel: null,
       groupSel: null,
       summarySel: null,
+      imageSel: null,
     };
   }
 
@@ -306,9 +359,38 @@ export class EditorStore {
     // can keep going. The later blur/Enter commit finds the title up to date.
     this.commitDraftKeepEditing();
     try {
+      if (this.adapter instanceof TauriStorageAdapter) {
+        // Desktop: the document IS a single .rnode file — save writes the
+        // document row only. The first save has no file yet: it becomes a
+        // "Save as…" that picks one, copies the referenced assets into it
+        // and switches both the adapter and the asset store to it. Every
+        // later save just rewrites the document row (T20).
+        if (!this.adapter.hasRoot) {
+          const ok = await this.saveAsDesktop();
+          if (!ok) {
+            this.state.sync = "dirty";
+            this.toast("Save cancelled — no file chosen");
+            return;
+          }
+        } else {
+          // A rename in the GUI becomes a rename of the REAL file: if the
+          // title moved away from the file's name, save writes the document
+          // under the new name (and drops the old file). Otherwise the file
+          // is just rewritten in place.
+          const renamedTo = await this.renameDesktopFile();
+          if (!renamedTo) await this.adapter.save([this.model.doc]);
+        }
+        this.state.sync = "saved";
+        this.toast("Saved");
+        return;
+      }
       await this.adapter.save(this.state.docs);
-      const json = JSON.stringify(this.model.doc, null, 2);
-      const fileWritten = await this.writePortableFile(json);
+      // Images live outside the document (T12a): a plain .rnode.json would
+      // arrive without them. With images the portable save is a .rnode.zip.
+      const hasImages = referencedAssetIds(this.sheet).size > 0;
+      const fileWritten = hasImages
+        ? await this.writePortableZip()
+        : await this.writePortableFile(JSON.stringify(this.model.doc, null, 2));
       this.state.sync = "saved";
       this.toast(fileWritten ? "Saved" : "Saved locally (no file chosen)");
     } catch {
@@ -318,44 +400,191 @@ export class EditorStore {
   }
 
   /**
-   * Write the portable .rnode.json. Returns true when a file was written or
-   * downloaded; false when the user cancelled the file picker (the document
-   * is still persisted to app storage).
+   * Desktop "Save as…": native file picker → copy every referenced asset
+   * into the chosen `.rnode` file (all three levels + meta — the same
+   * per-asset data the zip exporter iterates, inside SQLite instead of an
+   * archive), then write the document and switch the storage adapter AND the
+   * asset store to the file. The Renderer holds the same asset store
+   * instance, so it starts reading the new file without any re-instantiation
+   * (the T19 trap, unchanged).
    */
-  private async writePortableFile(json: string): Promise<boolean> {
-    const docId = this.model.doc.documentId;
-    const key = `r-node.file-handle.${docId}`;
+  async saveAsDesktop(): Promise<boolean> {
+    // The save dialog already knows the name: pre-fill it with the document
+    // title typed in the GUI, so the real file takes that name.
+    const file = await this.pickDesktopFile("save", docFileBaseName(this.model.doc.title));
+    if (!file) return false;
+    const assetStore = getAssetStore();
+    if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
+      return false;
+    }
+    // adoptFile reads from the current path FIRST, then switches: the assets
+    // are never re-written into the same store before the file exists.
+    await assetStore.adoptFile(file, [...referencedAssetIds(this.sheet)]);
+    this.adapter.setRoot(file);
+    this.rootTitleBase = docFileBaseName(this.model.doc.title);
+    // The ACTIVE document is saved, not docs[0]: on desktop the sidebar may
+    // still carry the never-saved sample, and saving it over the chosen file
+    // would corrupt the document on disk.
+    await this.adapter.save([this.model.doc]);
+    return true;
+  }
 
-    // 1) Reuse the stored handle → silent overwrite, no dialog, no download.
-    let handle = this.fileHandles.get(docId) ?? null;
+  /**
+   * Desktop rename-on-save: when the GUI title moved away from the title the
+   * current file was opened/saved with, the REAL file is renamed to match
+   * (assets adopted into the new file first, old file removed only after the
+   * new one is fully written and the app switched to it). Returns the new
+   * file name, or null when nothing was renamed (then the caller saves to
+   * the current file as usual).
+   */
+  private async renameDesktopFile(): Promise<string | null> {
+    if (!(this.adapter instanceof TauriStorageAdapter)) return null;
+    const current = this.adapter.currentPath;
+    if (!current || this.rootTitleBase === null) return null;
+    const base = docFileBaseName(this.model.doc.title);
+    if (base === this.rootTitleBase) return null; // title did not change
+    const target = pathDirname(current) + base + ".rnode";
+    if (target.toLowerCase() === current.toLowerCase()) return null; // same file
+    const assetStore = getAssetStore();
+    if (!(assetStore instanceof TauriAssetStore) || typeof window === "undefined" || !window.__TAURI__) {
+      return null;
+    }
+    try {
+      const exists = (await window.__TAURI__.core.invoke("document_file_exists", { path: target })) as boolean;
+      if (exists) {
+        this.toast(`A file named "${base}.rnode" already exists — saved to the current file`);
+        return null;
+      }
+      // Same order as save-as: read from the old file, write into the new,
+      // only then switch. The old file is removed last, so a failure mid-way
+      // leaves the document intact at its previous path.
+      await assetStore.adoptFile(target, [...referencedAssetIds(this.sheet)]);
+      this.adapter.setRoot(target);
+      this.rootTitleBase = base;
+      await this.adapter.save([this.model.doc]);
+      await window.__TAURI__.core.invoke("remove_document", { path: current }).catch((e) => {
+        console.warn("remove_document failed", e); // best-effort: the new file is already saved
+      });
+      return `${base}.rnode`;
+    } catch (e) {
+      this.toast("Rename failed — saved to the current file");
+      console.warn("renameDesktopFile failed", e);
+      return null;
+    }
+  }
+
+  /**
+   * Desktop "Open…": native file picker → read the document from the file →
+   * switch both the adapter and the asset store to it. The path is switched
+   * only after the document is known to be valid, so a wrong file never moves
+   * the app away from the current document.
+   */
+  async openDesktop(): Promise<boolean> {
+    const file = await this.pickDesktopFile("open");
+    if (!file) return false;
+    const assetStore = getAssetStore();
+    if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
+      return false;
+    }
+    const doc = await this.adapter.readDocumentAt(file);
+    if (!doc) {
+      this.toast("Not a valid R-node document in that file");
+      return false;
+    }
+    assetStore.setRoot(file);
+    this.adapter.setRoot(file);
+    this.importDocumentFromJson(JSON.stringify(doc));
+    // Baseline for rename-on-save: the OPENED document's own title. Opening a
+    // file whose internal title differs from its file name must never rename
+    // the file on the first save — only a later GUI rename does.
+    this.rootTitleBase = docFileBaseName(doc.title);
+    this.toast("Opened document file");
+    return true;
+  }
+
+  /**
+   * Re-entrancy guard: the native dialog is modal, so a second click while
+   * one is open must not queue another dialog — stacked pickers were part of
+   * the "Open keeps reopening" report. The flag is reset when the dialog
+   * closes (picked or cancelled), never by a timeout.
+   */
+  private pickBusy = false;
+
+  private async pickDesktopFile(mode: "open" | "save", suggestedName?: string): Promise<string | null> {
+    if (typeof window === "undefined" || !window.__TAURI__) return null;
+    if (this.pickBusy) return null;
+    this.pickBusy = true;
+    try {
+      return (
+        ((await window.__TAURI__.core.invoke("pick_document_file", {
+          mode,
+          suggestedName: mode === "save" ? suggestedName : undefined,
+        })) as string | null) ?? null
+      );
+    } catch {
+      return null;
+    } finally {
+      this.pickBusy = false;
+    }
+  }
+
+  /**
+   * Write a portable file (`.rnode.json` or `.rnode.zip`): stored file handle
+   * → silent overwrite; File System Access picker → user chooses once, then
+   * every later save overwrites the same file; download as fallback. Returns
+   * true when a file was written or downloaded, false when the user cancelled
+   * the picker (the document is still persisted to app storage).
+   */
+  private async writePortableBytes(
+    blob: Blob,
+    fileName: string,
+    pickerType: { description: string; accept: Record<string, string[]> },
+    format: PortableFormat
+  ): Promise<boolean> {
+    const docId = this.model.doc.documentId;
+    const key = portableFileKey(docId, format);
+    const otherKey = portableFileKey(docId, format === "zip" ? "json" : "zip");
+
+    // 1) Reuse the stored handle for THIS format → silent overwrite, no
+    //    dialog, no download. The other format's handle is left alone: if the
+    //    document loses its images later, the save goes back to that file.
+    let handle = this.fileHandles.get(key) ?? null;
     if (!handle) {
       handle = await this.loadFileHandle(key);
-      if (handle) this.fileHandles.set(docId, handle);
+      if (handle) this.fileHandles.set(key, handle);
     }
     if (handle) {
       try {
         const writable = await handle.createWritable();
-        await writable.write(json);
+        await writable.write(blob);
         await writable.close();
         return true;
       } catch {
         // Handle stale (file moved/deleted) → drop it and ask again.
-        this.fileHandles.delete(docId);
+        this.fileHandles.delete(key);
         await this.clearFileHandle(key);
       }
     }
 
     // 2) No handle but the API exists → let the user pick where to save.
     if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
+      // Reaching the picker with a handle for the OTHER format means the
+      // portable format of this document just changed: say why, instead of
+      // silently asking for a new location.
+      const otherHandle = this.fileHandles.get(otherKey) ?? (await this.loadFileHandle(otherKey));
+      if (otherHandle) {
+        this.toast(
+          format === "zip"
+            ? "The document now contains images — choose where to save the .rnode.zip"
+            : "The images were removed — choose where to save the .rnode.json"
+        );
+      }
       try {
-        const picked = await window.showSaveFilePicker({
-          suggestedName: this.docFileName(),
-          types: [{ description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } }],
-        });
+        const picked = await window.showSaveFilePicker({ suggestedName: fileName, types: [pickerType] });
         const writable = await picked.createWritable();
-        await writable.write(json);
+        await writable.write(blob);
         await writable.close();
-        this.fileHandles.set(docId, picked);
+        this.fileHandles.set(key, picked);
         await this.storeFileHandle(key, picked);
         return true;
       } catch (e) {
@@ -365,9 +594,72 @@ export class EditorStore {
     }
 
     // 3) Fallback: download the file with the CURRENT content.
-    const blob = new Blob([json], { type: "application/json" });
-    this.download(blob, this.docFileName());
+    this.download(blob, fileName);
     return true;
+  }
+
+  /**
+   * Referenced assets whose original bytes are gone (a compact .rnode.zip
+   * import). A complete export of them would silently ship the resized
+   * level, so the count is shown before generating (T18-B).
+   */
+  private degradedAssetCount(): number {
+    const referenced = referencedAssetIds(this.sheet);
+    return this.sheet.attachments.filter((a) => a.originalLost && referenced.has(a.id)).length;
+  }
+
+  private async writePortableFile(json: string): Promise<boolean> {
+    return this.writePortableBytes(
+      new Blob([json], { type: "application/json" }),
+      this.docFileName(),
+      { description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } },
+      "json"
+    );
+  }
+
+  /**
+   * Portable save with images. The size is estimated and shown BEFORE the
+   * zip is built — generating first and telling the user after would be the
+   * wrong order for a file that can weigh hundreds of MB.
+   */
+  private async writePortableZip(): Promise<boolean> {
+    const store = getAssetStore();
+    const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, "complete");
+    const degraded = this.degradedAssetCount();
+    const est = formatBytes(estimate);
+    this.toast(
+      degraded > 0
+        ? `${degraded} asset${degraded === 1 ? "" : "s"} lost their original in a compact import — exporting display levels (~${est})`
+        : `Exporting .rnode.zip (~${est})…`
+    );
+    const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, "complete");
+    return this.writePortableBytes(
+      new Blob([bytes.slice().buffer], { type: "application/zip" }),
+      this.docZipName(),
+      { description: "R-node document with images", accept: { "application/zip": [".rnode.zip"] } },
+      "zip"
+    );
+  }
+
+  /**
+   * Manual export in either mode (complete = originals, compact = display
+   * levels only). Downloads the file directly: the save flow owns the file
+   * handle, an explicit export asks the OS for a location every time.
+   */
+  async exportRnodeZip(mode: RnodeZipMode): Promise<void> {
+    const store = getAssetStore();
+    const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, mode);
+    const est = formatBytes(estimate);
+    // Compact is explicitly lossy, so only complete mode must warn about
+    // assets whose originals are gone (T18-B).
+    const degraded = mode === "complete" ? this.degradedAssetCount() : 0;
+    this.toast(
+      degraded > 0
+        ? `${degraded} asset${degraded === 1 ? "" : "s"} lost their original in a compact import — exporting display levels (~${est})`
+        : `Exporting .rnode.zip (~${est})…`
+    );
+    const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, mode);
+    this.download(new Blob([bytes.slice().buffer], { type: "application/zip" }), this.docZipName());
   }
 
   private async storeFileHandle(key: string, handle: FileSystemFileHandle): Promise<void> {
@@ -427,18 +719,41 @@ export class EditorStore {
     });
   }
 
-  /** Open a .rnode.json file from disk (file picker). Legacy .rmind.json files are still accepted. */
+  /**
+   * Open a portable file (file picker): .rnode.zip (map + images), .rnode.json
+   * and legacy .rmind.json (plain documents). The container is sniffed by its
+   * PK\x03\x04 magic bytes, never by extension alone.
+   */
   async loadFile(): Promise<void> {
+    // Desktop: "Open" picks the .rnode file itself. The web file-input flow
+    // below stays for the browser.
+    if (this.adapter instanceof TauriStorageAdapter) {
+      await this.openDesktop();
+      return;
+    }
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".rnode.json,.rmind.json,application/json,.json";
+    input.accept = ".rnode.json,.rmind.json,.rnode.zip,application/json,application/zip";
     const file: File | null = await new Promise((resolve) => {
       input.onchange = (): void => resolve(input.files?.[0] ?? null);
       input.click();
     });
     if (!file) return;
     try {
-      const text = await file.text();
+      const buf = await file.arrayBuffer();
+      const head = new Uint8Array(buf, 0, 4);
+      const isZip = head.length === 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
+      if (isZip) {
+        const doc = await importRnodeZip(new Uint8Array(buf), getAssetStore());
+        if (!doc) {
+          this.toast("Not a valid R-node file");
+          return;
+        }
+        const id = this.importDocumentFromJson(JSON.stringify(doc));
+        this.toast(id ? `Opened ${file.name}` : "Not a valid R-node file");
+        return;
+      }
+      const text = new TextDecoder().decode(buf);
       const id = this.importDocumentFromJson(text);
       if (id) this.toast(`Opened ${file.name}`);
       else this.toast("Not a valid R-node file");
@@ -559,7 +874,11 @@ export class EditorStore {
   }
 
   private docFileName(): string {
-    return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rnode.json`;
+    return `${docFileBaseName(this.model.doc.title)}.rnode.json`;
+  }
+
+  private docZipName(): string {
+    return `${docFileBaseName(this.model.doc.title)}.rnode.zip`;
   }
 
   // -------------------------------------------------------------------------
@@ -583,6 +902,7 @@ export class EditorStore {
     this.state.relSel = null;
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     if (opts?.center) this.centerOnNode(id);
     this.notify();
   }
@@ -603,17 +923,39 @@ export class EditorStore {
     this.state.relSel = null;
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     this.notify();
   }
 
   clearSelection(): void {
     this.commitDraftOnLeave();
-    if (this.state.selection.length === 0 && !this.state.relSel && !this.state.groupSel && !this.state.summarySel) return;
+    if (
+      this.state.selection.length === 0 &&
+      !this.state.relSel &&
+      !this.state.groupSel &&
+      !this.state.summarySel &&
+      !this.state.imageSel
+    )
+      return;
     this.state.selection = [];
     this.state.editingId = null;
     this.state.relSel = null;
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
+    this.notify();
+  }
+
+  /** Select the IMAGE of a node (exclusive: clears every other selection). */
+  selectImage(nodeId: string): void {
+    this.commitDraftOnLeave();
+    this.state.selection = [];
+    this.state.editingId = null;
+    this.state.pendingInsert = null;
+    this.state.relSel = null;
+    this.state.groupSel = null;
+    this.state.summarySel = null;
+    this.state.imageSel = nodeId;
     this.notify();
   }
 
@@ -634,6 +976,7 @@ export class EditorStore {
     this.state.selection = [id];
     this.state.editingId = id;
     this.state.pendingInsert = null;
+    this.state.imageSel = null;
     this.editOriginal = { title: node.title, titleRuns: node.titleRuns };
     // Seed the draft with the current title so layout keeps measuring the
     // node at its current size until the editor reports its first change.
@@ -1081,6 +1424,7 @@ export class EditorStore {
       this.state.relSel = null;
       this.state.groupSel = null;
       this.state.summarySel = null;
+      this.state.imageSel = null;
       this.notify();
     }
   }
@@ -1276,6 +1620,115 @@ export class EditorStore {
   }
 
   // -------------------------------------------------------------------------
+  // Node image (T12-4) — the op carries only the id, never the bytes
+  // -------------------------------------------------------------------------
+
+  /** Attach (or remove, with imageId = null) an image reference on a node. */
+  setNodeImage(nodeId: string, imageId: string | null): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const prevImageId = node.style.image ?? null;
+    if (prevImageId === imageId) return;
+    this.execOps([
+      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId, imageId, prevImageId }),
+    ]);
+  }
+
+  /**
+   * Delete the SELECTED image (Backspace/Delete with the image selected):
+   * removes only the reference from the node, never the node itself. The
+   * attachment card stays (it may be shared; collectOrphans is the GC).
+   */
+  deleteSelectedImage(): void {
+    const nodeId = this.state.imageSel;
+    if (!nodeId) return;
+    const node = this.model.node(nodeId);
+    this.state.imageSel = null;
+    if (!node?.style.image) {
+      this.notify();
+      return;
+    }
+    this.setNodeImage(nodeId, null);
+    this.notify();
+  }
+
+  /**
+   * Move a node's image reference to another node (image drag & drop). Both
+   * reference changes are ONE undoable batch: undo restores the image to its
+   * original node. After the move the image on the TARGET stays selected.
+   */
+  assignImageToNode(fromNodeId: string, toNodeId: string): void {
+    if (fromNodeId === toNodeId) return;
+    const from = this.model.node(fromNodeId);
+    const to = this.model.node(toNodeId);
+    if (!from || !to) return;
+    const imageId = from.style.image;
+    if (!imageId) return;
+    const ops: Op[] = [];
+    const prevFrom = from.style.image ?? null;
+    const prevTo = to.style.image ?? null;
+    if (prevFrom !== prevTo) {
+      ops.push(
+        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: fromNodeId, imageId: null, prevImageId: prevFrom })
+      );
+      ops.push(
+        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: toNodeId, imageId, prevImageId: prevTo })
+      );
+      this.execOps(ops);
+    }
+    this.selectImage(toNodeId);
+  }
+
+  /**
+   * Attach an imported image: register its metadata card (idempotent,
+   * content-addressed — the same image shared by N nodes has one card) and
+   * reference it from the node in a single undoable op. The card is NOT
+   * removed by undo: it may be shared, and collectOrphans is the GC.
+   */
+  attachImage(nodeId: string, card: AttachmentInfo): void {
+    if (!this.sheet.attachments.some((a) => a.id === card.id)) {
+      this.sheet.attachments.push({ ...card });
+    }
+    this.setNodeImage(nodeId, card.id);
+  }
+
+  /**
+   * Full import+attach flow (T13-2): validate, import in the worker, store
+   * the three levels in the AssetStore, then reference the node. Every
+   * rejection says why (rule §4bis of AGENT_GUIDE).
+   */
+  async attachImageFile(nodeId: string, file: Blob & { name?: string }): Promise<{ ok: boolean; reason?: string }> {
+    const v = validateImageSource(file.type, file.size);
+    if (!v.ok) {
+      trace.ignored(
+        "drop",
+        v.reason.startsWith("unsupported") ? "unsupported mime" : "too large",
+        { mime: file.type, bytes: file.size }
+      );
+      return { ok: false, reason: v.reason };
+    }
+    let imported: ImportedImage;
+    try {
+      imported = await importImageFile(file);
+    } catch (err) {
+      trace.ignored("drop", "decode failed", { error: String(err) });
+      return { ok: false, reason: String(err) };
+    }
+    const assetStore = getAssetStore();
+    const id = await assetStore.put(imported.levels, imported.meta);
+    this.attachImage(nodeId, {
+      id,
+      mime: imported.meta.mime,
+      w: imported.meta.w,
+      h: imported.meta.h,
+      bytes: imported.meta.bytes,
+      name: imported.meta.name,
+    });
+    trace.applied("drop:image", { bytes: imported.meta.bytes, w: imported.meta.w, h: imported.meta.h });
+    return { ok: true };
+  }
+
+  // -------------------------------------------------------------------------
   // Canvas resize drag (Xmind-style handle) — ephemeral draft, single commit
   // -------------------------------------------------------------------------
 
@@ -1350,6 +1803,66 @@ export class EditorStore {
       this.scheduleLayout(false);
       this.notify();
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Image resize (T14) — same draft pattern as the width drag: live width is
+  // an ephemeral mutation (no op), one setStyle op commits the whole gesture.
+  // -------------------------------------------------------------------------
+
+  /** A resize drag on the image handle: capture the pre-drag style. */
+  beginImageResize(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    this.imageResizeState = { nodeId, original: { ...node.style } };
+  }
+
+  /** Live image width during the drag/slider: ephemeral, no op, no history. */
+  setImageResizeDraft(nodeId: string, width: number): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const w = Math.max(48, Math.round(width));
+    node.style = { ...node.style, imageWidth: w };
+    this.scheduleLayout(false);
+    this.notify();
+  }
+
+  /** End of the gesture: one batch op; undo restores the pre-drag width. */
+  commitImageResize(): void {
+    const r = this.imageResizeState;
+    this.imageResizeState = null;
+    if (!r) return;
+    const node = this.model.node(r.nodeId);
+    if (!node) return;
+    const w = node.style.imageWidth;
+    if (w !== undefined && w !== r.original.imageWidth) {
+      this.execOps([
+        makeOp<Op & { type: "setStyle" }>("setStyle", {
+          id: r.nodeId,
+          style: { ...node.style, imageWidth: w },
+          prev: r.original,
+        }),
+      ]);
+    } else {
+      // click without a real change — restore, no op
+      node.style = r.original;
+      this.scheduleLayout(false);
+      this.notify();
+    }
+  }
+
+  /** Remove the custom imageWidth (back to the natural display size). */
+  resetImageWidth(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    if (node.style.imageWidth === undefined) return;
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: nodeId,
+        style: { ...node.style, imageWidth: undefined },
+        prev: node.style,
+      }),
+    ]);
   }
 
   setBranchFreePosition(id: string, enabled: boolean): void {
@@ -1475,16 +1988,33 @@ export class EditorStore {
     // fall back to whatever plain text is on the clipboard (external sources,
     // or older engines that can't read custom MIME types).
     let text: string | null = null;
+    let items: ClipboardItems | null = null;
     try {
-      const items = await navigator.clipboard.read();
+      items = await navigator.clipboard.read();
+    } catch {
+      /* clipboard read with MIME types blocked — fall through to readText */
+    }
+    if (items) {
+      // An image on the clipboard beats text (T13-2): with a node selected, a
+      // copied/screenshotted image attaches instead of inserting text.
+      const imageItem = items.find((i) => i.types.some((t) => t.startsWith("image/")));
+      if (imageItem) {
+        const type = imageItem.types.find((t) => t.startsWith("image/"))!;
+        const blob = await imageItem.getType(type);
+        const node = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
+        if (node) {
+          await this.attachImageFile(node.id, new File([blob], "pasted-image", { type: blob.type || type }));
+        } else {
+          trace.ignored("paste:image", "no node selected");
+        }
+        return;
+      }
       for (const item of items) {
         if (item.types.includes("text/rnode")) {
           text = await item.getType("text/rnode").then((blob) => blob.text());
           break;
         }
       }
-    } catch {
-      /* clipboard read with MIME types blocked — fall through to readText */
     }
     if (text === null) text = await navigator.clipboard.readText().catch(() => null);
     if (!text) return;
@@ -1613,6 +2143,7 @@ export class EditorStore {
     this.state.selection = [];
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     this.state.relSel = id;
     this.notify();
   }
@@ -1621,6 +2152,7 @@ export class EditorStore {
     this.state.selection = [];
     this.state.relSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     this.state.groupSel = id;
     this.notify();
   }
@@ -1629,6 +2161,7 @@ export class EditorStore {
     this.state.selection = [];
     this.state.relSel = null;
     this.state.groupSel = null;
+    this.state.imageSel = null;
     this.state.summarySel = id;
     this.notify();
   }
@@ -1998,6 +2531,10 @@ export class EditorStore {
     if (!doc) return;
     doc.title = title;
     doc.updatedAt = nowIso();
+    // The active document's model is what gets saved (and what the desktop
+    // rename-on-save detection reads): keep the two titles in sync so the
+    // GUI name becomes the real file's name.
+    if (this.state.activeDocId === id) this.model.doc.title = title;
     this.state.sync = "dirty";
     this.notify();
   }
