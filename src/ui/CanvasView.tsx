@@ -22,13 +22,46 @@ function acceptsExternalDrop(dt: DataTransfer): boolean {
 }
 
 /**
- * Paint synchronously on every store change. rAF is unreliable in embedded
- * webviews (it never fires when the view is not compositing), so we render
- * directly; culling keeps this cheap even for large maps. A rAF-coalescing
- * fast path can be reintroduced once the WebGPU renderer lands.
+ * Coalesce paints to one per displayed frame.
+ *
+ * This used to call fn() synchronously on every store notification. Measured
+ * on a 3024-node map: TWO full repaints per wheel event at the same
+ * millisecond — the store subscription paints, then React re-renders and an
+ * effect paints again — and neither was aligned to the display refresh. Each
+ * paint was only ~6ms, well inside the 16.7ms budget, but several of them can
+ * land in one frame while a fast wheel outruns the screen, which is exactly
+ * how stutter is produced out of individually fast frames.
+ *
+ * rAF fixes both at once: repeated notifications inside a frame collapse into
+ * a single paint, and it happens when the compositor is about to present.
+ *
+ * The caveat that kept this out before is real — rAF never fires while the
+ * webview is not compositing (minimised window, hidden tab), which would
+ * freeze the map — so a timer falls back to painting directly.
  */
+let paintRaf: number | null = null;
+let paintFallback: ReturnType<typeof setTimeout> | null = null;
+let paintPending: (() => void) | null = null;
+
 function schedulePaint(fn: () => void): void {
-  fn();
+  paintPending = fn;
+  if (paintRaf !== null) return; // already queued for this frame
+  const run = (): void => {
+    paintRaf = null;
+    if (paintFallback !== null) {
+      clearTimeout(paintFallback);
+      paintFallback = null;
+    }
+    const pending = paintPending;
+    paintPending = null;
+    pending?.();
+  };
+  paintRaf = requestAnimationFrame(run);
+  paintFallback = setTimeout(() => {
+    if (paintRaf === null) return;
+    cancelAnimationFrame(paintRaf);
+    run();
+  }, 100);
 }
 
 interface DragState {
