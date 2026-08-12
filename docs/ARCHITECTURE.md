@@ -1,8 +1,9 @@
 # R-node — Architecture
 
-Status: **Phase 1 (core editor) in progress.** AI services and the full
-security model are explicitly deferred per the product owner; the seams for
-both exist but are not built.
+Status: **Phase 1 (core editor) done; node images and the desktop app
+shipped.** The web and desktop targets share one codebase, one document model
+and one op stream. AI services and the full security model remain explicitly
+deferred per the product owner; the seams for both exist but are not built.
 
 > This file describes the **structure and the plan**. Before changing code,
 > read [AGENT_GUIDE.md](AGENT_GUIDE.md) — the invariants, the editor↔canvas
@@ -63,7 +64,7 @@ core/      types (schema) · doc (model+walks) · ops (op system) · history (un
 layout/    mindmap.ts (measure, place, bounds)
 render/    viewport.ts (camera) · renderer.ts (canvas paint, hit-test, PNG export) · theme.ts
 editor/    store.ts (orchestration) · shortcuts.ts · context.ts · view.ts · exportBridge.ts
-persist/   storage.ts (adapter: localStorage now; IndexedDB, Tauri/SQLite next)
+persist/   storage.ts (web: localStorage · desktop: one .rnode SQLite file) · assets.ts (AssetStore: IndexedDB on web, SQLite on desktop)
 ```
 
 ## 4. Document schema
@@ -127,14 +128,18 @@ The engine reproduces the observable behavior of classic mind-mapping tools
    raw count), and the overall map area changes. Stable positions for
    untouched branches are a Phase 3 refinement (incremental layout).
 
-Renderer: single Canvas2D with viewport culling; WebGPU/WebGL2 is the stated
-upgrade path (renderer is isolated behind `Renderer` with hit-test + export).
+Renderer: single Canvas2D with viewport culling; WebGPU/WebGL2 is the
+upgrade path only if ADR-001 §12 is reopened (renderer is isolated behind
+`Renderer` with hit-test + export).
 
 ## 8. Import/export strategy
 
-Phase 1 ships: JSON (native), Markdown, PNG (canvas export). Import via
-Markdown outline + clipboard paste of JSON subtrees. Phase 4+: SVG, PDF,
-DOCX, PPTX, OPML, FreeMind, MindManager, OCR, background workers.
+Today: JSON (native `.rnode.json`), Markdown, PNG (canvas export) and
+`.rnode.zip` (document + images: complete = originals, compact = display
+levels only). Import: `.rnode.json` / `.rmind.json` / `.rnode.zip`, Markdown
+outline, clipboard paste of JSON subtrees, and sanitized rich text from
+Word / Google Docs / Draw.io. Phase 4+: SVG, PDF, DOCX, PPTX, OPML, FreeMind,
+MindManager, OCR, background workers.
 
 ## 9. Security model (deferred, seams exist)
 
@@ -147,11 +152,15 @@ DOCX, PPTX, OPML, FreeMind, MindManager, OCR, background workers.
 
 ## 10. Phased plan
 
-- **Phase 1 (now):** document model, ops + undo/redo, one sheet, central/main/
+- **Phase 1 (done):** document model, ops + undo/redo, one sheet, central/main/
   subtopic/floating, canvas renderer, keyboard + mouse, zoom/pan, drag-drop
   with drop indicator, manual save, outliner, inspector, palette, tests.
-- **Phase 2:** themes/styles, markers, labels, notes (rich), boundaries,
-  summaries, relationships UI, callouts, attachments.
+- **Images & desktop (done):** content-addressed asset store, node images
+  (drop/paste, resize, byte-budgeted decode), portable `.rnode.zip`, Tauri
+  bring-up, single-file `.rnode` (SQLite) desktop documents.
+- **Phase 2 (in progress):** themes/styles, markers, labels, rich notes,
+  boundaries, callouts — relationships UI, summaries, groups and attachments
+  have already landed.
 - **Phase 3:** logic/tree/org/timeline/fishbone/matrix/treetable/mixed.
 - **Phase 4:** Gantt, search+, templates, presentation, Zen polish.
 - **Phase 5:** accounts, sharing, comments, real-time ops sync, version history.
@@ -166,7 +175,7 @@ check, known limitations.
 | Risk | Mitigation |
 |---|---|
 | Canvas2D perf at 10k nodes | Culling + layout caching; WebGL2/WebGPU path isolated |
-| Rust toolchain missing on dev machine | Core is framework-free TS; Tauri shell compiles when `rustup` installed |
+| Rust toolchain missing on a new machine | Core is framework-free TS: tests and the web build need no Rust; desktop needs `rustup` (per-user install) |
 | Ops replay drift after schema changes | Versioned schema + migration tests; ops carry explicit data |
 | Manual-position fights with auto layout | `manual` flag honored; force-layout is explicit |
 | Undo of complex gestures | Batch history entries + inverse-op capture |
@@ -174,8 +183,10 @@ check, known limitations.
 ## 12. Assumptions & open decisions
 
 - One active sheet per document in Phase 1 (schema supports many).
-- localStorage is the Phase-1 store; IndexedDB (web) and SQLite via Rust
-  (desktop) are adapters, not rewrites.
+- Web persists to localStorage; desktop persists to one `.rnode` file
+  (SQLite) holding document and images in a single transaction. IndexedDB
+  (web assets) and SQLite (desktop) are adapters behind the same interfaces,
+  not rewrites.
 - Sync conflict model (CRDT vs OT) — open, will be chosen in Phase 5.
 - Layout animations — deferred to Phase 3 (stable positions already).
 - Light theme only (`ThemeName = "light"`). The renderer already takes the
@@ -186,9 +197,9 @@ check, known limitations.
 
 | Layer | Now | Later |
 |---|---|---|
-| Desktop shell | — | Tauri 2 (`src-tauri/`, pending `rustup`) |
+| Desktop shell | Tauri 2 (`src-tauri/`), compiled and working | — |
 | Document engine | `src/core` (TS) | Rust crate mirroring the same schema/ops |
-| Persistence | localStorage adapter | SQLite (Rust) / IndexedDB (web) |
-| Renderer | Canvas2D | WebGPU (preferred) / WebGL2 fallback |
+| Persistence | web: localStorage · desktop: one `.rnode` SQLite file (document + assets) | IndexedDB (web) |
+| Renderer | Canvas2D | WebGPU / WebGL2 — only if ADR-001 §12 is reopened |
 | UI | React + TS + Vite | unchanged |
 | Layout/export perf | TS, debounced | Rust background tasks / Web Workers |

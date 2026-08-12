@@ -614,7 +614,7 @@ Media ~57 KB per bitmap. **La condizione di riapertura non scatta.**
 Con un'avvertenza: la misura è a `devicePixelRatio = 1`. Su retina i byte
 crescono di circa 4× (picco stimato ~70 MB, margine 1,8×): resta sotto il
 budget, ma va rimisurato. Dettaglio in
-[PIANO-IMMAGINI.md](PIANO-IMMAGINI.md) §5.
+[archive/PIANO-IMMAGINI.md](archive/PIANO-IMMAGINI.md) §5.
 
 ### Cosa ribalterebbe questa decisione
 
