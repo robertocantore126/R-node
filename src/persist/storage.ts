@@ -70,20 +70,20 @@ export class LocalStorageAdapter implements StorageAdapter {
 }
 
 /**
- * Desktop: the document is a FOLDER (T19). `document.json` lives under the
- * current root; the images live under `<root>/assets` and are served by
- * TauriAssetStore. The root is mutable state set by open/save-as — the same
- * pattern as the asset store, so a folder switch never re-creates anything.
- * No localStorage on desktop: the document survives even if the webview
- * profile is wiped.
+ * Desktop: the document is ONE `.rnode` file (a SQLite database, T20). The
+ * document JSON lives in its `document` table; the images are served by
+ * TauriAssetStore from the same file. The path is mutable state set by
+ * open/save-as — the same pattern as the asset store, so a file switch never
+ * re-creates anything. No localStorage on desktop: the document survives
+ * even if the webview profile is wiped.
  */
 export class TauriStorageAdapter implements StorageAdapter {
-  readonly label = "document folder (rust)";
+  readonly label = "document file (rust)";
   private root: string | null = null;
 
-  /** The document folder this adapter serves. Null = nothing chosen yet. */
-  setRoot(root: string | null): void {
-    this.root = root;
+  /** The document file this adapter serves. Null = nothing chosen yet. */
+  setRoot(path: string | null): void {
+    this.root = path;
   }
 
   get hasRoot(): boolean {
@@ -97,10 +97,10 @@ export class TauriStorageAdapter implements StorageAdapter {
     return window.__TAURI__.core.invoke(cmd, args);
   }
 
-  /** Read `<root>/document.json` WITHOUT switching this adapter's root. */
-  async readDocumentAt(root: string): Promise<RnodeDocument | null> {
+  /** Read the document from `<path>` WITHOUT switching this adapter's path. */
+  async readDocumentAt(path: string): Promise<RnodeDocument | null> {
     try {
-      const text = (await this.invoke("read_document", { root })) as string | null;
+      const text = (await this.invoke("read_document", { path })) as string | null;
       if (!text) return null;
       const doc = JSON.parse(text) as RnodeDocument;
       return Array.isArray(doc.sheets) ? doc : null;
@@ -118,7 +118,7 @@ export class TauriStorageAdapter implements StorageAdapter {
   async save(docs: RnodeDocument[]): Promise<void> {
     const doc = docs[0];
     if (!doc) return;
-    if (!this.root) throw new Error("TauriStorageAdapter: no document folder chosen");
-    await this.invoke("write_document", { root: this.root, data: JSON.stringify(doc) });
+    if (!this.root) throw new Error("TauriStorageAdapter: no document file chosen");
+    await this.invoke("write_document", { path: this.root, data: JSON.stringify(doc) });
   }
 }

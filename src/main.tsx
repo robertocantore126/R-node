@@ -8,7 +8,7 @@ import "./styles.css";
 
 // Same runtime switch as the asset factory (T19): the Tauri webview carries
 // window.__TAURI__, a plain browser tab does not. On desktop the document is
-// a folder, so localStorage never touches the document.
+// a single .rnode file, so localStorage never touches the document.
 const adapter =
   typeof window !== "undefined" && window.__TAURI__ ? new TauriStorageAdapter() : new LocalStorageAdapter();
 

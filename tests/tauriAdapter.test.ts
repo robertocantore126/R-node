@@ -26,74 +26,98 @@ const ID = "a".repeat(64);
 const meta: AssetMeta = { id: ID, mime: "image/png", w: 10, h: 10, bytes: 3, name: "x.png" };
 const metaBytes = [...new TextEncoder().encode(JSON.stringify(meta))];
 
+/** Raw bytes as Tauri actually delivers them: an ArrayBuffer. */
+function raw(bytes: number[]): ArrayBuffer {
+  return Uint8Array.from(bytes).buffer;
+}
+
 describe("TauriAssetStore", () => {
-  it("passes the current root to every command", async () => {
+  it("passes the current path to every command", async () => {
     const calls = installTauri(async (cmd, args) => {
-      if (cmd === "default_asset_root") return "C:/default";
+      if (cmd === "default_document_path") return "C:/default";
       if (cmd === "get_asset" && args.level === "meta") return metaBytes;
-      if (cmd === "get_asset") return [1, 2, 3];
+      if (cmd === "get_asset") return raw([1, 2, 3]);
       return null;
     });
     const store = new TauriAssetStore();
     await store.get(ID, "large");
     await store.meta(ID);
     await store.list();
-    const roots = calls.filter((c) => c.cmd !== "default_asset_root").map((c) => c.args.root);
-    expect(roots.every((r) => r === "C:/default")).toBe(true);
+    const paths = calls.filter((c) => c.cmd !== "default_document_path").map((c) => c.args.path);
+    expect(paths.every((p) => p === "C:/default")).toBe(true);
   });
 
-  it("setRoot switches the SAME instance to a new folder (the Renderer trap)", async () => {
-    const calls = installTauri(async () => null);
-    const store = new TauriAssetStore();
-
-    store.setRoot("C:/mapA");
-    await store.get(ID, "large");
-    store.setRoot("C:/mapB");
-    await store.get(ID, "large");
-
-    const reads = calls.filter((c) => c.cmd === "get_asset").map((c) => c.args.root);
-    expect(reads).toEqual(["C:/mapA", "C:/mapB"]);
-  });
-
-  it("adoptRoot copies every referenced asset to the new folder BEFORE switching", async () => {
-    const OLD = "C:/old";
-    const NEW = "C:/new";
-    const calls = installTauri(async (cmd, args) => {
-      if (cmd === "default_asset_root") return OLD;
+  it("get returns a Blob from raw IPC bytes (ArrayBuffer)", async () => {
+    installTauri(async (cmd, args) => {
+      if (cmd === "default_document_path") return "C:/default";
       if (cmd === "get_asset" && args.level === "meta") return metaBytes;
-      if (cmd === "get_asset" && args.level === "original") return [1, 2, 3];
-      if (cmd === "get_asset" && args.level === "large") return [4, 5];
-      if (cmd === "get_asset" && args.level === "small") return [6];
+      if (cmd === "get_asset") return raw([1, 2, 3]);
       return null;
     });
     const store = new TauriAssetStore();
-    await store.adoptRoot(NEW, [ID]);
-
-    // Reads happened against the OLD root…
-    const reads = calls.filter((c) => c.cmd === "get_asset").map((c) => c.args.root);
-    expect(reads.length).toBeGreaterThan(0);
-    expect(reads.every((r) => r === OLD)).toBe(true);
-
-    // …and the writes went to the NEW one: all four files per asset.
-    const puts = calls.filter((c) => c.cmd === "put_asset");
-    expect(puts).toHaveLength(4);
-    expect(puts.every((p) => p.args.root === NEW)).toBe(true);
-    expect(puts.map((p) => p.args.level).sort()).toEqual(["large", "meta", "original", "small"]);
-
-    // After the switch, reads come from the new folder.
-    calls.length = 0;
-    await store.get(ID, "large");
-    expect(calls.find((c) => c.cmd === "get_asset")?.args.root).toBe(NEW);
+    const blob = await store.get(ID, "large");
+    expect(blob).not.toBeNull();
+    expect(new Uint8Array(await blob!.arrayBuffer())).toEqual(Uint8Array.from([1, 2, 3]));
   });
 
-  it("adoptRoot with no referenced assets just switches the root", async () => {
-    const calls = installTauri(async (cmd) => (cmd === "default_asset_root" ? "C:/default" : null));
+  it("get of a missing asset returns null (empty body)", async () => {
+    installTauri(async (cmd) => (cmd === "default_document_path" ? "C:/default" : new ArrayBuffer(0)));
     const store = new TauriAssetStore();
-    await store.adoptRoot("C:/fresh", []);
+    expect(await store.get(ID, "large")).toBeNull();
+  });
+
+  it("setRoot switches the SAME instance to a new path (the Renderer trap)", async () => {
+    const calls = installTauri(async () => null);
+    const store = new TauriAssetStore();
+
+    store.setRoot("C:/mapA.rnode");
+    await store.get(ID, "large");
+    store.setRoot("C:/mapB.rnode");
+    await store.get(ID, "large");
+
+    const reads = calls.filter((c) => c.cmd === "get_asset").map((c) => c.args.path);
+    expect(reads).toEqual(["C:/mapA.rnode", "C:/mapB.rnode"]);
+  });
+
+  it("adoptFile copies every referenced asset to the new file BEFORE switching", async () => {
+    const OLD = "C:/old";
+    const NEW = "C:/new.rnode";
+    const calls = installTauri(async (cmd, args) => {
+      if (cmd === "default_document_path") return OLD;
+      if (cmd === "get_asset" && args.level === "meta") return metaBytes;
+      if (cmd === "get_asset" && args.level === "original") return raw([1, 2, 3]);
+      if (cmd === "get_asset" && args.level === "large") return raw([4, 5]);
+      if (cmd === "get_asset" && args.level === "small") return raw([6]);
+      return null;
+    });
+    const store = new TauriAssetStore();
+    await store.adoptFile(NEW, [ID]);
+
+    // Reads happened against the OLD path…
+    const reads = calls.filter((c) => c.cmd === "get_asset").map((c) => c.args.path);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((p) => p === OLD)).toBe(true);
+
+    // …and the writes went to the NEW one: all four levels per asset.
+    const puts = calls.filter((c) => c.cmd === "put_asset");
+    expect(puts).toHaveLength(4);
+    expect(puts.every((p) => p.args.path === NEW)).toBe(true);
+    expect(puts.map((p) => p.args.level).sort()).toEqual(["large", "meta", "original", "small"]);
+
+    // After the switch, reads come from the new file.
+    calls.length = 0;
+    await store.get(ID, "large");
+    expect(calls.find((c) => c.cmd === "get_asset")?.args.path).toBe(NEW);
+  });
+
+  it("adoptFile with no referenced assets just switches the path", async () => {
+    const calls = installTauri(async (cmd) => (cmd === "default_document_path" ? "C:/default" : null));
+    const store = new TauriAssetStore();
+    await store.adoptFile("C:/fresh.rnode", []);
     expect(calls.filter((c) => c.cmd === "put_asset")).toHaveLength(0);
     calls.length = 0;
     await store.list();
-    expect(calls.find((c) => c.cmd === "list_assets")?.args.root).toBe("C:/fresh");
+    expect(calls.find((c) => c.cmd === "list_assets")?.args.path).toBe("C:/fresh.rnode");
   });
 });
 
@@ -108,54 +132,85 @@ describe("TauriStorageAdapter", () => {
     installTauri(async () => null);
     const a = new TauriStorageAdapter();
     expect(a.hasRoot).toBe(false);
-    a.setRoot("C:/map");
+    a.setRoot("C:/map.rnode");
     expect(a.hasRoot).toBe(true);
   });
 
-  it("save writes document.json under the current root", async () => {
+  it("save writes the document row of the current file", async () => {
     const calls = installTauri(async () => null);
     const a = new TauriStorageAdapter();
-    a.setRoot("C:/map");
+    a.setRoot("C:/map.rnode");
     await a.save([doc]);
     const write = calls.find((c) => c.cmd === "write_document");
-    expect(write?.args.root).toBe("C:/map");
+    expect(write?.args.path).toBe("C:/map.rnode");
     expect(JSON.parse(write?.args.data as string)).toEqual(doc);
   });
 
-  it("save without a root throws instead of guessing", async () => {
+  it("save without a path throws instead of guessing", async () => {
     installTauri(async () => null);
     const a = new TauriStorageAdapter();
-    await expect(a.save([doc])).rejects.toThrow(/no document folder/);
+    await expect(a.save([doc])).rejects.toThrow(/no document file/);
   });
 
-  it("load returns the document.json of the current root", async () => {
+  it("load returns the document of the current file", async () => {
     installTauri(async (cmd) => (cmd === "read_document" ? JSON.stringify(doc) : null));
     const a = new TauriStorageAdapter();
-    a.setRoot("C:/map");
+    a.setRoot("C:/map.rnode");
     expect(await a.load()).toEqual([doc]);
   });
 
-  it("load returns [] before a root is chosen, without any command", async () => {
+  it("load returns [] before a path is chosen, without any command", async () => {
     const calls = installTauri(async () => null);
     const a = new TauriStorageAdapter();
     expect(await a.load()).toEqual([]);
     expect(calls).toHaveLength(0);
   });
 
-  it("readDocumentAt reads a folder without switching the root", async () => {
+  it("readDocumentAt reads a file without switching the path", async () => {
     installTauri(async (cmd) => (cmd === "read_document" ? JSON.stringify(doc) : null));
     const a = new TauriStorageAdapter();
-    expect(await a.readDocumentAt("C:/other")).toEqual(doc);
+    expect(await a.readDocumentAt("C:/other.rnode")).toEqual(doc);
     expect(a.hasRoot).toBe(false);
   });
 });
 
 describe("desktop save flow", () => {
-  it("first save without a folder is cancelled when the picker is dismissed", async () => {
-    installTauri(async (cmd) => (cmd === "pick_document_folder" ? null : null));
+  it("first save without a file is cancelled when the picker is dismissed", async () => {
+    installTauri(async (cmd) => (cmd === "pick_document_file" ? null : null));
     const store = new EditorStore(new TauriStorageAdapter());
     await store.init();
     await store.saveNow();
     expect(store.getSnapshot().sync).toBe("dirty");
+  });
+
+  it("first save adopts the scratch assets into the chosen file and writes the document", async () => {
+    const calls = installTauri(async (cmd) => {
+      if (cmd === "pick_document_file") return "C:/MiaMappa.rnode";
+      return null;
+    });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    await store.saveNow();
+    expect(store.getSnapshot().sync).toBe("saved");
+    // The empty sample map has no referenced assets: adoptFile writes nothing.
+    expect(calls.filter((c) => c.cmd === "put_asset")).toHaveLength(0);
+    const write = calls.find((c) => c.cmd === "write_document");
+    expect(write?.args.path).toBe("C:/MiaMappa.rnode");
+    // The picker for the save mode carries the mode argument.
+    expect(calls.find((c) => c.cmd === "pick_document_file")?.args.mode).toBe("save");
+  });
+
+  it("a later save overwrites the same file without asking again", async () => {
+    const calls = installTauri(async (cmd) => {
+      if (cmd === "pick_document_file") return "C:/MiaMappa.rnode";
+      return null;
+    });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    await store.saveNow();
+    await store.saveNow();
+    const picks = calls.filter((c) => c.cmd === "pick_document_file");
+    expect(picks).toHaveLength(1); // the picker ran only for the first save
+    expect(calls.filter((c) => c.cmd === "write_document")).toHaveLength(2);
   });
 });

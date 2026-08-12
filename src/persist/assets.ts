@@ -200,22 +200,21 @@ declare global {
 }
 
 /**
- * Desktop implementation: the levels are real files under the current
- * document folder `<root>/assets/<id>/<level>` (ADR-001 §12 chooses B1 —
- * original files the user keeps, not a browser cache the OS can evict).
- * `meta` lives next to them as a JSON file, written through the same command.
+ * Desktop implementation: the levels live INSIDE the current `.rnode` file
+ * (a SQLite database) — `<path>/assets(id, level)` rows, served by the Rust
+ * commands. `meta` is one more level row, written through the same command.
  *
- * The root is MUTABLE state, set by open/save-as (T19). The Renderer captures
- * this same instance in its constructor — the trap is that opening another
- * document must never mint a new store, or the renderer would keep reading
- * the previous folder. Only the root changes.
+ * The path is MUTABLE state, set by open/save-as (T20). The Renderer
+ * captures this same instance in its constructor — the trap is that opening
+ * another document must never mint a new store, or the renderer would keep
+ * reading the previous file. Only the path changes.
  */
 export class TauriAssetStore implements AssetStore {
   private metaCache = new Map<string, AssetMeta>();
-  /** Current document folder; lazily the app-data assets dir before the
+  /** Current document file; lazily `<app-data>/scratch.rnode` before the
    *  first save, then whatever open/save-as chose. Null resets to default. */
-  private root: string | null = null;
-  private defaultRoot: Promise<string> | null = null;
+  private path: string | null = null;
+  private defaultPath: Promise<string> | null = null;
 
   private invoke(): TauriInvoke {
     const api = typeof window !== "undefined" ? window.__TAURI__ : undefined;
@@ -223,17 +222,17 @@ export class TauriAssetStore implements AssetStore {
     return api.core.invoke;
   }
 
-  /** Switch this store to a document folder. Same instance, new root. */
-  setRoot(root: string | null): void {
-    this.root = root;
-    this.defaultRoot = null;
+  /** Switch this store to a document file. Same instance, new path. */
+  setRoot(path: string | null): void {
+    this.path = path;
+    this.defaultPath = null;
     this.metaCache.clear();
   }
 
-  private async rootDir(): Promise<string> {
-    if (this.root) return this.root;
-    this.defaultRoot ??= this.invoke()("default_asset_root") as Promise<string>;
-    return this.defaultRoot;
+  private async currentPath(): Promise<string> {
+    if (this.path) return this.path;
+    this.defaultPath ??= this.invoke()("default_document_path") as Promise<string>;
+    return this.defaultPath;
   }
 
   async put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string> {
@@ -243,14 +242,14 @@ export class TauriAssetStore implements AssetStore {
   }
 
   async putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void> {
-    const root = await this.rootDir();
+    const path = await this.currentPath();
     const invoke = this.invoke();
     for (const level of ["original", "large", "small"] as const) {
       const bytes = new Uint8Array(await levels[level].blob.arrayBuffer());
-      await invoke("put_asset", { root, id, level, bytes });
+      await invoke("put_asset", { path, id, level, bytes });
     }
     await invoke("put_asset", {
-      root,
+      path,
       id,
       level: "meta",
       bytes: new TextEncoder().encode(JSON.stringify(meta)),
@@ -259,47 +258,47 @@ export class TauriAssetStore implements AssetStore {
   }
 
   async get(id: string, level: AssetLevel): Promise<Blob | null> {
-    const root = await this.rootDir();
-    const bytes = (await this.invoke()("get_asset", { root, id, level })) as number[] | null;
-    if (!bytes) return null;
+    const path = await this.currentPath();
+    const raw = await this.invoke()("get_asset", { path, id, level });
+    const bytes = toBytes(raw);
+    if (!bytes || bytes.byteLength === 0) return null; // empty body = absent
     const mime = this.metaCache.get(id)?.mime;
-    return new Blob([new Uint8Array(bytes)], mime ? { type: mime } : undefined);
+    return new Blob([bytes], mime ? { type: mime } : undefined);
   }
 
   async meta(id: string): Promise<AssetMeta | null> {
     const cached = this.metaCache.get(id);
     if (cached) return cached;
-    const root = await this.rootDir();
-    const bytes = (await this.invoke()("get_asset", { root, id, level: "meta" })) as number[] | null;
-    if (!bytes) return null;
-    const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(bytes))) as AssetMeta;
+    const path = await this.currentPath();
+    const raw = await this.invoke()("get_asset", { path, id, level: "meta" });
+    const bytes = toBytes(raw);
+    if (!bytes || bytes.byteLength === 0) return null;
+    const meta = JSON.parse(new TextDecoder().decode(bytes)) as AssetMeta;
     this.metaCache.set(id, meta);
     return meta;
   }
 
   async delete(id: string): Promise<void> {
-    const root = await this.rootDir();
-    await this.invoke()("delete_asset", { root, id });
+    const path = await this.currentPath();
+    await this.invoke()("delete_asset", { path, id });
     this.metaCache.delete(id);
   }
 
   async list(): Promise<string[]> {
-    return (await this.invoke()("list_assets", { root: await this.rootDir() })) as string[];
+    return (await this.invoke()("list_assets", { path: await this.currentPath() })) as string[];
   }
 
   /**
-   * Point this store at a NEW document folder, copying every referenced
-   * asset (all three levels + meta) from the current root into it FIRST.
-   * Reading happens before the switch: after it, get() would read the new,
-   * empty folder. Same per-asset iteration the zip exporter uses (T19: a
-   * folder instead of an archive) — a document saved into a fresh folder
-   * never points at ids that are not there.
+   * Point this store at a NEW document file, copying every referenced asset
+   * (all three levels + meta) from the current path into it FIRST. Reading
+   * happens before the switch: after it, get() would read the new, empty
+   * file. Same per-asset iteration the zip exporter uses — a document saved
+   * into a fresh file never points at ids that are not there.
    */
-  async adoptRoot(newRoot: string, ids: string[]): Promise<void> {
-    // The reads below go through this.rootDir(), still the OLD root: the
-    // switch happens only after every asset is copied.
-    // Only the BYTES matter for the copy: the folder layout stores raw files,
-    // w/h live in the meta JSON.
+  async adoptFile(newPath: string, ids: string[]): Promise<void> {
+    // The reads below go through this.currentPath(), still the OLD file: the
+    // switch happens only after every asset is copied. Only the BYTES matter
+    // for the copy — w/h live in the meta JSON.
     const payloads: { id: string; meta: AssetMeta; blobs: Record<AssetLevel, Blob> }[] = [];
     for (const id of ids) {
       const [meta, original, large, small] = await Promise.all([
@@ -315,19 +314,37 @@ export class TauriAssetStore implements AssetStore {
     for (const { id, meta, blobs } of payloads) {
       for (const level of ["original", "large", "small"] as const) {
         const bytes = new Uint8Array(await blobs[level].arrayBuffer());
-        await invoke("put_asset", { root: newRoot, id, level, bytes });
+        await invoke("put_asset", { path: newPath, id, level, bytes });
       }
       await invoke("put_asset", {
-        root: newRoot,
+        path: newPath,
         id,
         level: "meta",
         bytes: new TextEncoder().encode(JSON.stringify(meta)),
       });
     }
-    this.root = newRoot;
-    this.defaultRoot = null;
+    this.path = newPath;
+    this.defaultPath = null;
     this.metaCache.clear();
   }
+}
+
+/**
+ * Raw IPC bytes arrive as an ArrayBuffer (Tauri 2 custom-protocol path for
+ * `tauri::ipc::Response`); the postMessage fallback and test mocks may hand
+ * back a Uint8Array or a plain number[]. Normalize all of them to a
+ * Uint8Array, or null when the value is not bytes at all.
+ */
+function toBytes(raw: unknown): Uint8Array<ArrayBuffer> | null {
+  if (raw === null || raw === undefined) return null;
+  if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+  if (raw instanceof Uint8Array) {
+    // Fresh buffer: a view over a SharedArrayBuffer or a foreign buffer must
+    // not leak into Blob (BlobPart wants ArrayBuffer-backed views).
+    return Uint8Array.from(raw);
+  }
+  if (Array.isArray(raw)) return Uint8Array.from(raw as number[]);
+  return null;
 }
 
 /**
