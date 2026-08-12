@@ -12,7 +12,7 @@ import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type Group, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type Group, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
@@ -1273,6 +1273,34 @@ export class EditorStore {
     const node = this.model.node(id);
     if (!node) return;
     this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
+  }
+
+  // -------------------------------------------------------------------------
+  // Node image (T12-4) — the op carries only the id, never the bytes
+  // -------------------------------------------------------------------------
+
+  /** Attach (or remove, with imageId = null) an image reference on a node. */
+  setNodeImage(nodeId: string, imageId: string | null): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const prevImageId = node.style.image ?? null;
+    if (prevImageId === imageId) return;
+    this.execOps([
+      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId, imageId, prevImageId }),
+    ]);
+  }
+
+  /**
+   * Attach an imported image: register its metadata card (idempotent,
+   * content-addressed — the same image shared by N nodes has one card) and
+   * reference it from the node in a single undoable op. The card is NOT
+   * removed by undo: it may be shared, and collectOrphans is the GC.
+   */
+  attachImage(nodeId: string, card: AttachmentInfo): void {
+    if (!this.sheet.attachments.some((a) => a.id === card.id)) {
+      this.sheet.attachments.push({ ...card });
+    }
+    this.setNodeImage(nodeId, card.id);
   }
 
   // -------------------------------------------------------------------------

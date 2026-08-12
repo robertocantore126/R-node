@@ -319,6 +319,33 @@ describe("relationships", () => {
 });
 
 describe("styles & tasks", () => {
+  it("setNodeImage applies, undoes and redoes — carrying only the id", () => {
+    const { model, root } = freshDoc();
+    const history = new History();
+    expect(root.style.image).toBeUndefined();
+
+    // attach
+    exec(model, history, [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: root.id, imageId: "sha-abc", prevImageId: null })]);
+    expect(model.node(root.id)!.style.image).toBe("sha-abc");
+    expect(JSON.stringify(model.node(root.id)!.style)).toContain("sha-abc"); // only the id, never bytes
+
+    undo(model, history);
+    expect(model.node(root.id)!.style.image).toBeUndefined();
+
+    redo(model, history);
+    expect(model.node(root.id)!.style.image).toBe("sha-abc");
+
+    // replace + remove round-trip
+    exec(model, history, [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: root.id, imageId: "sha-other", prevImageId: "sha-abc" })]);
+    expect(model.node(root.id)!.style.image).toBe("sha-other");
+    undo(model, history);
+    expect(model.node(root.id)!.style.image).toBe("sha-abc");
+    exec(model, history, [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: root.id, imageId: null, prevImageId: "sha-abc" })]);
+    expect(model.node(root.id)!.style.image).toBeUndefined();
+    undo(model, history);
+    expect(model.node(root.id)!.style.image).toBe("sha-abc");
+  });
+
   it("setStyle undo restores previous style", () => {
     const { model, root } = freshDoc();
     const history = new History();

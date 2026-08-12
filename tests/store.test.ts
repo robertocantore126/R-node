@@ -616,4 +616,33 @@ describe("canvas resize drag", () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]).toBe("A\n  A1\nB");
   });
+
+  it("attachImage registers the card once and undo removes the reference, keeping the card", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+    const card = { id: "sha-img", mime: "image/png", w: 400, h: 300, bytes: 1234, name: "pic.png" };
+
+    store.attachImage(main.id, card);
+    expect(store.sheet.attachments).toHaveLength(1);
+    expect(store.doc.node(main.id)!.style.image).toBe("sha-img");
+
+    // Same image on a second node: still one card.
+    store.attachImage(root.id, card);
+    expect(store.sheet.attachments).toHaveLength(1);
+    expect(store.doc.node(root.id)!.style.image).toBe("sha-img");
+
+    // One undo per op removes the references, and the shared card stays —
+    // removing it on undo could break another user of the same image;
+    // collectOrphans is the GC.
+    store.undo();
+    expect(store.doc.node(root.id)!.style.image).toBeUndefined();
+    store.undo();
+    expect(store.doc.node(main.id)!.style.image).toBeUndefined();
+    expect(store.sheet.attachments).toHaveLength(1);
+
+    // No image bytes ever entered the document.
+    expect(JSON.stringify(store.sheet.attachments)).not.toContain("\"image\":");
+  });
 });
