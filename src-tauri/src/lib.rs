@@ -20,6 +20,7 @@ use std::fs;
 use std::path::Path;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::DialogExt;
 
 /// Schema of a `.rnode` file (one file = one document).
 ///
@@ -158,27 +159,43 @@ fn default_document_path(app: AppHandle) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Native file picker (rfd), restricted to `.rnode`. `mode` is "open" or
-/// "save"; a cancelled dialog returns None. On save the extension is
-/// guaranteed even when the user types a name without it.
+/// Native file picker restricted to `.rnode`. `mode` is "open" or "save"; a
+/// cancelled dialog returns None. On save the extension is guaranteed even
+/// when the user types a name without it.
+///
+/// Uses `tauri-plugin-dialog` (NOT raw rfd): a blocking rfd dialog inside a
+/// sync command runs on the main thread, fighting the webview's message pump
+/// and appearing without a parent — the app showed exactly that bug (dialog
+/// not opening, then reopening on its own). The plugin runs the dialog off
+/// the main thread, parented to the window, and this command is async so the
+/// main thread stays free.
 #[tauri::command]
-fn pick_document_file(mode: String) -> Result<Option<String>, String> {
+async fn pick_document_file(app: AppHandle, mode: String) -> Result<Option<String>, String> {
+    let parent = app.get_webview_window("main");
+    let dialog = |title: &str, save: bool| {
+        let mut builder = app.dialog().file().add_filter("R-node document", &["rnode"]);
+        if let Some(w) = &parent {
+            builder = builder.set_parent(w);
+        }
+        builder = builder.set_title(title);
+        if save {
+            builder = builder.set_file_name("MiaMappa.rnode");
+        }
+        builder
+    };
+
     let picked = match mode.as_str() {
-        "open" => rfd::FileDialog::new()
-            .add_filter("R-node document", &["rnode"])
-            .set_title("Open an R-node document")
-            .pick_file(),
-        "save" => rfd::FileDialog::new()
-            .add_filter("R-node document", &["rnode"])
-            .set_title("Save the R-node document")
-            .set_file_name("MiaMappa.rnode")
-            .save_file(),
+        "open" => dialog("Open an R-node document", false).blocking_pick_file(),
+        "save" => dialog("Save the R-node document", true).blocking_save_file(),
         _ => return Err(format!("unknown pick mode: {mode}")),
     };
-    let Some(p) = picked else {
-        return Ok(None);
+    let Some(file) = picked else {
+        return Ok(None); // user cancelled
     };
-    let mut path = p.to_string_lossy().into_owned();
+    let mut path = match file {
+        tauri_plugin_dialog::FilePath::Path(p) => p.to_string_lossy().into_owned(),
+        tauri_plugin_dialog::FilePath::Url(_) => return Err("dialog returned a URL, expected a path".into()),
+    };
     if mode == "save" && !path.to_lowercase().ends_with(".rnode") {
         path.push_str(".rnode");
     }
@@ -341,6 +358,7 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             put_asset,
             get_asset,

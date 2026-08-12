@@ -415,12 +415,24 @@ export class EditorStore {
     return true;
   }
 
+  /**
+   * Re-entrancy guard: the native dialog is modal, so a second click while
+   * one is open must not queue another dialog — stacked pickers were part of
+   * the "Open keeps reopening" report. The flag is reset when the dialog
+   * closes (picked or cancelled), never by a timeout.
+   */
+  private pickBusy = false;
+
   private async pickDesktopFile(mode: "open" | "save"): Promise<string | null> {
     if (typeof window === "undefined" || !window.__TAURI__) return null;
+    if (this.pickBusy) return null;
+    this.pickBusy = true;
     try {
       return ((await window.__TAURI__.core.invoke("pick_document_file", { mode })) as string | null) ?? null;
     } catch {
       return null;
+    } finally {
+      this.pickBusy = false;
     }
   }
 
