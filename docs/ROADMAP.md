@@ -420,16 +420,36 @@ immagine già allegata va poi migrata.
 
 **Passi.**
 
-1. **Interfaccia**, sullo stesso modello di `StorageAdapter` che esiste già:
+1. **Interfaccia**, sullo stesso modello di `StorageAdapter` che esiste già.
+   Tre rappresentazioni per asset, come deciso in ADR-001 §12: l'originale
+   intatto e due livelli derivati (1024px e 256px sul lato lungo).
    ```ts
-   export interface AssetVariant { blob: Blob; w: number; h: number; bytes: number }
+   /** "original" = intatto · "large" = 1024px · "small" = 256px, lato lungo */
+   export type AssetLevel = "original" | "large" | "small";
+
+   export interface AssetBlob { blob: Blob; w: number; h: number }
+
+   export interface AssetMeta {
+     id: string;          // SHA-256 dell'originale
+     mime: string;
+     w: number;           // dimensioni dell'originale
+     h: number;
+     bytes: number;       // peso dell'originale
+     name?: string;
+   }
+
    export interface AssetStore {
-     put(original: Blob, display: Blob, meta: {...}): Promise<string>; // → id
-     get(id: string, variant: "display" | "original"): Promise<Blob | null>;
+     /** I livelli arrivano già pronti: generarli è compito di T13. */
+     put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string>;
+     get(id: string, level: AssetLevel): Promise<Blob | null>;
+     meta(id: string): Promise<AssetMeta | null>;
      delete(id: string): Promise<void>;
      list(): Promise<string[]>;
    }
    ```
+   **Questo task non genera i livelli**: li riceve già pronti e li conserva.
+   La pipeline che li produce (ridimensionamento, ricompressione) è T13, e sta
+   fuori di qui perché richiede un canvas e quindi non è testabile in Node.
 2. **`IndexedDbAssetStore`** come default: unica implementazione richiesta da
    questo task. IndexedDB immagazzina `Blob` **nativi** — niente base64, niente
    inflazione — e la quota è di centinaia di MB fino a GB. Un object store
