@@ -236,6 +236,12 @@ booleano. Istruzioni per catturare: [README](../README.md#reporting-a-bug).
 
 ## 5. Cosa NON fare (già fatto o inesistente)
 
+> **Prima di segnalare un problema, verifica che sia aperto.** I documenti di
+> questo repository descrivono le trappole **insieme al loro rimedio**: chi li
+> legge senza guardare il codice ricava una lista di difetti già risolti. È
+> successo tre volte — due analisi esterne e una volta a me. Controlla il
+> codice e `git log` prima di scrivere che qualcosa è rotto.
+
 Verificato nel codice. Se una lista di miglioramenti propone questi, salta.
 
 | Proposta ricorrente | Realtà |

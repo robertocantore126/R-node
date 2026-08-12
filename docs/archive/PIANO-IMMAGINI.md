@@ -1,3 +1,22 @@
+> # ⚠️ DOCUMENTO STORICO — LAVORO GIÀ COMPLETATO
+>
+> **Questo piano è stato eseguito per intero.** Ogni passo qui descritto è
+> chiuso; vedi la retrospettiva in [../ROADMAP.md](../ROADMAP.md) con i commit.
+>
+> **Le "trappole" elencate nei passi NON sono problemi aperti: sono i motivi
+> per cui il codice è com'è.** Il documento è scritto nella forma «ecco la
+> trappola, ecco cosa fare», quindi leggendolo senza guardare il codice si
+> ricava una lista di difetti che in realtà sono tutti già risolti — è
+> successo tre volte.
+>
+> Se stai valutando la codebase: **verifica nel codice e in `git log` prima di
+> segnalare un punto come aperto.** Lo stato reale dei task sta in
+> `../ROADMAP.md`, non qui.
+>
+> Conservato perché spiega *perché* certe scelte esistono — la quantizzazione
+> dei bucket, `bitmap.close()`, l'ordine leggi-poi-commuta — e quelle
+> spiegazioni servono a chi un domani volesse "semplificare".
+
 # Piano di esecuzione — immagini nei nodi
 
 > **ARCHIVIATO (2026-08-12)** — piano completamente eseguito (passi 0–15,

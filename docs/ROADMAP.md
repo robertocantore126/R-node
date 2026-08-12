@@ -168,13 +168,25 @@ evita.
 
 ---
 
-## T5 — Budget di performance assertivi · P1
+## T5 — Budget di performance assertivi · P1 · ⚠️ PARZIALE
 
-> **Stato: ✅ FATTO.** I budget sono assertivi in `tests/perf.test.ts` come
-> soglie di sanità (applyOps < 10s, layout < 5s, writeback < 5s a 1k/5k/10k),
-> non le soglie 3× datate per taglia previste qui: l'intento — far fallire le
-> regressioni algoritmiche invece di stamparle — è coperto, con un meccanismo
-> più semplice.
+> **Stato verificato il 2026-08-12.** Le asserzioni esistono in
+> `tests/perf.test.ts` ma **non fanno il lavoro che questo task definisce**.
+> Misurato a 10.000 nodi: `applyOps` 45,5 ms contro una soglia di 10.000 ms
+> (**220× di margine**), `layout` 163,8 ms contro 5.000 (**30×**), `writeback`
+> 157,8 ms contro 5.000 (**32×**).
+>
+> Il task chiede soglie che catturino una regressione algoritmica da 10×. Con
+> 30× di margine `layout` può passare da 164 ms a 1,6 secondi — inaccettabile
+> per l'utente — e il test resta verde. Sono controlli contro il blocco totale,
+> non contro le regressioni.
+>
+> **E l'approccio va ripensato, non ritarato.** Quelle soglie hanno prodotto un
+> fallimento intermittente pur essendo a 30× dal valore reale: misurare tempo
+> di parete dentro un runner parallelo non è affidabile a *nessuna* soglia.
+> Le strade sono: eseguire la suite perf in seriale, oppure asserire su
+> grandezze relative (ms/op, rapporto fra taglie) invece che su millisecondi
+> assoluti.
 
 **Obiettivo.** Far **fallire** i test se una modifica degrada le performance,
 invece di stamparlo in console.
@@ -315,7 +327,12 @@ snappato, font-size Word bucketizzato, cap rispettato. Nessuna regressione in
 
 ---
 
-## T10 — Paste ricco su nodo selezionato · P2
+## T10 — Paste ricco su nodo selezionato · P2 · ⚠️ PARZIALE
+
+> **Stato verificato**: l'incolla di **immagini** su un nodo selezionato è
+> chiuso (`clipboard.read()` in `store.ts`, arrivato con T13-2). Resta aperto
+> l'incolla di **testo ricco**: `store.paste()` legge ancora solo `readText()`,
+> quindi l'HTML di Word su un nodo selezionato perde la formattazione.
 
 > **Stato: ✅ FATTO.** `store.paste` usa `navigator.clipboard.read()` e
 > instrada `text/html` in `sanitizeHtml → htmlToRuns`, con fallback a testo
