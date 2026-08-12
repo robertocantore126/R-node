@@ -20,7 +20,8 @@ import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewp
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
-import { getAssetStore } from "../persist/assets";
+import { getAssetStore, referencedAssetIds } from "../persist/assets";
+import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
 
 declare global {
@@ -30,6 +31,13 @@ declare global {
       types?: { description?: string; accept: Record<string, string[]> }[];
     }) => Promise<FileSystemFileHandle>;
   }
+}
+
+/** Human-readable size for the pre-export estimate toast. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /**
@@ -310,8 +318,12 @@ export class EditorStore {
     this.commitDraftKeepEditing();
     try {
       await this.adapter.save(this.state.docs);
-      const json = JSON.stringify(this.model.doc, null, 2);
-      const fileWritten = await this.writePortableFile(json);
+      // Images live outside the document (T12a): a plain .rnode.json would
+      // arrive without them. With images the portable save is a .rnode.zip.
+      const hasImages = referencedAssetIds(this.sheet).size > 0;
+      const fileWritten = hasImages
+        ? await this.writePortableZip()
+        : await this.writePortableFile(JSON.stringify(this.model.doc, null, 2));
       this.state.sync = "saved";
       this.toast(fileWritten ? "Saved" : "Saved locally (no file chosen)");
     } catch {
@@ -321,11 +333,17 @@ export class EditorStore {
   }
 
   /**
-   * Write the portable .rnode.json. Returns true when a file was written or
-   * downloaded; false when the user cancelled the file picker (the document
-   * is still persisted to app storage).
+   * Write a portable file (`.rnode.json` or `.rnode.zip`): stored file handle
+   * → silent overwrite; File System Access picker → user chooses once, then
+   * every later save overwrites the same file; download as fallback. Returns
+   * true when a file was written or downloaded, false when the user cancelled
+   * the picker (the document is still persisted to app storage).
    */
-  private async writePortableFile(json: string): Promise<boolean> {
+  private async writePortableBytes(
+    blob: Blob,
+    fileName: string,
+    pickerType: { description: string; accept: Record<string, string[]> }
+  ): Promise<boolean> {
     const docId = this.model.doc.documentId;
     const key = `r-node.file-handle.${docId}`;
 
@@ -338,7 +356,7 @@ export class EditorStore {
     if (handle) {
       try {
         const writable = await handle.createWritable();
-        await writable.write(json);
+        await writable.write(blob);
         await writable.close();
         return true;
       } catch {
@@ -351,12 +369,9 @@ export class EditorStore {
     // 2) No handle but the API exists → let the user pick where to save.
     if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
       try {
-        const picked = await window.showSaveFilePicker({
-          suggestedName: this.docFileName(),
-          types: [{ description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } }],
-        });
+        const picked = await window.showSaveFilePicker({ suggestedName: fileName, types: [pickerType] });
         const writable = await picked.createWritable();
-        await writable.write(json);
+        await writable.write(blob);
         await writable.close();
         this.fileHandles.set(docId, picked);
         await this.storeFileHandle(key, picked);
@@ -368,9 +383,46 @@ export class EditorStore {
     }
 
     // 3) Fallback: download the file with the CURRENT content.
-    const blob = new Blob([json], { type: "application/json" });
-    this.download(blob, this.docFileName());
+    this.download(blob, fileName);
     return true;
+  }
+
+  private async writePortableFile(json: string): Promise<boolean> {
+    return this.writePortableBytes(
+      new Blob([json], { type: "application/json" }),
+      this.docFileName(),
+      { description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } }
+    );
+  }
+
+  /**
+   * Portable save with images. The size is estimated and shown BEFORE the
+   * zip is built — generating first and telling the user after would be the
+   * wrong order for a file that can weigh hundreds of MB.
+   */
+  private async writePortableZip(): Promise<boolean> {
+    const store = getAssetStore();
+    const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, "complete");
+    this.toast(`Exporting .rnode.zip (~${formatBytes(estimate)})…`);
+    const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, "complete");
+    return this.writePortableBytes(
+      new Blob([bytes.slice().buffer], { type: "application/zip" }),
+      this.docZipName(),
+      { description: "R-node document with images", accept: { "application/zip": [".rnode.zip"] } }
+    );
+  }
+
+  /**
+   * Manual export in either mode (complete = originals, compact = display
+   * levels only). Downloads the file directly: the save flow owns the file
+   * handle, an explicit export asks the OS for a location every time.
+   */
+  async exportRnodeZip(mode: RnodeZipMode): Promise<void> {
+    const store = getAssetStore();
+    const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, mode);
+    this.toast(`Exporting .rnode.zip (~${formatBytes(estimate)})…`);
+    const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, mode);
+    this.download(new Blob([bytes.slice().buffer], { type: "application/zip" }), this.docZipName());
   }
 
   private async storeFileHandle(key: string, handle: FileSystemFileHandle): Promise<void> {
@@ -430,18 +482,35 @@ export class EditorStore {
     });
   }
 
-  /** Open a .rnode.json file from disk (file picker). Legacy .rmind.json files are still accepted. */
+  /**
+   * Open a portable file (file picker): .rnode.zip (map + images), .rnode.json
+   * and legacy .rmind.json (plain documents). The container is sniffed by its
+   * PK\x03\x04 magic bytes, never by extension alone.
+   */
   async loadFile(): Promise<void> {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".rnode.json,.rmind.json,application/json,.json";
+    input.accept = ".rnode.json,.rmind.json,.rnode.zip,application/json,application/zip";
     const file: File | null = await new Promise((resolve) => {
       input.onchange = (): void => resolve(input.files?.[0] ?? null);
       input.click();
     });
     if (!file) return;
     try {
-      const text = await file.text();
+      const buf = await file.arrayBuffer();
+      const head = new Uint8Array(buf, 0, 4);
+      const isZip = head.length === 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
+      if (isZip) {
+        const doc = await importRnodeZip(new Uint8Array(buf), getAssetStore());
+        if (!doc) {
+          this.toast("Not a valid R-node file");
+          return;
+        }
+        const id = this.importDocumentFromJson(JSON.stringify(doc));
+        this.toast(id ? `Opened ${file.name}` : "Not a valid R-node file");
+        return;
+      }
+      const text = new TextDecoder().decode(buf);
       const id = this.importDocumentFromJson(text);
       if (id) this.toast(`Opened ${file.name}`);
       else this.toast("Not a valid R-node file");
@@ -563,6 +632,10 @@ export class EditorStore {
 
   private docFileName(): string {
     return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rnode.json`;
+  }
+
+  private docZipName(): string {
+    return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rnode.zip`;
   }
 
   // -------------------------------------------------------------------------

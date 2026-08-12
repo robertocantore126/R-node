@@ -33,6 +33,14 @@ export interface AssetMeta {
 export interface AssetStore {
   /** The levels arrive ready-made: generating them is T13's job. */
   put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string>;
+  /**
+   * Store levels under a caller-supplied id. The `.rnode.zip` importer needs
+   * it: a compact export carries no original, so re-deriving the id from the
+   * stored levels (what `put` does) would change it and every reference in
+   * the imported document would break. Idempotent like `put`: an id that
+   * already exists is left untouched.
+   */
+  putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void>;
   get(id: string, level: AssetLevel): Promise<Blob | null>;
   meta(id: string): Promise<AssetMeta | null>;
   delete(id: string): Promise<void>;
@@ -115,8 +123,13 @@ export class IndexedDbAssetStore implements AssetStore {
 
   async put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string> {
     const id = await sha256Hex(await levels.original.blob.arrayBuffer());
+    await this.putUnderId(id, levels, { ...meta, id });
+    return id;
+  }
+
+  async putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void> {
     const db = await this.db();
-    const record: AssetRecord = { id, ...levels, meta: { ...meta, id } };
+    const record: AssetRecord = { id, ...levels, meta };
     // Existence check and write in ONE readwrite transaction: two concurrent
     // puts of identical content cannot both pass the check. Content-addressed
     // first write wins — an existing id is returned as-is, never rewritten.
@@ -134,7 +147,6 @@ export class IndexedDbAssetStore implements AssetStore {
       };
       getReq.onerror = () => reject(getReq.error);
     });
-    return id;
   }
 
   async get(id: string, level: AssetLevel): Promise<Blob | null> {
@@ -199,19 +211,22 @@ export class TauriAssetStore implements AssetStore {
 
   async put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string> {
     const id = await sha256Hex(await levels.original.blob.arrayBuffer());
+    await this.putUnderId(id, levels, { ...meta, id });
+    return id;
+  }
+
+  async putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void> {
     const invoke = this.invoke();
     for (const level of ["original", "large", "small"] as const) {
       const bytes = new Uint8Array(await levels[level].blob.arrayBuffer());
       await invoke("put_asset", { id, level, bytes });
     }
-    const full: AssetMeta = { ...meta, id };
     await invoke("put_asset", {
       id,
       level: "meta",
-      bytes: new TextEncoder().encode(JSON.stringify(full)),
+      bytes: new TextEncoder().encode(JSON.stringify(meta)),
     });
-    this.metaCache.set(id, full);
-    return id;
+    this.metaCache.set(id, meta);
   }
 
   async get(id: string, level: AssetLevel): Promise<Blob | null> {

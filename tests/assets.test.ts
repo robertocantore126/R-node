@@ -124,6 +124,22 @@ describe("IndexedDbAssetStore", () => {
     expect(await store.meta("deadbeef")).toBeNull();
   });
 
+  it("putUnderId stores levels under a caller-supplied id and is idempotent", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+    // The .rnode.zip importer case: no original to re-derive the address from.
+    const foreignId = "a".repeat(64);
+    const full: AssetMeta = { id: foreignId, mime: "image/png", w: 1200, h: 800, bytes: 21, name: "first.png" };
+    await store.putUnderId(foreignId, makeLevels(), full);
+    expect(await store.get(foreignId, "large")).not.toBeNull();
+    expect((await store.meta(foreignId))?.id).toBe(foreignId);
+
+    // First write wins: re-importing the same zip must not overwrite.
+    await store.putUnderId(foreignId, makeLevels("OTHER"), { ...full, name: "second.png" });
+    expect(await store.get(foreignId, "original")).not.toBeNull();
+    expect((await store.meta(foreignId))?.name).toBe("first.png");
+    expect((await store.list()).length).toBe(1);
+  });
+
   it("meta exposes the original's dimensions and weight", async () => {
     const store = new IndexedDbAssetStore(uniqueDb());
     const id = await store.put(
