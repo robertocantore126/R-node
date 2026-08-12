@@ -343,11 +343,64 @@ contiene il testo finale corretto alla fine.
 
 ---
 
-> **I task T12a–T15 assumono le scelte A1+B1 di
-> [ADR-001](ADR-001-immagini-e-piattaforma.md)** — archivio asset separato,
-> due varianti per immagine, decodifica governata nel renderer. Quella
-> decisione è ancora **aperta**: se cambia (per esempio verso un renderer
-> WebGPU), questi quattro task vanno rivisti prima di eseguirli.
+## T0 — Bring-up di Tauri · prerequisito di T12a–T15
+
+**Obiettivo.** Compilare e avviare la shell desktop già presente, e verificare
+che il percorso di persistenza SQLite funzioni end-to-end.
+
+**Perché.** [ADR-001](ADR-001-immagini-e-piattaforma.md) §12 sceglie B1: gli
+asset vivono su filesystem, non in IndexedDB, perché centinaia di originali
+insostituibili non possono dipendere da uno storage che il browser può
+cancellare. `src-tauri/` esiste ed espone già `list_documents`,
+`load_document`, `save_document`, `delete_document` — **ma non è mai stato
+compilato**.
+
+Va fatto come passo **separato**, prima e non insieme alle immagini: se
+qualcosa non funziona devi sapere che è l'ambiente, non il tuo codice.
+
+> **Questo task richiede un'installazione di sistema e va eseguito dal
+> proprietario**, non da un agente: `rustup` installa una toolchain.
+
+**Passi.**
+1. Installa Rust da [rustup.rs](https://rustup.rs) — per-utente, senza
+   privilegi di amministratore:
+   ```
+   rustup default stable
+   ```
+2. Installa la CLI di Tauri:
+   ```
+   cargo install tauri-cli --locked
+   ```
+3. Dalla cartella del progetto:
+   ```
+   npm install
+   cargo tauri dev
+   ```
+   La prima compilazione è lunga. Su Windows serve WebView2, presente di
+   serie su Windows 11.
+4. Nell'app che si apre: crea un documento, scrivi qualcosa, salva, chiudi,
+   riapri. Deve ritrovare tutto.
+5. Se il passo 4 fallisce, il problema è nel percorso `TauriStorageAdapter` di
+   `src/persist/storage.ts` o nei comandi di `src-tauri/src/lib.rs`: **è il
+   momento di scoprirlo**, non quando ci saranno anche le immagini.
+
+**Fatto quando.** `cargo tauri dev` avvia l'app, un documento sopravvive a
+chiusura e riapertura, e `npm test` resta verde (il core non deve essere
+cambiato).
+
+**Non fare.** Non toccare le immagini in questo task. Non rimuovere
+`LocalStorageAdapter`: serve ancora al target web e all'harness di parità.
+
+---
+
+> **I task T12a–T15 implementano la decisione A1+B1 di
+> [ADR-001](ADR-001-immagini-e-piattaforma.md) §12** — archivio asset separato
+> dal documento, originale più livelli a 256px e 1024px, decodifica al livello
+> corrispondente allo zoom con tetto duro a 1024px e budget in byte.
+>
+> **Nota su T12a**: l'interfaccia e l'implementazione IndexedDB **non
+> dipendono da T0** e si possono scrivere subito. L'implementazione su
+> filesystem arriva quando Tauri compila.
 
 ## T12a — Archivio degli asset (fuori dal documento) · P2
 

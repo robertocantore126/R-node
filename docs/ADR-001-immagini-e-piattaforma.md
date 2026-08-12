@@ -1,8 +1,13 @@
 # ADR-001 — Immagini nei nodi: storage, memoria di decodifica, piattaforma
 
-**Stato:** aperto, in cerca di secondo parere
+**Stato:** **DECISO** — A1 + B1. Vedi §12.
 **Data:** 2026-08-12
-**Decide:** il proprietario del progetto
+**Deciso da:** il proprietario del progetto
+**Branch di lavoro:** `node-images`
+
+> Le sezioni §5–§10 restano com'erano: documentano il ragionamento, non la
+> conclusione. Chi rilegge per contestare la decisione parta da §12, che
+> contiene anche **la condizione che la ribalterebbe**.
 
 ---
 
@@ -521,3 +526,84 @@ Allo stato attuale il progetto è nettamente nel primo caso.
 | `src/render/renderer.ts` | il renderer Canvas2D, isolato dietro una classe |
 | `src/layout/measure.ts` | misura condivisa e costanti |
 | `src-tauri/src/lib.rs` | i 4 comandi SQLite già scritti, mai compilati |
+
+---
+
+## 12. Decisione
+
+**A1 + B1**: Canvas2D con decodifica a livelli e budget in byte, su shell Tauri
+con gli asset su filesystem. **Non** WebGPU, **non** nativo.
+
+### Il vincolo che ha deciso
+
+Il proprietario ha dichiarato un requisito e un compromesso accettato:
+
+> Migliaia di nodi e centinaia di immagini ad alta risoluzione. Zoomando dentro
+> l'immagine può degradarsi e diventare pixelata; zoomando fuori deve restare
+> riconoscibile.
+
+**Quel compromesso elimina l'argomento principale a favore di A2/B3 e di C.**
+Mipmap in VRAM e texture compresse servono a mantenere la qualità a ogni
+livello di zoom — cioè esattamente ciò a cui si è rinunciato. Pagare settimane
+di riscrittura del renderer per una qualità dichiarata non necessaria è
+sovra-ingegnerizzazione.
+
+### Il calcolo che lo sostiene
+
+Memoria di decodifica = `larghezza × altezza × 4`. Con decodifica al livello
+corrispondente allo zoom corrente, e solo per i nodi visibili:
+
+| Regime | Immagini visibili | Dimensione a schermo | Livello | RAM |
+|---|---|---|---|---|
+| Vista d'insieme | 300 | ~60px | 128px | 14 MB |
+| Zoom medio | 60 | ~200px | 256px | 11 MB |
+| Zoom ravvicinato | 12 | ~500px | 512px | 9 MB |
+| Zoom massimo | 3 | ~1000px | 1024px | 9 MB |
+
+Il totale resta fra i 9 e i 14 MB **in ogni regime**, perché zoom e numero di
+immagini visibili sono inversamente proporzionali e il compromesso accettato
+mette un **tetto duro** al livello massimo. Con un budget di 128MB il margine è
+di dieci volte: il problema che aveva motivato questo documento non si presenta.
+
+### Configurazione
+
+- **Su disco** (nessuna quota, via Tauri): **originale intatto** + due livelli
+  derivati all'import, **256px** e **1024px**.
+- **In memoria**: `createImageBitmap(blob, { resizeWidth })` dal livello più
+  vicino alla dimensione a schermo, **solo per nodi visibili**, cache LRU con
+  tetto in byte e `bitmap.close()` allo sfratto.
+- **Tetto duro a 1024px**: la pixelatura accettata diventa una regola, non un
+  caso limite.
+- **Facoltativo**: se una singola immagine occupa quasi tutto il viewport,
+  decodificarla dall'originale — una sola alla volta.
+
+### Perché B1 e non il solo browser
+
+1. Nessuna quota e **nessun rischio di eviction** (§3.3): centinaia di
+   originali insostituibili non possono dipendere da IndexedDB, che Safari
+   cancella dopo ~7 giorni di inattività e Chrome può sfrattare.
+2. **Si batte XMind su avvio e RAM senza toccare il rendering**: XMind è
+   Electron con Chromium impacchettato, Tauri usa la webview di sistema —
+   binario di pochi MB contro centinaia, footprint tipico 40–80MB contro
+   150–300.
+3. La pipeline immagini può migrare a Rust (B2) in modo incrementale se
+   l'import risulta lento.
+
+### Ordine di esecuzione
+
+1. **T0** — bring-up di Tauri (bloccato su `rustup`, vedi ROADMAP)
+2. **T12a** — `AssetStore` (l'interfaccia e l'implementazione IndexedDB non
+   dipendono da Tauri: si possono scrivere subito)
+3. **T12 → T13 → T14** — modello e misura, ingestione, ridimensionamento
+4. **T15** — `.rnode.zip` per la condivisione
+5. **Misura contro XMind** con il tracer, e solo allora si rivaluta
+
+### Cosa ribalterebbe questa decisione
+
+Una condizione sola, ed è verificabile: un caso d'uso **moodboard** — ~200
+immagini grandi tutte visibili contemporaneamente a zoom 1, ognuna oltre i
+400px a schermo. Lì i livelli non aiutano, perché servono davvero molte
+immagini ad alta risoluzione insieme, e l'auto-bilanciamento di §7.3 cade.
+
+Se quel caso entra nei requisiti, **questa decisione va riaperta** e A2/B3
+tornano sul tavolo.
