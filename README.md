@@ -116,6 +116,7 @@ Documentation map:
 | [docs/ROADMAP.md](docs/ROADMAP.md) | the ordered task list, one task at a time |
 | [docs/RICH_TEXT_EDITOR.md](docs/RICH_TEXT_EDITOR.md) | how rich text is modelled, measured, drawn and edited |
 | [docs/ADR-001-immagini-e-piattaforma.md](docs/ADR-001-immagini-e-piattaforma.md) | decision record: where images live, the decode-memory budget, and the desktop platform choice (A1+B1) |
+| [docs/ELEMENTI_VISUALI.md](docs/ELEMENTI_VISUALI.md) | reference sheet: every modifiable visual element (theme, node, sheet, text), every GUI element, logo/branding assets |
 
 The code is split into clean, framework-free layers — only the UI uses React:
 

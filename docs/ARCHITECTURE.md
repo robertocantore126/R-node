@@ -23,8 +23,10 @@ Acceptance for Phase 1:
 - Maps stay readable as they grow (layout never overlaps).
 - Canvas and Outliner stay synchronized.
 - Saving is explicit (Ctrl+S) and nothing is silently lost: there is no
-  autosave timer. `saveNow()` writes through the storage adapter AND the
-  portable `.rnode.json`.
+  autosave timer. `saveNow()` writes through the storage adapter; on the web
+  it also writes a portable file (`.rnode.json`, or `.rnode.zip` when the map
+  has images — only if a file was chosen), on desktop the document IS the
+  single `.rnode` file.
 - The interface is original (no Xmind assets or pixel layouts).
 
 ## 2. Information architecture
@@ -37,9 +39,10 @@ Workspace (local-first, adapter-backed)
  │              ├── structure config (type, orientation, spacing…)
  │              ├── nodes (Record<id, MindNode>) — tree
  │              ├── relationships (independent of hierarchy)
- │              └── (boundaries, summaries, callouts, zones… Phase 3)
+ │              ├── boundaries (groups) and summaries — implemented
+ │              └── (callouts, zones… Phase 3)
  ├── Templates (sample roadmap template today)
- └── Assets (Phase 4+)
+ └── Assets (content-addressed store: IndexedDB on web, SQLite `.rnode` on desktop)
 ```
 
 ## 3. Component tree
@@ -60,10 +63,10 @@ App
 
 Engine modules (framework-free, all testable):
 ```
-core/      types (schema) · doc (model+walks) · ops (op system) · history (undo/redo) · tree
-layout/    mindmap.ts (measure, place, bounds)
-render/    viewport.ts (camera) · renderer.ts (canvas paint, hit-test, PNG export) · theme.ts
-editor/    store.ts (orchestration) · shortcuts.ts · context.ts · view.ts · exportBridge.ts
+core/      types (schema) · doc (model+walks) · ops (op system) · history (undo/redo) · tree · text (runs helpers)
+layout/    measure.ts (shared text measurement, constants) · mindmap.ts (placement, bounds)
+render/    viewport.ts (camera) · renderer.ts (canvas paint, hit-test, PNG export, image cache) · theme.ts
+editor/    store.ts (orchestration) · shortcuts.ts · context.ts · view.ts · exportBridge.ts · imageImport.ts (+ .worker) · externalImage.ts
 persist/   storage.ts (web: localStorage · desktop: one .rnode SQLite file) · assets.ts (AssetStore: IndexedDB on web, SQLite on desktop)
 ```
 
@@ -103,7 +106,12 @@ Pure functions in `src/layout/`:
   square, diamond/hexagon grow the box) and explicit overrides. Layout and paint
   use the SAME measurer and the SAME word-wrap, so they never disagree.
 - `mindmap.ts` — `subtreeHeight` (block height; collapsed subtrees count as
-  leaves) and `layoutSheet` (mindmap / logic / tree / org / timeline / freeform).
+  leaves) and `layoutSheet`. Of the nine `StructureType` values only three
+  have distinct behavior today: `mindmap` (radial, `placeMindmap`),
+  `freeform` (manual positions) and the generic hierarchical placer
+  (`placeHierarchical`, direction from `orientation`) that currently serves
+  logic/tree/org/timeline/fishbone/matrix/treetable — the dedicated layouts
+  for those are Phase 3.
 - `applyLayout` — writes positions back, never touching `manual` nodes unless
   forced. Layout is derived data, excluded from undo history.
 
@@ -134,12 +142,12 @@ upgrade path only if ADR-001 §12 is reopened (renderer is isolated behind
 
 ## 8. Import/export strategy
 
-Today: JSON (native `.rnode.json`), Markdown, PNG (canvas export) and
+Today: export JSON (`.rnode.json`), Markdown, PNG (canvas export) and
 `.rnode.zip` (document + images: complete = originals, compact = display
-levels only). Import: `.rnode.json` / `.rmind.json` / `.rnode.zip`, Markdown
-outline, clipboard paste of JSON subtrees, and sanitized rich text from
-Word / Google Docs / Draw.io. Phase 4+: SVG, PDF, DOCX, PPTX, OPML, FreeMind,
-MindManager, OCR, background workers.
+levels only). Import: `.rnode.json` / `.rmind.json` / `.rnode.zip`, and
+sanitized rich text from Word / Google Docs / Draw.io. Phase 4+: Markdown
+outline import, SVG, PDF, DOCX, PPTX, OPML, FreeMind, MindManager, OCR,
+background workers.
 
 ## 9. Security model (deferred, seams exist)
 

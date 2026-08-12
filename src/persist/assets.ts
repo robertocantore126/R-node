@@ -331,7 +331,11 @@ export class TauriAssetStore implements AssetStore {
    * file. Same per-asset iteration the zip exporter uses — a document saved
    * into a fresh file never points at ids that are not there.
    */
-  async adoptFile(newPath: string, ids: string[]): Promise<number> {
+  async adoptFile(
+    newPath: string,
+    ids: string[],
+    onProgress?: (phase: "read" | "write", done: number, total: number) => void
+  ): Promise<number> {
     // The reads below go through this.currentPath(), still the OLD file: the
     // switch happens only after every asset is copied. Only the BYTES matter
     // for the copy — w/h live in the meta JSON.
@@ -353,8 +357,10 @@ export class TauriAssetStore implements AssetStore {
         continue;
       }
       payloads.push({ id, meta, blobs: { original, large, small } });
+      onProgress?.("read", payloads.length + skipped, ids.length);
     }
     const invoke = this.invoke();
+    let written = 0;
     for (const { id, meta, blobs } of payloads) {
       for (const level of ["original", "large", "small"] as const) {
         const bytes = new Uint8Array(await blobs[level].arrayBuffer());
@@ -366,6 +372,7 @@ export class TauriAssetStore implements AssetStore {
         level: "meta",
         bytes: new TextEncoder().encode(JSON.stringify(meta)),
       });
+      onProgress?.("write", ++written, payloads.length);
     }
     this.path = newPath;
     this.defaultPath = null;

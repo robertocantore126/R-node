@@ -142,9 +142,50 @@ export class TauriStorageAdapter implements StorageAdapter {
   readonly label = "document file (rust)";
   private root: string | null = null;
 
+  /**
+   * Where the last opened document lived. Only a POINTER is kept here — the
+   * document itself stays in its `.rnode` file, so a wiped webview profile
+   * costs the user one File → Open, never their work.
+   *
+   * Without it `load()` returned nothing on every launch and the app reopened
+   * on the sample map, so the file you were working on had to be reopened by
+   * hand each session — and `rootTitleBase` stayed null, which silently
+   * disabled rename-on-save for the whole session.
+   */
+  private static readonly LAST_PATH_KEY = "rnode.lastDocumentPath";
+
+  constructor() {
+    try {
+      this.root = localStorage.getItem(TauriStorageAdapter.LAST_PATH_KEY);
+    } catch {
+      this.root = null; // private mode / storage disabled: start with no file
+    }
+  }
+
+  /**
+   * Forget the remembered file, so the next adapter starts as a fresh install.
+   *
+   * The pointer deliberately outlives the adapter instance — that is how the
+   * app reopens your document — which means anything wanting a clean slate has
+   * to say so out loud rather than assume a new instance is empty.
+   */
+  static forgetLastDocument(): void {
+    try {
+      localStorage.removeItem(TauriStorageAdapter.LAST_PATH_KEY);
+    } catch {
+      /* nothing to forget */
+    }
+  }
+
   /** The document file this adapter serves. Null = nothing chosen yet. */
   setRoot(path: string | null): void {
     this.root = path;
+    try {
+      if (path) localStorage.setItem(TauriStorageAdapter.LAST_PATH_KEY, path);
+      else localStorage.removeItem(TauriStorageAdapter.LAST_PATH_KEY);
+    } catch {
+      // Remembering is a convenience; failing to remember must not fail a save.
+    }
   }
 
   get hasRoot(): boolean {

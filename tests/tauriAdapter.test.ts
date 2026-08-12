@@ -19,6 +19,10 @@ function installTauri(impl: (cmd: string, args: InvokeArgs) => Promise<unknown>)
 
 afterEach(() => {
   delete (globalThis as unknown as { window?: unknown }).window;
+  // The adapter remembers the last document path ACROSS instances — that is
+  // how the app reopens your file after a restart. Without this, one test's
+  // saved path becomes the next test's starting state.
+  TauriStorageAdapter.forgetLastDocument();
   vi.restoreAllMocks();
 });
 
@@ -264,7 +268,7 @@ describe("desktop save flow", () => {
     // title as the suggested file name — the filesystem dialog already knows it.
     const pick = calls.find((c) => c.cmd === "pick_document_file");
     expect(pick?.args.mode).toBe("save");
-    expect(pick?.args.suggestedName).toBe("R-node_Roadmap");
+    expect(pick?.args.suggestedName).toBe("R-node — Roadmap");
   });
 
   it("save reports how many referenced images could not be copied", async () => {
@@ -284,7 +288,7 @@ describe("desktop save flow", () => {
     expect(store.getSnapshot().message).toMatch(/1 image could not be copied/);
   });
 
-  it("renaming the document renames the REAL file on the next save", async () => {
+  it("renaming in the GUI renames the real file immediately, without copying it", async () => {
     const calls = installTauri(async (cmd) => {
       if (cmd === "pick_document_file") return "C:/Docs/Old.rnode";
       if (cmd === "document_file_exists") return false;
@@ -294,24 +298,52 @@ describe("desktop save flow", () => {
     await store.init();
     await store.saveNow(); // first save -> C:/Docs/Old.rnode
     store.renameDocument(store.getSnapshot().activeDocId, "Vacation");
-    await store.saveNow();
+    await Promise.resolve(); // the rename is fired and not awaited by the caller
+    await Promise.resolve();
 
-    const writes = calls.filter((c) => c.cmd === "write_document");
-    // The second save wrote to the NEW name, not the old file.
-    expect(writes[writes.length - 1].args.path).toBe("C:/Docs/Vacation.rnode");
-    // The old file was removed only after the new one was written.
-    const removals = calls.filter((c) => c.cmd === "remove_document");
-    expect(removals).toHaveLength(1);
-    expect(removals[0].args.path).toBe("C:/Docs/Old.rnode");
-    const writeIdx = writes.findIndex((w) => w.args.path === "C:/Docs/Vacation.rnode");
-    const removeIdx = calls.findIndex((c) => c.cmd === "remove_document");
-    expect(writeIdx).toBeGreaterThan(-1);
-    expect(removeIdx).toBeGreaterThan(writeIdx); // remove comes after the write
-    // The rename did not re-ask where to save.
+    // The file moved on the rename itself. Waiting for a Ctrl+S that may never
+    // come is what left the GUI name and the name on disk disagreeing.
+    const renames = calls.filter((c) => c.cmd === "rename_document");
+    expect(renames).toHaveLength(1);
+    expect(renames[0].args).toMatchObject({ from: "C:/Docs/Old.rnode", to: "C:/Docs/Vacation.rnode" });
+    // A rename moves a directory entry: no asset is re-written and no file is
+    // deleted. The old flow copied every image into a new file and removed the
+    // old one, which cost as much as saving the whole map from scratch.
+    expect(calls.filter((c) => c.cmd === "put_asset")).toHaveLength(0);
+    expect(calls.filter((c) => c.cmd === "remove_document")).toHaveLength(0);
+    // And it did not re-ask where to save.
     expect(calls.filter((c) => c.cmd === "pick_document_file")).toHaveLength(1);
+
+    // The next save writes to the new path, with no further rename.
+    await store.saveNow();
+    const writes = calls.filter((c) => c.cmd === "write_document");
+    expect(writes[writes.length - 1].args.path).toBe("C:/Docs/Vacation.rnode");
+    expect(calls.filter((c) => c.cmd === "rename_document")).toHaveLength(1);
   });
 
-  it("opening a file whose title differs from its name does NOT rename it on save", async () => {
+  it("a name collision keeps the file and says so, without losing the typed title", async () => {
+    const calls = installTauri(async (cmd) => {
+      if (cmd === "pick_document_file") return "C:/Docs/Old.rnode";
+      if (cmd === "rename_document") throw new Error("a file already exists at C:/Docs/Taken.rnode");
+      return null;
+    });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    await store.saveNow();
+    store.renameDocument(store.getSnapshot().activeDocId, "Taken");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The title the user typed is kept — reverting what someone just wrote is
+    // worse than a mismatch they have been told about.
+    expect(store.getSnapshot().docs.find((d) => d.documentId === store.getSnapshot().activeDocId)?.title).toBe("Taken");
+    // …and the document still saves to the file it actually has.
+    await store.saveNow();
+    const writes = calls.filter((c) => c.cmd === "write_document");
+    expect(writes[writes.length - 1].args.path).toBe("C:/Docs/Old.rnode");
+  });
+
+  it("opening a file adopts its NAME as the title, and renames nothing", async () => {
     const doc = {
       documentId: "d1",
       title: "Internal Title",
@@ -327,10 +359,18 @@ describe("desktop save flow", () => {
     await store.init();
     await store.loadFile(); // open FileOnDisk.rnode (internal title: Internal Title)
     expect(store.getSnapshot().docs.length).toBe(2);
-    await store.saveNow();
 
+    // The name in the GUI is the name of the file you opened. Showing the
+    // stored "Internal Title" instead is what made the two disagree from the
+    // very first moment, before the user had touched anything.
+    const snap = store.getSnapshot();
+    expect(snap.docs.find((d) => d.documentId === snap.activeDocId)?.title).toBe("FileOnDisk");
+
+    await store.saveNow();
     const writes = calls.filter((c) => c.cmd === "write_document");
     expect(writes[writes.length - 1].args.path).toBe("C:/Docs/FileOnDisk.rnode");
+    // Adopting the name is a read-side decision: nothing on disk moves.
+    expect(calls.filter((c) => c.cmd === "rename_document")).toHaveLength(0);
     expect(calls.filter((c) => c.cmd === "remove_document")).toHaveLength(0);
   });
 

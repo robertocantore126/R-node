@@ -27,10 +27,20 @@ describe("portableFileKey", () => {
 
 describe("docFileBaseName", () => {
   it("makes a filesystem-safe name out of the GUI title", () => {
-    expect(docFileBaseName("Vacation Plan")).toBe("Vacation_Plan");
-    expect(docFileBaseName("R-node — Roadmap")).toBe("R-node_Roadmap");
-    expect(docFileBaseName("a:b*?c\"d<e>f|g")).toBe("a_b_c_d_e_f_g");
+    // Spaces and dashes SURVIVE. The old rule replaced everything outside
+    // [\w-], which was invisible while the file name was write-only; now that
+    // opening a file adopts its name as the title, "Vacation Plan" would come
+    // back as "Vacation_Plan" and degrade further on every save/open cycle.
+    expect(docFileBaseName("Vacation Plan")).toBe("Vacation Plan");
+    expect(docFileBaseName("R-node — Roadmap")).toBe("R-node — Roadmap");
+    // Only what the filesystem actually refuses is removed.
+    expect(docFileBaseName("a:b*?c\"d<e>f|g")).toBe("a b c d e f g");
     expect(docFileBaseName("")).toBe("Untitled map");
+    // Windows drops trailing dots and spaces silently, which would leave the
+    // title and the real file name disagreeing the moment they were bound.
+    expect(docFileBaseName("Report. ")).toBe("Report");
+    // CON, PRN, AUX… are device names: no file can carry them.
+    expect(docFileBaseName("con")).toBe("Untitled map");
   });
 });
 

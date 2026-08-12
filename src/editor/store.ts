@@ -60,8 +60,25 @@ export function portableFileKey(docId: string, format: PortableFormat): string {
  * save dialog is pre-filled with it and a later rename renames the file.
  */
 export function docFileBaseName(title: string): string {
-  const base = title.replace(/[^\w-]+/g, "_").trim();
-  return base || "Untitled map";
+  // Only the characters the filesystem actually refuses are removed. The rule
+  // used to replace everything outside [\w-], which turned "Mappa tesi" into
+  // "Mappa_tesi" — harmless while the file name was write-only, corrosive now
+  // that the GUI title and the file name are bound: the mangled form came back
+  // as the title on the next open, and every cycle degraded it further.
+  const base = title
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/, ""); // Windows silently drops trailing dots and spaces
+  // CON, PRN, AUX… are device names on Windows: a file cannot be called that.
+  if (!base || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) return "Untitled map";
+  return base.slice(0, 120); // leave room for the directory and ".rnode"
+}
+
+/** The title a `.rnode` path carries: "C:\maps\Mappa tesi.rnode" → "Mappa tesi". */
+export function titleFromDocPath(path: string): string {
+  const name = path.split(/[\\/]/).pop() ?? path;
+  return name.replace(/\.rnode$/i, "").trim() || "Untitled map";
 }
 
 /** Directory of a file path (with trailing separator), or "" when none. */
@@ -163,7 +180,6 @@ export class EditorStore {
    * baseline — a file opened with a different internal title is never
    * silently renamed on the first save. Null = no desktop root yet.
    */
-  private rootTitleBase: string | null = null;
   private fileHandles = new Map<string, FileSystemFileHandle>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
@@ -349,12 +365,23 @@ export class EditorStore {
     // bare "cannot open the document".
     let docs: RnodeDocument[] = [];
     let initError: string | null = null;
+    // Desktop: the adapter restored the path of the file open last session, so
+    // the asset store must be pointed at it BEFORE anything reads an image.
+    // Both roots always move together — that pairing is the T19 trap.
+    if (this.adapter instanceof TauriStorageAdapter && this.adapter.currentPath) {
+      const assetStore = getAssetStore();
+      if (assetStore instanceof TauriAssetStore) assetStore.setRoot(this.adapter.currentPath);
+    }
     try {
       docs = await this.adapter.load();
     } catch (e) {
       const err = e instanceof DocumentLoadError ? e : new DocumentLoadError("sqlite", e instanceof Error ? e.message : String(e));
       trace.error(`init:${err.kind}`, err.message);
       initError = documentLoadErrorLabel(err.kind);
+      // The remembered file is gone or unreadable (moved, deleted, on an
+      // unplugged drive). Forget it: leaving the pointer would make the next
+      // save recreate an empty document at a path the user no longer has.
+      if (this.adapter instanceof TauriStorageAdapter) this.adapter.setRoot(null);
     }
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
@@ -367,6 +394,12 @@ export class EditorStore {
     this.state = this.makeState();
     if (docs.length > 0) this.state.docs = docs;
     if (docs.length === 0) this.state.sync = "dirty";
+    // The file name is the document's name (the user's choice). Adopting it
+    // here is what makes the title in the GUI and the name on disk the same
+    // thing across a restart, instead of two values that drift apart.
+    if (docs.length > 0 && this.adapter instanceof TauriStorageAdapter && this.adapter.currentPath) {
+      this.adoptFileTitle(this.adapter.currentPath);
+    }
     if (initError) this.toast(`Could not open the saved document — ${initError}`);
     // Loading a document must respect positions explicitly placed by the
     // user. Forced layout is reserved for the explicit "Auto layout" command.
@@ -487,20 +520,30 @@ export class EditorStore {
         // "Save as…" that picks one, copies the referenced assets into it
         // and switches both the adapter and the asset store to it. Every
         // later save just rewrites the document row (T20).
-        if (!this.adapter.hasRoot) {
-          const ok = await this.saveAsDesktop();
-          if (!ok) {
-            this.state.sync = "dirty";
-            this.toast("Save cancelled — no file chosen");
-            return;
+        //
+        // The progress bar exists for BOTH platforms. It used to be raised
+        // only around the web zip, so on the desktop — the only place the app
+        // is really used — Ctrl+S showed nothing at all until the final toast,
+        // and a first save copying hundreds of images looked like a freeze.
+        this.beginLongOp("Saving document…", false);
+        try {
+          if (!this.adapter.hasRoot) {
+            const ok = await this.saveAsDesktop();
+            if (!ok) {
+              this.state.sync = "dirty";
+              this.toast("Save cancelled — no file chosen");
+              return;
+            }
+          } else {
+            // The GUI rename already renamed the file. This second call is the
+            // net under it: if that rename failed (collision, locked file), the
+            // save is the next chance to bring the two names back together.
+            await this.syncFileNameToTitle();
+            this.setOpProgress("Writing document…", 0.9);
+            await this.adapter.save([this.model.doc]);
           }
-        } else {
-          // A rename in the GUI becomes a rename of the REAL file: if the
-          // title moved away from the file's name, save writes the document
-          // under the new name (and drops the old file). Otherwise the file
-          // is just rewritten in place.
-          const renamedTo = await this.renameDesktopFile();
-          if (!renamedTo) await this.adapter.save([this.model.doc]);
+        } finally {
+          this.endLongOp();
         }
         this.state.sync = "saved";
         this.toast(
@@ -554,9 +597,24 @@ export class EditorStore {
     // are never re-written into the same store before the file exists. Its
     // return value counts the referenced assets that could not be copied
     // (missing from the source) — the final "Saved" toast reports them.
-    this.lastSaveSkipped = await assetStore.adoptFile(file, [...referencedAssetIds(this.sheet)]);
+    this.lastSaveSkipped = await assetStore.adoptFile(
+      file,
+      [...referencedAssetIds(this.sheet)],
+      // Copying the images IS the first save on a picture-heavy map: without
+      // this the bar would sit at zero for the whole of it.
+      (phase, done, total) => {
+        const base = phase === "read" ? 0.05 : 0.35;
+        const span = phase === "read" ? 0.3 : 0.55;
+        this.setOpProgress(
+          phase === "read" ? `Reading images… ${done}/${total}` : `Copying images… ${done}/${total}`,
+          base + (total > 0 ? (done / total) * span : span)
+        );
+      }
+    );
     this.adapter.setRoot(file);
-    this.rootTitleBase = docFileBaseName(this.model.doc.title);
+    // The chosen file's name becomes the document's name, so the title in the
+    // GUI matches what the user just typed into the save dialog.
+    this.adoptFileTitle(file);
     // The ACTIVE document is saved, not docs[0]: on desktop the sidebar may
     // still carry the never-saved sample, and saving it over the chosen file
     // would corrupt the document on disk.
@@ -565,47 +623,72 @@ export class EditorStore {
   }
 
   /**
-   * Desktop rename-on-save: when the GUI title moved away from the title the
-   * current file was opened/saved with, the REAL file is renamed to match
-   * (assets adopted into the new file first, old file removed only after the
-   * new one is fully written and the app switched to it). Returns the new
-   * file name, or null when nothing was renamed (then the caller saves to
-   * the current file as usual).
+   * Make the document wear its file's name.
+   *
+   * The title in the GUI and the name on disk are one value seen from two
+   * places, and the file is the side the user can see in Explorer — so on open
+   * the file wins. Nothing is written: this removes the case that started all
+   * of it, opening `progetto.rnode` and being shown "Untitled map".
    */
-  private async renameDesktopFile(): Promise<string | null> {
-    if (!(this.adapter instanceof TauriStorageAdapter)) return null;
+  private adoptFileTitle(path: string): void {
+    const title = titleFromDocPath(path);
+    this.model.doc.title = title;
+    const entry = this.state.docs.find((d) => d.documentId === this.model.doc.documentId);
+    if (entry) entry.title = title;
+  }
+
+  /**
+   * Rename the real file to match the title the user just confirmed.
+   *
+   * It runs on the rename itself, not at the next save: two names are not
+   * "linked" if they agree only after a Ctrl+S the user might never press.
+   *
+   * This replaces a rename that copied every asset into a fresh file through
+   * the IPC and then deleted the old one — work proportional to the images, so
+   * renaming a map full of pictures cost as much as saving it from scratch.
+   * `rename_document` moves a directory entry instead: same cost at 1MB and at
+   * 1GB. The asset store is switched with the adapter, never after: they read
+   * the same file and a gap between them is the T19 trap.
+   *
+   * On a name collision the file keeps its name and the toast says so. The
+   * typed title is deliberately left alone — silently reverting what someone
+   * just wrote is worse than a mismatch they have been told about.
+   */
+  private renameChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Renames run one at a time, in order.
+   *
+   * Rename in the GUI and press Ctrl+S straight away and two renames overlap:
+   * the second still reads the OLD path, tries a move whose source has already
+   * gone, and reports failure for an operation that in fact succeeded. Queueing
+   * makes the save observe the path the rename just installed.
+   */
+  private syncFileNameToTitle(): Promise<void> {
+    this.renameChain = this.renameChain.then(() => this.renameFileToTitleOnce());
+    return this.renameChain;
+  }
+
+  private async renameFileToTitleOnce(): Promise<void> {
+    if (!(this.adapter instanceof TauriStorageAdapter)) return;
     const current = this.adapter.currentPath;
-    if (!current || this.rootTitleBase === null) return null;
+    if (!current) return; // never saved: the first "Save as…" chooses the name
+    if (typeof window === "undefined" || !window.__TAURI__) return;
     const base = docFileBaseName(this.model.doc.title);
-    if (base === this.rootTitleBase) return null; // title did not change
     const target = pathDirname(current) + base + ".rnode";
-    if (target.toLowerCase() === current.toLowerCase()) return null; // same file
-    const assetStore = getAssetStore();
-    if (!(assetStore instanceof TauriAssetStore) || typeof window === "undefined" || !window.__TAURI__) {
-      return null;
-    }
+    if (target.toLowerCase() === current.toLowerCase()) return;
     try {
-      const exists = (await window.__TAURI__.core.invoke("document_file_exists", { path: target })) as boolean;
-      if (exists) {
-        this.toast(`A file named "${base}.rnode" already exists — saved to the current file`);
-        return null;
-      }
-      // Same order as save-as: read from the old file, write into the new,
-      // only then switch. The old file is removed last, so a failure mid-way
-      // leaves the document intact at its previous path.
-      this.lastSaveSkipped = await assetStore.adoptFile(target, [...referencedAssetIds(this.sheet)]);
-      this.adapter.setRoot(target);
-      this.rootTitleBase = base;
-      await this.adapter.save([this.model.doc]);
-      await window.__TAURI__.core.invoke("remove_document", { path: current }).catch((e) => {
-        console.warn("remove_document failed", e); // best-effort: the new file is already saved
-      });
-      return `${base}.rnode`;
+      await window.__TAURI__.core.invoke("rename_document", { from: current, to: target });
     } catch (e) {
-      this.toast("Rename failed — saved to the current file");
-      console.warn("renameDesktopFile failed", e);
-      return null;
+      trace.error("rename", String(e));
+      this.toast(`Could not rename the file to "${base}.rnode" — it is still "${titleFromDocPath(current)}.rnode"`);
+      return;
     }
+    this.adapter.setRoot(target);
+    const assetStore = getAssetStore();
+    if (assetStore instanceof TauriAssetStore) assetStore.setRoot(target);
+    this.toast(`Renamed to "${base}.rnode"`);
+    this.notify();
   }
 
   /**
@@ -637,11 +720,10 @@ export class EditorStore {
     assetStore.setRoot(file);
     this.adapter.setRoot(file);
     this.importDocumentFromJson(JSON.stringify(doc));
-    // Baseline for rename-on-save: the OPENED document's own title. Opening a
-    // file whose internal title differs from its file name must never rename
-    // the file on the first save — only a later GUI rename does.
-    this.rootTitleBase = docFileBaseName(doc.title);
-    this.toast("Opened document file");
+    // The file's name IS the document's name from here on. Nothing is renamed
+    // on disk — the title simply stops disagreeing with the file it came from.
+    this.adoptFileTitle(file);
+    this.toast(`Opened "${titleFromDocPath(file)}"`);
     return true;
   }
 
@@ -2809,7 +2891,13 @@ export class EditorStore {
     // The active document's model is what gets saved (and what the desktop
     // rename-on-save detection reads): keep the two titles in sync so the
     // GUI name becomes the real file's name.
-    if (this.state.activeDocId === id) this.model.doc.title = title;
+    if (this.state.activeDocId === id) {
+      this.model.doc.title = title;
+      // Desktop: the file on disk takes the new name NOW, not at the next
+      // save. Fire-and-forget — the rename reports its own outcome and must
+      // not make renaming in the GUI feel like a blocking operation.
+      void this.syncFileNameToTitle();
+    }
     this.state.sync = "dirty";
     this.notify();
   }

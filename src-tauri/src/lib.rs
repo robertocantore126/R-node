@@ -232,6 +232,29 @@ fn document_file_exists(path: String) -> Result<bool, String> {
     Ok(Path::new(&path).is_file())
 }
 
+/// Rename the `.rnode` file in place.
+///
+/// This replaces a rename that copied every asset into a new file through the
+/// IPC and then deleted the old one — work proportional to the images, so
+/// renaming a map carrying hundreds of megabytes of pictures took as long as
+/// saving it from scratch. `fs::rename` moves a directory entry: it is atomic
+/// on the same volume and does not touch a single byte of content, which is
+/// all a rename ever needed to be.
+///
+/// Refuses to overwrite an existing file. The check is not a guarantee against
+/// a racing process — it is the same check the caller shows in the GUI, kept
+/// here so the backend never silently destroys a document either way.
+#[tauri::command]
+fn rename_document(from: String, to: String) -> Result<(), String> {
+    if from == to {
+        return Ok(());
+    }
+    if Path::new(&to).exists() {
+        return Err(format!("a file already exists at {to}"));
+    }
+    fs::rename(&from, &to).map_err(|e| format!("cannot rename {from} to {to}: {e}"))
+}
+
 /// Read the document JSON from `<path>`, or None when the file is missing or
 /// is not an R-node document. Never creates the file.
 #[tauri::command]
@@ -407,7 +430,8 @@ pub fn run() {
             read_document,
             write_document,
             remove_document,
-            document_file_exists
+            document_file_exists,
+            rename_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running r-node");
