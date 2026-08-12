@@ -18,19 +18,27 @@ type WorkerScope = {
 const scope = self as unknown as WorkerScope;
 
 function hex(buffer: ArrayBuffer): string {
-  return Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(buffer), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 /** Level blobs are PNG when the source can carry alpha, JPEG otherwise. */
 function levelMime(sourceMime: string): string {
-  return sourceMime === "image/png" || sourceMime === "image/webp" || sourceMime === "image/gif"
+  return sourceMime === "image/png" ||
+    sourceMime === "image/webp" ||
+    sourceMime === "image/gif"
     ? "image/png"
     : "image/jpeg";
 }
 
 scope.onmessage = (e: MessageEvent) => {
   void (async () => {
-    const { blob, mime, name } = e.data as { blob: Blob; mime: string; name?: string };
+    const { blob, mime, name } = e.data as {
+      blob: Blob;
+      mime: string;
+      name?: string;
+    };
     try {
       // Content address: SHA-256 of the ORIGINAL bytes — the same image
       // attached to N nodes occupies space exactly once.
@@ -41,41 +49,67 @@ scope.onmessage = (e: MessageEvent) => {
       const source = await createImageBitmap(blob);
       const srcW = source.width;
       const srcH = source.height;
-      const levels = {
-        original: { blob, w: srcW, h: srcH },
-      } as Record<"original" | "large" | "small", { blob: Blob; w: number; h: number }>;
+      try {
+        const levels = {
+          original: { blob, w: srcW, h: srcH },
+        } as Record<
+          "original" | "large" | "small",
+          { blob: Blob; w: number; h: number }
+        >;
 
-      const outMime = levelMime(mime);
-      for (const [key, targetLong] of [
-        ["large", 1024],
-        ["small", 256],
-      ] as const) {
-        const scale = targetLong / Math.max(srcW, srcH);
-        if (scale >= 1) {
-          // Already smaller than the target: the original IS the level.
-          levels[key] = { blob, w: srcW, h: srcH };
-          continue;
+        const outMime = levelMime(mime);
+        for (const [key, targetLong] of [
+          ["large", 1024],
+          ["small", 256],
+        ] as const) {
+          const scale = targetLong / Math.max(srcW, srcH);
+          if (scale >= 1) {
+            // Already smaller than the target: the original IS the level.
+            levels[key] = { blob, w: srcW, h: srcH };
+            continue;
+          }
+          const w = Math.max(1, Math.round(srcW * scale));
+          const h = Math.max(1, Math.round(srcH * scale));
+          const canvas = new OffscreenCanvas(w, h);
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("offscreen 2d context unavailable");
+          ctx.drawImage(source, 0, 0, w, h);
+          levels[key] = {
+            blob: await canvas.convertToBlob({ type: outMime, quality: 0.85 }),
+            w,
+            h,
+          };
         }
-        const w = Math.max(1, Math.round(srcW * scale));
-        const h = Math.max(1, Math.round(srcH * scale));
-        const canvas = new OffscreenCanvas(w, h);
-        const ctx = canvas.getContext("2d");
-        if (!ctx) throw new Error("offscreen 2d context unavailable");
-        ctx.drawImage(source, 0, 0, w, h);
-        levels[key] = { blob: await canvas.convertToBlob({ type: outMime, quality: 0.85 }), w, h };
-      }
-      source.close();
 
-      scope.postMessage({
-        ok: true,
-        result: {
-          id,
-          levels,
-          meta: { mime, w: srcW, h: srcH, bytes: originalBytes.byteLength, name },
-        },
-      });
+        scope.postMessage({
+          ok: true,
+          result: {
+            id,
+            levels,
+            meta: {
+              mime,
+              w: srcW,
+              h: srcH,
+              bytes: originalBytes.byteLength,
+              name,
+            },
+          },
+        });
+      } finally {
+        // ALWAYS: an ImageBitmap is not JS heap and the GC will not reclaim it
+        // on its own. Before, a throw between here and the end — a null 2d
+        // context, a failed drawImage or convertToBlob — skipped this and left
+        // a FULL-SIZE decode (tens of MB for a 12MP original) allocated. The
+        // wrapper terminates the worker on error, which frees it anyway, but
+        // that safety net is an accident of the one-worker-per-import design
+        // rather than something this file guarantees.
+        source.close();
+      }
     } catch (err) {
-      scope.postMessage({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      scope.postMessage({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   })();
 };
