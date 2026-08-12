@@ -332,3 +332,80 @@ griglia fitta.
 byte crescono di circa 4×: il picco stimato diventa **~70 MB**, ancora sotto il
 budget ma con margine 1,8× invece di 7×. **Da rimisurare su un monitor a dpr 2**
 prima di considerare chiusa la questione.
+
+---
+
+## 6. Passo 13 — T18: chiudere i difetti emersi dalla revisione
+
+Tre punti trovati rivedendo i passi 10 e 12. **A va chiuso prima che qualcuno
+salvi lavoro vero.**
+
+**File**: `src/editor/store.ts` · `src/editor/exportBridge.ts` ·
+`src/core/types.ts` · `src/persist/assets.ts` · `src/render/renderer.ts` ·
+`src/ui/RichEditor.tsx` · i rispettivi test.
+
+### A — il salvataggio può scrivere uno zip dentro un `.rnode.json`
+
+`writePortableBytes` riusa la maniglia di file memorizzata e la chiave è **solo
+il `docId`**. Quindi: salvi come `mappa.rnode.json`, alleghi un'immagine, premi
+Ctrl+S, e `hasImages` fa scrivere **byte di zip dentro il file `.json`**, in
+silenzio, sulla stessa maniglia. Vale anche al contrario.
+
+R-node lo riapre lo stesso (sniffa i magic bytes `PK\x03\x04` — quella parte è
+giusta e va tenuta), ma il file mente al sistema operativo, alle cartelle
+sincronizzate e a chiunque lo riceva.
+
+- [ ] la chiave della maniglia diventa `${docId}:${format}` con
+      `format = "json" | "zip"`, **sia** nella mappa in memoria **sia** in
+      IndexedDB;
+- [ ] estrai la derivazione della chiave in una funzione pura e testala;
+- [ ] quando per il formato richiesto non c'è maniglia, si apre il selettore
+      (comportamento già esistente) **con un toast che spiega perché**, es.
+      «Il documento ora contiene immagini: scegli dove salvare il .rnode.zip»;
+- [ ] non cancellare la vecchia maniglia dell'altro formato: se le immagini
+      vengono rimosse, il salvataggio torna al file originale.
+
+### B — dopo un round-trip compact l'originale è perso e nulla lo dice
+
+Un export `compact` non porta gli originali: all'import il livello 1024px
+diventa anche `original`. È corretto e voluto. Il problema è che **niente lo
+segna**, quindi un successivo export `complete` produce un file che dichiara di
+contenere gli originali e contiene ridimensionamenti.
+
+- [ ] `AttachmentInfo.originalLost?: boolean`, impostato all'import di un
+      container `compact`;
+- [ ] `buildRnodeZip(..., "complete")` rileva gli asset con quel flag: lo
+      registra nel `manifest.json` (es. `degraded: true`) **e** avvisa
+      l'utente prima di generare;
+- [ ] l'avviso deve dire quanti asset sono coinvolti, non solo che ce ne sono.
+
+### C — l'invariante dell'indirizzamento per contenuto ora ha un'eccezione
+
+`putUnderId` è necessario (un container compact non porta l'originale, quindi
+l'id non può essere ri-derivato) ma rompe `id === sha256(original)`.
+
+- [ ] scrivilo accanto a `putUnderId` in `assets.ts`;
+- [ ] aggiungilo agli invarianti in `AGENT_GUIDE.md` §2: l'id è lo SHA-256
+      dell'originale **tranne** per gli asset ripristinati da un container
+      compact, che portano `originalLost`.
+
+### D — la factory si fissa troppo presto
+
+`getAssetStore()` è chiamato **a livello di modulo** in `renderer.ts:48` e
+`RichEditor.tsx:166`. Il singleton si fissa alla prima chiamata: se
+l'inizializzazione dei moduli girasse prima che Tauri inietti
+`window.__TAURI__`, resterebbe su IndexedDB per sempre. Empiricamente funziona,
+ma dipende da un ordine che non controlliamo.
+
+- [ ] chiama `getAssetStore()` **al momento dell'uso**, non allo scope di
+      modulo (nel `Renderer` basta spostarlo nel costruttore).
+
+### Fatto quando
+
+- Un test sulla derivazione della chiave: stesso `docId` e formati diversi →
+  chiavi diverse.
+- Un test: importare un container compact marca gli asset con `originalLost`;
+  costruirne uno `complete` da un documento che li contiene lo registra nel
+  manifest.
+- Nessuna chiamata a `getAssetStore()` allo scope di modulo.
+- G-tsc, G-test verdi.
