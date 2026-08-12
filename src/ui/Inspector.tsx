@@ -3,6 +3,7 @@ import { useStore } from "../editor/context";
 import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
 import { makeOp, type Op } from "../core/ops";
 import { plainToRuns } from "../core/text";
+import { MAX_IMAGE_W } from "../layout/measure";
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
@@ -122,6 +123,40 @@ export function Inspector(): JSX.Element {
             Auto
           </button>
         </div>
+        {node.style.image && (() => {
+          const att = store.sheet.attachments.find((a) => a.id === node.style.image);
+          if (!att) return null;
+          const natural = Math.min(att.w, MAX_IMAGE_W);
+          const value = node.style.imageWidth ?? natural;
+          const imgH = Math.round((value * att.h) / att.w);
+          return (
+            <div className="field">
+              <span>Image size</span>
+              <input
+                type="range"
+                min={48}
+                max={640}
+                step={5}
+                value={value}
+                onChange={(e) => store.setImageResizeDraft(node.id, Number(e.target.value))}
+                onPointerUp={() => store.commitImageResize()}
+                onKeyUp={() => store.commitImageResize()}
+                onBlur={() => store.commitImageResize()}
+                title="Display width — the height keeps the aspect ratio; one undo undoes the whole drag"
+              />
+              <span className="muted">
+                {value}×{imgH}px
+              </span>
+              <button
+                className="btn small"
+                title="Back to the natural display size"
+                onClick={() => store.resetImageWidth(node.id)}
+              >
+                Natural
+              </button>
+            </div>
+          );
+        })()}
         <div className="field">
           <span>Bold</span>
           <input type="checkbox" checked={(node.style.fontWeight ?? 400) >= 600} onChange={(e) => store.setNodeStyle(node.id, { fontWeight: e.target.checked ? 600 : 400 })} />

@@ -5,7 +5,7 @@ import { setExportPngHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer, MIN_TOPIC_W } from "../layout/measure";
+import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import type { MindNode } from "../core/types";
 import { RichEditor } from "./RichEditor";
@@ -36,6 +36,10 @@ interface DragState {
   resizeStartWorldX: number;
   resizeStartWidth: number;
   resizeStartX: number;
+  /** Image resize (T14): dragging the image corner handle. */
+  imgResizing: string | null;
+  imgResizeStartWorldX: number;
+  imgResizeStartWidth: number;
   /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
   marqueeStartX: number | null;
   marqueeStartY: number | null;
@@ -72,6 +76,9 @@ export function CanvasView(): JSX.Element {
     resizeStartWorldX: 0,
     resizeStartWidth: 0,
     resizeStartX: 0,
+    imgResizing: null,
+    imgResizeStartWorldX: 0,
+    imgResizeStartWidth: 0,
     marqueeStartX: null,
     marqueeStartY: null,
     marqueeActive: false,
@@ -86,6 +93,7 @@ export function CanvasView(): JSX.Element {
   const [panning, setPanning] = useState(false);
   const [resizing, setResizing] = useState(false);
   const [resizeHover, setResizeHover] = useState(false);
+  const [imgResizeHover, setImgResizeHover] = useState(false);
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
 
   const paint = useCallback(() => {
@@ -261,6 +269,23 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
 
+    // Image resize (T14): grab the corner handle on the node's image. Same
+    // precedence as the width handle — before the body hit test.
+    const imgResizeHit = s.relFrom ? null : renderer.hitTestImageResize(rs, world.x, world.y);
+    if (imgResizeHit) {
+      const n = store.doc.node(imgResizeHit)!;
+      const att = n.style.image ? store.sheet.attachments.find((a) => a.id === n.style.image) : undefined;
+      drag.imgResizing = imgResizeHit;
+      drag.imgResizeStartWorldX = world.x;
+      // imageWidth may be unset — resolve the natural width like the renderer.
+      drag.imgResizeStartWidth = n.style.imageWidth ?? (att ? Math.min(att.w, MAX_IMAGE_W) : 0);
+      store.beginImageResize(imgResizeHit);
+      store.select(imgResizeHit, { additive: false });
+      setResizing(true);
+      setResizeHover(false);
+      return;
+    }
+
     // Xmind-style width resize: grab the handle on the selected node's edge.
     // Checked BEFORE the body hit test so the handle wins on the edge line
     // (skipped while a relationship target is being picked).
@@ -338,6 +363,14 @@ export function CanvasView(): JSX.Element {
     drag.lastX = x;
     drag.lastY = y;
 
+    if (drag.imgResizing) {
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const dx = world.x - drag.imgResizeStartWorldX;
+      store.setImageResizeDraft(drag.imgResizing, drag.imgResizeStartWidth + dx);
+      drag.moved = true;
+      return;
+    }
     if (drag.resizing) {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
@@ -389,8 +422,10 @@ export function CanvasView(): JSX.Element {
       const renderer = rendererRef.current;
       const rs = currentRenderState();
       const rh = renderer?.hitTestResize(rs, w.x, w.y) ?? null;
+      const ih = renderer?.hitTestImageResize(rs, w.x, w.y) ?? null;
       setResizeHover(!!rh);
-      store.setHover(rh ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
+      setImgResizeHover(!!ih);
+      store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
     }
     if (!drag.dragging) return;
     if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
@@ -436,6 +471,13 @@ export function CanvasView(): JSX.Element {
       drag.marqueeStartX = null;
       drag.marqueeStartY = null;
       setMarquee(null);
+      return;
+    }
+    if (drag.imgResizing) {
+      store.commitImageResize();
+      drag.imgResizing = null;
+      drag.moved = false;
+      setResizing(false);
       return;
     }
     if (drag.resizing) {
@@ -613,7 +655,16 @@ export function CanvasView(): JSX.Element {
         ref={canvasRef}
         className="canvas"
         style={{
-          cursor: resizing || resizeHover ? "ew-resize" : panning ? "grabbing" : state.mode === "pan" ? "grab" : "default",
+          cursor:
+            imgResizeHover || dragRef.current.imgResizing
+              ? "nwse-resize"
+              : resizing || resizeHover
+                ? "ew-resize"
+                : panning
+                  ? "grabbing"
+                  : state.mode === "pan"
+                    ? "grab"
+                    : "default",
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -621,6 +672,7 @@ export function CanvasView(): JSX.Element {
         onPointerLeave={() => {
           store.setHover(null);
           setResizeHover(false);
+          setImgResizeHover(false);
         }}
         onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}

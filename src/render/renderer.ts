@@ -449,6 +449,21 @@ export class Renderer {
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
+
+      // Image resize handle (T14): bottom-right corner of the image, same
+      // outline style as the width handles. Same rect as imageWorldRect.
+      const ir = this.imageWorldRect(state, n.id);
+      if (ir) {
+        const hx = ir.x + ir.w - hs / 2;
+        const hy = ir.y + ir.h - hs / 2;
+        this.roundRect(ctx, hx, hy, hs, hs, 2);
+        ctx.strokeStyle = theme.background;
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
     }
     if (state.hoverId === n.id && !selected) {
       ctx.strokeStyle = theme.selection;
@@ -1015,6 +1030,38 @@ export class Renderer {
    * Returns { id, side } or null. Checked before the body hit test so the
    * handles win even where they overlap the node edge.
    */
+  /**
+   * Hit test for the image resize handle (T14): a small square on the
+   * bottom-right corner of the node's image, same grab-box style as
+   * hitTestResize. Only when the node has an image and is selected.
+   */
+  hitTestImageResize(state: RenderState, worldX: number, worldY: number): string | null {
+    const hs = 12;
+    for (const id of state.selection) {
+      if (state.editingId === id) continue;
+      const rect = this.imageWorldRect(state, id);
+      if (!rect) continue;
+      const hx = rect.x + rect.w - hs / 2;
+      const hy = rect.y + rect.h - hs / 2;
+      if (worldX >= hx && worldX <= hx + hs && worldY >= hy && worldY <= hy + hs) return id;
+    }
+    return null;
+  }
+
+  /** World-space rect of the node's image (same formula as drawImage), or null. */
+  imageWorldRect(state: RenderState, id: string): { x: number; y: number; w: number; h: number } | null {
+    const p = this.placedNodes(state).find((p) => p.node.id === id);
+    if (!p) return null;
+    const n = p.node;
+    const imageId = n.style.image;
+    if (!imageId || !this.resolveImage) return null;
+    const att = this.resolveImage(imageId);
+    if (!att || att.w <= 0) return null;
+    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    const imgH = (imgW * att.h) / att.w;
+    return { x: p.x + (p.w - imgW) / 2, y: p.y + (n.style.padding ?? 10), w: imgW, h: imgH };
+  }
+
   hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {
     const hs = 12; // grab box slightly larger than the drawn 9px handle
     for (const id of state.selection) {

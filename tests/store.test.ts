@@ -426,6 +426,55 @@ describe("canvas resize drag", () => {
     expect(store.doc.node(main.id)!.style.width).toBeUndefined();
   });
 
+  it("commits an image width drag as ONE setStyle op with exact undo", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = store.sheet.rootNodeId;
+    const before = { ...store.doc.node(id)!.style };
+
+    store.beginImageResize(id);
+    store.setImageResizeDraft(id, 200);
+    store.setImageResizeDraft(id, 180);
+    expect(store.doc.node(id)!.style.imageWidth).toBe(180);
+    store.commitImageResize();
+
+    const node = store.doc.node(id)!;
+    expect(node.style.imageWidth).toBe(180);
+
+    store.undo();
+    expect(store.doc.node(id)!.style).toEqual(before);
+  });
+
+  it("clamps the image width to 48px minimum and no-ops on a click without drag", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = store.sheet.rootNodeId;
+    store.beginImageResize(id);
+    store.setImageResizeDraft(id, 10); // below the 48 floor
+    expect(store.doc.node(id)!.style.imageWidth).toBe(48);
+    store.commitImageResize();
+    expect(store.doc.node(id)!.style.imageWidth).toBe(48);
+
+    // pointer-down/up with no move must not create an op
+    const before = { ...store.doc.node(id)!.style };
+    store.beginImageResize(id);
+    store.commitImageResize();
+    expect(store.doc.node(id)!.style).toEqual(before);
+  });
+
+  it("resetImageWidth removes the custom width in one undoable op", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = store.sheet.rootNodeId;
+    store.beginImageResize(id);
+    store.setImageResizeDraft(id, 220);
+    store.commitImageResize();
+    expect(store.doc.node(id)!.style.imageWidth).toBe(220);
+
+    store.resetImageWidth(id);
+    expect(store.doc.node(id)!.style.imageWidth).toBeUndefined();
+
+    store.undo();
+    expect(store.doc.node(id)!.style.imageWidth).toBe(220);
+  });
+
   it("dragging a subtopic onto empty canvas does not pin an absolute position", () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();

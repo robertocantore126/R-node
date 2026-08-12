@@ -128,6 +128,7 @@ export class EditorStore {
    * the exact pre-drag state.
    */
   private resizeState: { nodeId: string; original: Style; origPos: Position } | null = null;
+  private imageResizeState: { nodeId: string; original: Style } | null = null;
   /** Canvas-backed measurer: layout and renderer agree on every topic size. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
 
@@ -1416,6 +1417,66 @@ export class EditorStore {
       this.scheduleLayout(false);
       this.notify();
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Image resize (T14) — same draft pattern as the width drag: live width is
+  // an ephemeral mutation (no op), one setStyle op commits the whole gesture.
+  // -------------------------------------------------------------------------
+
+  /** A resize drag on the image handle: capture the pre-drag style. */
+  beginImageResize(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    this.imageResizeState = { nodeId, original: { ...node.style } };
+  }
+
+  /** Live image width during the drag/slider: ephemeral, no op, no history. */
+  setImageResizeDraft(nodeId: string, width: number): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const w = Math.max(48, Math.round(width));
+    node.style = { ...node.style, imageWidth: w };
+    this.scheduleLayout(false);
+    this.notify();
+  }
+
+  /** End of the gesture: one batch op; undo restores the pre-drag width. */
+  commitImageResize(): void {
+    const r = this.imageResizeState;
+    this.imageResizeState = null;
+    if (!r) return;
+    const node = this.model.node(r.nodeId);
+    if (!node) return;
+    const w = node.style.imageWidth;
+    if (w !== undefined && w !== r.original.imageWidth) {
+      this.execOps([
+        makeOp<Op & { type: "setStyle" }>("setStyle", {
+          id: r.nodeId,
+          style: { ...node.style, imageWidth: w },
+          prev: r.original,
+        }),
+      ]);
+    } else {
+      // click without a real change — restore, no op
+      node.style = r.original;
+      this.scheduleLayout(false);
+      this.notify();
+    }
+  }
+
+  /** Remove the custom imageWidth (back to the natural display size). */
+  resetImageWidth(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    if (node.style.imageWidth === undefined) return;
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: nodeId,
+        style: { ...node.style, imageWidth: undefined },
+        prev: node.style,
+      }),
+    ]);
   }
 
   setBranchFreePosition(id: string, enabled: boolean): void {
