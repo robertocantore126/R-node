@@ -84,6 +84,31 @@ function StatusBar(): JSX.Element {
       <span>{state.selection.length > 0 ? `${state.selection.length} selected` : `${store.doc.visibleNodeCount} topics`}</span>
       <span className="sep">·</span>
       <span className={state.sync}>{state.sync === "saved" ? "Saved" : "Unsaved changes"}</span>
+      {state.op && (
+        <>
+          <span className="sep">·</span>
+          <span className="statusbar-op">
+            <span className="statusbar-op-label">{state.op.label}</span>
+            <span
+              className={`statusbar-op-track${state.op.progress == null ? " indeterminate" : ""}`}
+            >
+              <span
+                className="statusbar-op-fill"
+                style={state.op.progress == null ? undefined : { width: `${Math.round(state.op.progress * 100)}%` }}
+              />
+            </span>
+            {state.op.cancellable && (
+              <button
+                className="btn small"
+                title="Cancel the running operation"
+                onClick={() => store.cancelLongOp()}
+              >
+                Cancel
+              </button>
+            )}
+          </span>
+        </>
+      )}
       <span className="spacer" />
       {state.relFrom && <span className="status-hint">Link mode: click a target</span>}
       <span className="sep">·</span>

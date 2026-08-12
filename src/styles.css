@@ -391,6 +391,50 @@ textarea:focus {
   font-weight: 600;
 }
 
+/* Heavy-operation feedback: a progress bar with a cancel button, shown while
+   a save with images builds the .rnode.zip (store.state.op). */
+.statusbar-op {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.statusbar-op-label {
+  white-space: nowrap;
+}
+
+.statusbar-op-track {
+  position: relative;
+  width: 120px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.statusbar-op-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+.statusbar-op-track.indeterminate .statusbar-op-fill {
+  width: 40%;
+  animation: statusbar-op-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes statusbar-op-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(310%);
+  }
+}
+
 /* ---------- Inspector ---------- */
 
 .inspector {

@@ -191,6 +191,68 @@ describe(".rnode.zip export", () => {
   });
 });
 
+describe(".rnode.zip progress and cancellation hooks", () => {
+  it("reports monotonic progress through read and compress, ending at 1", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+    const id = await putTestAsset(store);
+    const doc = makeDocWithImage(id);
+
+    const seen: { phase: string; fraction: number }[] = [];
+    await buildRnodeZip(doc, doc.sheets[0], store, "complete", {
+      onProgress: (phase, fraction) => seen.push({ phase, fraction }),
+    });
+
+    const reads = seen.filter((s) => s.phase === "read");
+    const compresses = seen.filter((s) => s.phase === "compress");
+    expect(reads.length).toBeGreaterThan(0); // one report per referenced asset
+    expect(compresses.length).toBeGreaterThan(0); // one report per zip entry
+    expect(compresses[compresses.length - 1].fraction).toBe(1);
+    for (let i = 1; i < reads.length; i++) {
+      expect(reads[i].fraction).toBeGreaterThanOrEqual(reads[i - 1].fraction);
+    }
+    for (let i = 1; i < compresses.length; i++) {
+      expect(compresses[i].fraction).toBeGreaterThanOrEqual(compresses[i - 1].fraction);
+    }
+  });
+
+  it("rejects with AbortError when the signal is already aborted", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+    const id = await putTestAsset(store);
+    const doc = makeDocWithImage(id);
+    const ac = new AbortController();
+    ac.abort();
+
+    await expect(
+      buildRnodeZip(doc, doc.sheets[0], store, "complete", { signal: ac.signal })
+    ).rejects.toMatchObject({ name: "AbortError" });
+    await expect(
+      estimateRnodeZip(doc, doc.sheets[0], store, "complete", { signal: ac.signal })
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("rejects with AbortError when cancelled mid-operation", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+    const id = await putTestAsset(store);
+    const doc = makeDocWithImage(id);
+    const ac = new AbortController();
+    let cancelled = false;
+
+    const promise = buildRnodeZip(doc, doc.sheets[0], store, "complete", {
+      signal: ac.signal,
+      onProgress: () => {
+        // Cancel right after the first progress report: the NEXT asset/entry
+        // boundary must observe the signal and stop.
+        if (!cancelled) {
+          cancelled = true;
+          ac.abort();
+        }
+      },
+    });
+    await expect(promise).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelled).toBe(true);
+  });
+});
+
 describe(".rnode.zip import", () => {
   it("round-trips into a fresh store: export, wipe, import restores the asset under the same id", async () => {
     const source = new IndexedDbAssetStore(uniqueDb());

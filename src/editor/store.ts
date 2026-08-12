@@ -21,7 +21,7 @@ import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore } from "../persist/assets";
-import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
+import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode, type ZipPhase } from "./exportBridge";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
 
 declare global {
@@ -129,6 +129,15 @@ export interface EditorState {
   /** The node whose IMAGE is selected (image selection is exclusive: the
    *  node itself is not in `selection` then). Null = no image selected. */
   imageSel: string | null;
+  /** Heavy operation in flight (a save with images, which builds the
+   *  .rnode.zip). The status bar shows a progress bar with a cancel button;
+   *  null = nothing heavy running. progress is 0..1, null = indeterminate. */
+  op: {
+    kind: "save";
+    label: string;
+    progress: number | null;
+    cancellable: boolean;
+  } | null;
 }
 
 export class EditorStore {
@@ -138,6 +147,10 @@ export class EditorStore {
   private model: DocumentModel;
   private history = new History();
   private adapter: StorageAdapter;
+  /** Abort controller of the running heavy operation (state.op); null when
+   *  nothing is running. Cancel aborts it; the operation rejects with an
+   *  AbortError and reports "Save cancelled". */
+  private opAbort: AbortController | null = null;
   /**
    * File System Access handles (per document) so later saves silently
    * OVERWRITE the .rnode.json the user picked instead of re-downloading.
@@ -252,6 +265,7 @@ export class EditorStore {
       groupSel: null,
       summarySel: null,
       imageSel: null,
+      op: null,
     };
   }
 
@@ -278,6 +292,51 @@ export class EditorStore {
       this.state.message = null;
       this.notify();
     }, 2200);
+  }
+
+  // -------------------------------------------------------------------------
+  // Heavy-operation feedback (progress bar + cancel in the status bar)
+  // -------------------------------------------------------------------------
+
+  /** Start a heavy operation: creates a fresh AbortController and shows the
+   *  progress bar. A new op supersedes a stuck previous one. */
+  private beginLongOp(label: string, cancellable: boolean): AbortSignal {
+    this.opAbort?.abort();
+    this.opAbort = new AbortController();
+    this.state.op = { kind: "save", label, progress: 0, cancellable };
+    this.notify();
+    return this.opAbort.signal;
+  }
+
+  private setOpProgress(label: string, progress: number | null): void {
+    if (!this.state.op) return;
+    this.state.op = { ...this.state.op, label, progress };
+    this.notify();
+  }
+
+  /** Map a zip-phase fraction onto the overall bar scale: the estimate
+   *  (prepare) is quick, reading assets is fast IndexedDB work, compression
+   *  dominates for hundreds of MB. */
+  private opProgress(phase: ZipPhase, fraction: number): void {
+    const map: Record<ZipPhase, { label: string; base: number; span: number }> = {
+      prepare: { label: "Saving document…", base: 0, span: 0.05 },
+      read: { label: "Reading images…", base: 0.05, span: 0.1 },
+      compress: { label: "Compressing…", base: 0.15, span: 0.85 },
+    };
+    const m = map[phase];
+    this.setOpProgress(m.label, Math.min(1, m.base + fraction * m.span));
+  }
+
+  private endLongOp(): void {
+    this.opAbort = null;
+    this.state.op = null;
+    this.notify();
+  }
+
+  /** Cancel the running heavy operation (the abort controller). The operation
+   *  rejects with an AbortError and reports "Save cancelled". */
+  cancelLongOp(): void {
+    this.opAbort?.abort();
   }
 
   // -------------------------------------------------------------------------
@@ -460,9 +519,16 @@ export class EditorStore {
         : await this.writePortableFile(JSON.stringify(this.model.doc, null, 2));
       this.state.sync = "saved";
       this.toast(fileWritten ? "Saved" : "Saved locally (no file chosen)");
-    } catch {
+    } catch (e) {
       this.state.sync = "dirty";
-      this.toast("Save failed — check storage");
+      if (e instanceof Error && e.name === "AbortError") {
+        // The user cancelled the running heavy save: a queued re-run would
+        // redo exactly the work they stopped, so the queue is dropped too.
+        this.saveQueued = false;
+        this.toast("Save cancelled");
+      } else {
+        this.toast("Save failed — check storage");
+      }
     }
   }
 
@@ -701,21 +767,31 @@ export class EditorStore {
    */
   private async writePortableZip(): Promise<boolean> {
     const store = getAssetStore();
-    const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, "complete");
-    const degraded = this.degradedAssetCount();
-    const est = formatBytes(estimate);
-    this.toast(
-      degraded > 0
-        ? `${degraded} asset${degraded === 1 ? "" : "s"} lost their original in a compact import — exporting display levels (~${est})`
-        : `Exporting .rnode.zip (~${est})…`
-    );
-    const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, "complete");
-    return this.writePortableBytes(
-      new Blob([bytes.slice().buffer], { type: "application/zip" }),
-      this.docZipName(),
-      { description: "R-node document with images", accept: { "application/zip": [".rnode.zip"] } },
-      "zip"
-    );
+    // The estimate is computed BEFORE generating — the size tells the user
+    // WHY this save is heavy — and both phases report into the progress bar
+    // with an abort controller, so a hundreds-of-MB save can be cancelled
+    // instead of leaving the UI blocked with no idea how long it will take.
+    const signal = this.beginLongOp("Saving document…", true);
+    try {
+      const hooks = { signal, onProgress: (p: ZipPhase, f: number) => this.opProgress(p, f) };
+      const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, "complete", hooks);
+      const degraded = this.degradedAssetCount();
+      const est = formatBytes(estimate);
+      this.toast(
+        degraded > 0
+          ? `${degraded} asset${degraded === 1 ? "" : "s"} lost their original in a compact import — saving display levels (~${est})`
+          : `Saving .rnode.zip (~${est})…`
+      );
+      const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, "complete", hooks);
+      return this.writePortableBytes(
+        new Blob([bytes.slice().buffer], { type: "application/zip" }),
+        this.docZipName(),
+        { description: "R-node document with images", accept: { "application/zip": [".rnode.zip"] } },
+        "zip"
+      );
+    } finally {
+      this.endLongOp();
+    }
   }
 
   /**

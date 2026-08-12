@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
 import { EditorStore, docFileBaseName, portableFileKey } from "../src/editor/store";
 import { makeOp, type Op } from "../src/core/ops";
-import { IndexedDbAssetStore } from "../src/persist/assets";
+import { getAssetStore, IndexedDbAssetStore } from "../src/persist/assets";
 import type { StorageAdapter } from "../src/persist/storage";
 
 const memoryAdapter: StorageAdapter = {
@@ -361,6 +361,52 @@ describe("save / load file", () => {
     await store.saveNow();
     expect(blobs).toHaveLength(1); // the file is written with current content
     expect(store.getSnapshot().sync).toBe("saved");
+  });
+
+  it("shows a cancellable progress state while a save with images runs, and cancel aborts it", async () => {
+    // A save that builds a .rnode.zip must expose state.op so the status bar
+    // can render a progress bar + cancel button, and cancelLongOp() must
+    // abort the heavy work and report it instead of leaving the UI blocked.
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const a = root.childrenIds[0];
+    store.attachImage(a, { id: "a".repeat(64), mime: "image/png", w: 10, h: 10, bytes: 3 });
+    const blobs: Blob[] = [];
+    vi.spyOn(store as unknown as { download: (blob: Blob) => void }, "download")
+      .mockImplementation((blob: Blob) => { blobs.push(blob); });
+
+    // Gate the first asset read so the save is provably in flight when we
+    // inspect the state and cancel.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const assetStore = getAssetStore();
+    const realGet = assetStore.get.bind(assetStore);
+    const getSpy = vi.spyOn(assetStore, "get").mockImplementation(async (id, level) => {
+      await gate;
+      return realGet(id, level);
+    });
+    try {
+      const saving = store.saveNow();
+      await vi.waitFor(() => expect(getSpy).toHaveBeenCalled());
+
+      const mid = store.getSnapshot();
+      expect(mid.op).not.toBeNull();
+      expect(mid.op!.kind).toBe("save");
+      expect(mid.op!.cancellable).toBe(true);
+
+      store.cancelLongOp(); // the user presses Cancel
+      release();
+      await saving;
+
+      const after = store.getSnapshot();
+      expect(after.op).toBeNull();
+      expect(after.sync).toBe("dirty");
+      expect(after.message).toBe("Save cancelled");
+      expect(blobs).toHaveLength(0); // nothing was downloaded
+    } finally {
+      getSpy.mockRestore();
+    }
   });
 
   it("two concurrent saveNow run the queue ONCE more, with the most recent content", async () => {

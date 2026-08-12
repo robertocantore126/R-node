@@ -30,7 +30,7 @@ import {
   type AssetMeta,
   type AssetStore,
 } from "../persist/assets";
-import { zip, unzip, deflateSync, strToU8, strFromU8 } from "fflate";
+import { unzip, deflateSync, strToU8, strFromU8, Zip, ZipDeflate } from "fflate";
 
 export type RnodeZipMode = "complete" | "compact";
 
@@ -86,9 +86,88 @@ function mimeForExt(ext: string): string {
   return MIME_BY_EXT[ext] ?? "application/octet-stream";
 }
 
-function zipAsync(files: Record<string, Uint8Array>): Promise<Uint8Array> {
+/**
+ * Phases of a heavy zip operation, reported through ZipOpHooks.onProgress.
+ * Fractions are LOCAL to the phase (0..1); the caller maps them onto its own
+ * overall scale (e.g. prepare 0-5%, read 5-15%, compress 15-100%).
+ */
+export type ZipPhase = "prepare" | "read" | "compress";
+
+/** Optional progress/cancellation hooks for the heavy zip operations. */
+export interface ZipOpHooks {
+  /** Abort the operation. Between assets/entries the work stops and the
+   *  promise rejects with an error whose name is "AbortError". */
+  signal?: AbortSignal;
+  /** Fractional progress (0..1) within the current phase. */
+  onProgress?: (phase: ZipPhase, fraction: number) => void;
+}
+
+/** Throw an AbortError when the signal fired — the caller's contract. */
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (typeof DOMException !== "undefined") {
+    throw new DOMException("Operation aborted", "AbortError");
+  }
+  const e = new Error("Operation aborted");
+  e.name = "AbortError";
+  throw e;
+}
+
+/**
+ * Zip the entries in a streaming fashion. Each entry is deflated
+ * asynchronously (fflate worker-backed where available) and the main thread
+ * yields between entries, so a multi-hundred-MB archive never freezes the UI
+ * for the whole compression — and the caller can abort between entries.
+ */
+function zipAsyncStreaming(
+  entries: { name: string; data: Uint8Array }[],
+  hooks: ZipOpHooks
+): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
-    zip(files, {}, (err, data) => (err ? reject(err) : resolve(data)));
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    const zip = new Zip((err, data, final) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      if (data) {
+        chunks.push(data);
+        size += data.length;
+      }
+      if (final) {
+        const out = new Uint8Array(size);
+        let off = 0;
+        for (const c of chunks) {
+          out.set(c, off);
+          off += c.length;
+        }
+        resolve(out);
+      }
+    });
+    void (async () => {
+      try {
+        for (let i = 0; i < entries.length; i++) {
+          throwIfAborted(hooks.signal);
+          // ZipDeflate deflates SYNCHRONOUSLY inside push(), and the Zip
+          // machinery (which owns file.ondata — Zip.add overwrites it with its
+          // internal pump) emits the entry into zip.ondata as it goes. Between
+          // entries we yield to the event loop, so the main thread keeps
+          // rendering (the bar advances per entry) and the abort signal can
+          // be observed at every boundary.
+          const def = new ZipDeflate(entries[i].name);
+          zip.add(def);
+          def.push(entries[i].data, true);
+          hooks.onProgress?.("compress", (i + 1) / entries.length);
+          await new Promise<void>((r) => setTimeout(r, 0));
+        }
+        throwIfAborted(hooks.signal);
+        zip.end();
+      } catch (e) {
+        zip.terminate();
+        reject(e);
+      }
+    })();
   });
 }
 
@@ -114,16 +193,19 @@ export async function estimateRnodeZip(
   doc: RnodeDocument,
   sheet: Sheet,
   store: AssetStore,
-  mode: RnodeZipMode
+  mode: RnodeZipMode,
+  hooks: ZipOpHooks = {}
 ): Promise<number> {
   const docJson = deflateSync(strToU8(JSON.stringify(doc))).length;
   const manifest = deflateSync(strToU8(JSON.stringify({ mode }))).length;
   const ids = [...referencedAssetIds(sheet)];
   let assets = 0;
   const level = levelForMode(mode);
-  for (const id of ids) {
-    const blob = await store.get(id, level);
+  for (let i = 0; i < ids.length; i++) {
+    throwIfAborted(hooks.signal);
+    const blob = await store.get(ids[i], level);
     if (blob) assets += blob.size;
+    hooks.onProgress?.("prepare", (i + 1) / ids.length);
   }
   return docJson + manifest + assets + ids.length * ZIP_ENTRY_OVERHEAD + ZIP_BASE_OVERHEAD;
 }
@@ -133,26 +215,33 @@ export async function buildRnodeZip(
   doc: RnodeDocument,
   sheet: Sheet,
   store: AssetStore,
-  mode: RnodeZipMode
+  mode: RnodeZipMode,
+  hooks: ZipOpHooks = {}
 ): Promise<Uint8Array> {
   const ids = [...referencedAssetIds(sheet)];
   // A referenced asset whose original is gone (compact import, I11): a
   // "complete" export of it is degraded — the zip carries the resized level.
   // The manifest says so, and the store warns the user before generating.
   const degraded = ids.some((id) => sheet.attachments.some((a) => a.id === id && a.originalLost));
-  const files: Record<string, Uint8Array> = {
-    "document.json": strToU8(JSON.stringify(doc)),
-    "manifest.json": strToU8(
-      JSON.stringify(degraded ? { mode, degraded: true } : { mode })
-    ),
-  };
+  const entries: { name: string; data: Uint8Array }[] = [
+    { name: "document.json", data: strToU8(JSON.stringify(doc)) },
+    {
+      name: "manifest.json",
+      data: strToU8(JSON.stringify(degraded ? { mode, degraded: true } : { mode })),
+    },
+  ];
   const level = levelForMode(mode);
-  for (const id of ids) {
-    const [meta, blob] = await Promise.all([store.meta(id), store.get(id, level)]);
+  for (let i = 0; i < ids.length; i++) {
+    throwIfAborted(hooks.signal);
+    const [meta, blob] = await Promise.all([store.meta(ids[i]), store.get(ids[i], level)]);
     if (!meta || !blob) continue; // referenced but absent: the zip cannot carry it
-    files[`assets/${id}.${extForMime(meta.mime)}`] = new Uint8Array(await blob.arrayBuffer());
+    entries.push({
+      name: `assets/${ids[i]}.${extForMime(meta.mime)}`,
+      data: new Uint8Array(await blob.arrayBuffer()),
+    });
+    hooks.onProgress?.("read", (i + 1) / ids.length);
   }
-  return zipAsync(files);
+  return zipAsyncStreaming(entries, hooks);
 }
 
 /**
