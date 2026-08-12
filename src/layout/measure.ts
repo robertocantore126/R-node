@@ -416,7 +416,67 @@ export function imageResolver(sheet: Sheet): (id: string) => { w: number; h: num
  * Explicit style.width/height overrides win; an image (when resolvable) adds
  * its box above the text, separated by IMAGE_GAP.
  */
+/**
+ * Everything `measureTopicUncached` actually reads, as a string.
+ *
+ * Derived from the function body, NOT from the Style type: a field missing
+ * here means the layout silently reuses a stale size, which shows up as
+ * overlapping or clipped topics far from the cause. Colour, underline,
+ * strikethrough and alignment are deliberately absent — they change how the
+ * text looks, not how much room it needs, and including them would throw the
+ * entry away for nothing.
+ */
+function extentKey(n: MindNode, att: { w: number; h: number } | null): string {
+  const s = n.style;
+  let runs = "";
+  for (const r of nodeRuns(n.title, n.titleRuns)) {
+    runs += `${r.text}${r.bold ? 1 : 0}${r.italic ? 1 : 0}${r.fontSize ?? ""}${r.listIndent ?? ""}${r.paraGap ? 1 : 0}`;
+  }
+  // The image contributes only through its RESOLVED size: swapping in another
+  // picture with the same dimensions leaves the box identical.
+  return `${runs}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${att ? `${att.w}x${att.h}` : ""}`;
+}
+
+/**
+ * Measured extents, per measurer (the heuristic and the canvas one disagree by
+ * design, so they must not share entries).
+ *
+ * Why this exists: `layoutSheet` measures EVERY node on every run, and a run
+ * was timed at 86–109 ms on a 3001-node map — six frames of frozen UI after
+ * each edit. Between two runs a single node changes, so ~3000 of those
+ * measurements re-derive an answer that has not moved.
+ *
+ * Capped by ENTRY COUNT on purpose. That knob was wrong for the bitmap caches,
+ * where entries differ in size by orders of magnitude; here every entry is two
+ * numbers, so counting them is counting bytes.
+ */
+const extentCaches = new WeakMap<TextMeasurer, Map<string, Extent>>();
+const EXTENT_CACHE_MAX = 20_000;
+
 export function measureTopic(
+  n: MindNode,
+  measurer: TextMeasurer = HEURISTIC_MEASURER,
+  resolveImage?: (id: string) => { w: number; h: number } | null,
+): Extent {
+  const att = n.style.image && resolveImage ? resolveImage(n.style.image) : null;
+  const key = extentKey(n, att);
+  let cache = extentCaches.get(measurer);
+  if (!cache) {
+    cache = new Map();
+    extentCaches.set(measurer, cache);
+  }
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const out = measureTopicUncached(n, measurer, resolveImage);
+  if (cache.size >= EXTENT_CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, out);
+  return out;
+}
+
+function measureTopicUncached(
   n: MindNode,
   measurer: TextMeasurer = HEURISTIC_MEASURER,
   resolveImage?: (id: string) => { w: number; h: number } | null,
