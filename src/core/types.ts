@@ -252,6 +252,29 @@ export const DEFAULT_STRUCTURE: StructureConfig = {
 };
 
 // ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+/**
+ * Metadata card for an image attached to the map, kept INSIDE the document.
+ * The bytes never live here: they are stored in the AssetStore (IndexedDB),
+ * addressed by content — `id` is the SHA-256 of the original file and the
+ * key of the asset in the store. `Style.image` on a node references the same
+ * id, so one asset can be shared by many nodes.
+ */
+export interface AttachmentInfo {
+  id: string; // SHA-256 of the original bytes — the key in the AssetStore
+  mime: string; // image/png | image/jpeg | image/gif | image/webp
+  w: number; // intrinsic pixels of the ORIGINAL
+  h: number;
+  displayW: number; // pixels of the variant the canvas decodes
+  displayH: number;
+  bytes: number; // weight of the original, shown to the user
+  name?: string;
+  alt?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Sheet & Document
 // ---------------------------------------------------------------------------
 
@@ -268,7 +291,7 @@ export interface Sheet {
   callouts: unknown[];
   labels: string[];
   zones: unknown[];
-  attachments: unknown[];
+  attachments: AttachmentInfo[];
   comments: unknown[];
   presentation: Record<string, unknown>;
 }
