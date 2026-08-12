@@ -7,7 +7,7 @@ import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
-import type { MindNode } from "../core/types";
+import type { MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { installTrace, trace } from "../dev/trace";
 
@@ -54,6 +54,17 @@ function shapeWidthAllowance(n: MindNode): number {
 }
 
 const overlayMeasurer = createCanvasTextMeasurer();
+
+/** `imageResolver` memoized on the sheet it was built from. */
+let lastResolverSheet: Sheet | null = null;
+let lastResolver: ReturnType<typeof imageResolver> | null = null;
+function overlayImageResolver(sheet: Sheet): ReturnType<typeof imageResolver> {
+  if (lastResolverSheet !== sheet || !lastResolver) {
+    lastResolverSheet = sheet;
+    lastResolver = imageResolver(sheet);
+  }
+  return lastResolver;
+}
 
 export function CanvasView(): JSX.Element {
   const store = useStore();
@@ -631,7 +642,9 @@ export function CanvasView(): JSX.Element {
     if (n) {
       // The overlay box must match the canvas box: same measurer, same image
       // resolver (invariant I9) — otherwise the node jumps on double-click.
-      const m = measureNode(n, overlayMeasurer, imageResolver(store.sheet));
+      // Memoized on the sheet: building it inline reallocated the map on every
+      // render, which is invisible at 20 nodes and is not at 5.000.
+      const m = measureNode(n, overlayMeasurer, overlayImageResolver(store.sheet));
       const { x, y } = worldToScreen(state.camera, viewSize.w, viewSize.h, n.position.x, n.position.y);
       editStyle = {
         left: x,

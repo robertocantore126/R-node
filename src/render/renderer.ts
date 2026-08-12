@@ -85,6 +85,10 @@ export class Renderer {
   private inflightCount = 0;
   private readonly IMAGE_BUDGET = 128 * 1024 * 1024;
   private readonly MAX_INFLIGHT = 5;
+  /** Decode-size buckets. The max is the width of the `large` level: decoding
+   *  wider than the stored source costs memory and adds no detail. */
+  private readonly IMAGE_BUCKET_MIN = 128;
+  private readonly IMAGE_BUCKET_MAX = 1024;
   private assetStore: AssetStore;
   private onRepaint: (() => void) | null = null;
 
@@ -630,12 +634,21 @@ export class Renderer {
     if (!att || att.w <= 0) return;
     const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
     const imgH = (imgW * att.h) / att.w;
-    // Level by the same zoom bucket schema as the text cache: zoomed out →
-    // small (256px), zoomed in → large (1024px). The original is never
-    // decoded — the hard 1024px cap of ADR-001 §12 is enforced here.
-    const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
-    const level: AssetLevel = res <= 1 ? "small" : "large";
-    const key = `${imageId}@${level}`;
+    // Decode at the size THIS image is painted at, not at the size it happens
+    // to be stored at. Driving the choice from the global zoom alone put every
+    // bitmap on the 1024px level above zoom 0.5 on a retina screen — 3MB each,
+    // so fifty visible image nodes blew the budget and the cache thrashed.
+    const neededPx = imgW * this.curScale * this.dpr;
+    // Quantised to powers of two: an exact size would mint a new cache key on
+    // every micro-change of zoom and nothing would ever hit.
+    const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
+    // Smallest stored level that can serve the bucket. The original is never
+    // decoded: the hard 1024px cap of ADR-001 §12 is enforced here.
+    const level: AssetLevel = bucket <= 256 ? "small" : "large";
+    // The BUCKET keys the cache, not the level — with a variable decode size,
+    // keying by level would reuse a 384px bitmap when 900 are needed and leave
+    // that image blurred with nothing to invalidate it.
+    const key = `${imageId}@${bucket}`;
 
     const entry = this.imageCache.get(key);
     if (entry) {
@@ -649,10 +662,10 @@ export class Renderer {
     }
     if (this.imageFailed.has(key)) return; // corrupt/unavailable: not per frame
     if (this.inflight.has(key) || this.inflightCount >= this.MAX_INFLIGHT) return;
-    this.startDecode(key, imageId, n.id, level);
+    this.startDecode(key, imageId, n.id, level, bucket);
   }
 
-  private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel): Promise<void> {
+  private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel, bucket: number): Promise<void> {
     this.inflight.set(key, nodeId);
     this.inflightCount++;
     try {
@@ -661,7 +674,10 @@ export class Renderer {
         this.imageFailed.add(key);
         return;
       }
-      const bitmap = await createImageBitmap(blob);
+      // resizeWidth downsamples DURING decode: the full-resolution surface is
+      // never materialised. Height is omitted on purpose — the browser derives
+      // it from the aspect ratio, and passing both risks distortion.
+      const bitmap = await createImageBitmap(blob, { resizeWidth: bucket, resizeQuality: "high" });
       if (!this.visibleImageNodes.has(nodeId)) {
         // The requesting node scrolled off while decoding: close immediately,
         // never cache it.
