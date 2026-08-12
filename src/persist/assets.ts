@@ -49,6 +49,12 @@ export interface AssetStore {
   putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void>;
   get(id: string, level: AssetLevel): Promise<Blob | null>;
   meta(id: string): Promise<AssetMeta | null>;
+  /**
+   * Exact byte weight of every stored level of an asset (original + large +
+   * small + the meta row). Used by the orphan-GC command to tell the user
+   * how many bytes would be recovered BEFORE the confirmation.
+   */
+  size(id: string): Promise<number>;
   delete(id: string): Promise<void>;
   list(): Promise<string[]>;
 }
@@ -165,6 +171,20 @@ export class IndexedDbAssetStore implements AssetStore {
     return record?.meta ?? null;
   }
 
+  async size(id: string): Promise<number> {
+    const record = await txGet<AssetRecord>(await this.db(), id);
+    if (!record) return 0;
+    // Exact, not estimated: blob.size is the byte length of what was stored,
+    // and the meta is serialized the same way the desktop backend stores it
+    // (JSON.stringify), so the two backends agree on the weight.
+    return (
+      record.original.blob.size +
+      record.large.blob.size +
+      record.small.blob.size +
+      new TextEncoder().encode(JSON.stringify(record.meta)).length
+    );
+  }
+
   async delete(id: string): Promise<void> {
     const db = await this.db();
     await txDone(db, "readwrite", (s) => s.delete(id));
@@ -278,6 +298,22 @@ export class TauriAssetStore implements AssetStore {
     return meta;
   }
 
+  async size(id: string): Promise<number> {
+    // Exact: reads the real bytes and sums their lengths (the SQLite backend
+    // computes the same sum as SUM(length(bytes)) over the level rows). Four
+    // round-trips per asset, fine for the explicit, rare GC command.
+    const [original, large, small] = await Promise.all([
+      this.get(id, "original"),
+      this.get(id, "large"),
+      this.get(id, "small"),
+    ]);
+    const card = await this.meta(id);
+    let total = 0;
+    for (const b of [original, large, small]) if (b) total += b.size;
+    if (card) total += new TextEncoder().encode(JSON.stringify(card)).length;
+    return total;
+  }
+
   async delete(id: string): Promise<void> {
     const path = await this.currentPath();
     await this.invoke()("delete_asset", { path, id });
@@ -295,11 +331,16 @@ export class TauriAssetStore implements AssetStore {
    * file. Same per-asset iteration the zip exporter uses — a document saved
    * into a fresh file never points at ids that are not there.
    */
-  async adoptFile(newPath: string, ids: string[]): Promise<void> {
+  async adoptFile(newPath: string, ids: string[]): Promise<number> {
     // The reads below go through this.currentPath(), still the OLD file: the
     // switch happens only after every asset is copied. Only the BYTES matter
     // for the copy — w/h live in the meta JSON.
+    //
+    // Returns how many referenced assets could NOT be copied (missing meta or
+    // any level): skipping is right (failing the whole save for one image
+    // would be worse), but the caller must tell the user, not stay silent.
     const payloads: { id: string; meta: AssetMeta; blobs: Record<AssetLevel, Blob> }[] = [];
+    let skipped = 0;
     for (const id of ids) {
       const [meta, original, large, small] = await Promise.all([
         this.meta(id),
@@ -307,7 +348,10 @@ export class TauriAssetStore implements AssetStore {
         this.get(id, "large"),
         this.get(id, "small"),
       ]);
-      if (!meta || !original || !large || !small) continue; // referenced but absent
+      if (!meta || !original || !large || !small) {
+        skipped++; // referenced but absent
+        continue;
+      }
       payloads.push({ id, meta, blobs: { original, large, small } });
     }
     const invoke = this.invoke();
@@ -326,6 +370,7 @@ export class TauriAssetStore implements AssetStore {
     this.path = newPath;
     this.defaultPath = null;
     this.metaCache.clear();
+    return skipped;
   }
 }
 

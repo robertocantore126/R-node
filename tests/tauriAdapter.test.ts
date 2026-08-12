@@ -66,6 +66,20 @@ describe("TauriAssetStore", () => {
     expect(await store.get(ID, "large")).toBeNull();
   });
 
+  it("size sums the exact byte lengths of every level (incl. the meta row)", async () => {
+    installTauri(async (cmd, args) => {
+      if (cmd === "default_document_path") return "C:/default";
+      if (cmd === "get_asset" && args.level === "meta") return metaBytes;
+      if (cmd === "get_asset" && args.level === "original") return raw([1, 2, 3]);
+      if (cmd === "get_asset" && args.level === "large") return raw([4, 5]);
+      if (cmd === "get_asset" && args.level === "small") return raw([6]);
+      return null;
+    });
+    const store = new TauriAssetStore();
+    // 3 (original) + 2 (large) + 1 (small) + the serialized meta row.
+    expect(await store.size(ID)).toBe(3 + 2 + 1 + metaBytes.length);
+  });
+
   it("setRoot switches the SAME instance to a new path (the Renderer trap)", async () => {
     const calls = installTauri(async () => null);
     const store = new TauriAssetStore();
@@ -113,11 +127,32 @@ describe("TauriAssetStore", () => {
   it("adoptFile with no referenced assets just switches the path", async () => {
     const calls = installTauri(async (cmd) => (cmd === "default_document_path" ? "C:/default" : null));
     const store = new TauriAssetStore();
-    await store.adoptFile("C:/fresh.rnode", []);
+    expect(await store.adoptFile("C:/fresh.rnode", [])).toBe(0);
     expect(calls.filter((c) => c.cmd === "put_asset")).toHaveLength(0);
     calls.length = 0;
     await store.list();
     expect(calls.find((c) => c.cmd === "list_assets")?.args.path).toBe("C:/fresh.rnode");
+  });
+
+  it("adoptFile reports how many referenced assets it could not copy", async () => {
+    const MISSING = "b".repeat(64);
+    const calls = installTauri(async (cmd, args) => {
+      if (cmd === "default_document_path") return "C:/old";
+      if (args?.id === MISSING) return new ArrayBuffer(0); // absent from the source
+      if (cmd === "get_asset" && args.level === "meta") return metaBytes;
+      if (cmd === "get_asset" && args.level === "original") return raw([1, 2, 3]);
+      if (cmd === "get_asset" && args.level === "large") return raw([4, 5]);
+      if (cmd === "get_asset" && args.level === "small") return raw([6]);
+      return null;
+    });
+    const store = new TauriAssetStore();
+    const skipped = await store.adoptFile("C:/new.rnode", [ID, MISSING]);
+
+    expect(skipped).toBe(1); // the missing one is counted, not silently dropped
+    // Only the present asset was copied: 4 levels (not 8).
+    const puts = calls.filter((c) => c.cmd === "put_asset");
+    expect(puts).toHaveLength(4);
+    expect(puts.every((p) => p.args.path === "C:/new.rnode")).toBe(true);
   });
 });
 
@@ -230,6 +265,23 @@ describe("desktop save flow", () => {
     const pick = calls.find((c) => c.cmd === "pick_document_file");
     expect(pick?.args.mode).toBe("save");
     expect(pick?.args.suggestedName).toBe("R-node_Roadmap");
+  });
+
+  it("save reports how many referenced images could not be copied", async () => {
+    installTauri(async (cmd) => {
+      if (cmd === "pick_document_file") return "C:/MiaMappa.rnode";
+      if (cmd === "get_asset") return new ArrayBuffer(0); // every level absent
+      return null;
+    });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    // A node references an image whose bytes are not in the source file:
+    // adoptFile skips it, and the user must be told, with the number.
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    store.setNodeImage(root.childrenIds[0], "a".repeat(64));
+    await store.saveNow();
+    expect(store.getSnapshot().sync).toBe("saved");
+    expect(store.getSnapshot().message).toMatch(/1 image could not be copied/);
   });
 
   it("renaming the document renames the REAL file on the next save", async () => {

@@ -1,6 +1,8 @@
+import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
 import { EditorStore, docFileBaseName, portableFileKey } from "../src/editor/store";
 import { makeOp, type Op } from "../src/core/ops";
+import { IndexedDbAssetStore } from "../src/persist/assets";
 import type { StorageAdapter } from "../src/persist/storage";
 
 const memoryAdapter: StorageAdapter = {
@@ -359,6 +361,58 @@ describe("save / load file", () => {
     await store.saveNow();
     expect(blobs).toHaveLength(1); // the file is written with current content
     expect(store.getSnapshot().sync).toBe("saved");
+  });
+
+  it("two concurrent saveNow run the queue ONCE more, with the most recent content", async () => {
+    // The first save is slow (a real slow disk would be), and the content
+    // changes between the two Ctrl+S presses: dropping the second request
+    // would report "Saved" while the file holds a stale version. The queue
+    // re-runs exactly once, with the content of THAT moment.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const captured: string[] = [];
+    const slowAdapter: StorageAdapter = {
+      label: "test",
+      async load() { return []; },
+      async save(docs) {
+        // Serialize NOW: the running save captured the document BEFORE the
+        // edit, exactly like a slow write that started earlier.
+        captured.push(JSON.stringify(docs));
+        await gate;
+      },
+    };
+    const store = new EditorStore(slowAdapter);
+    const blobs: Blob[] = [];
+    vi.spyOn(store as unknown as { download: (blob: Blob) => void }, "download")
+      .mockImplementation((blob: Blob) => { blobs.push(blob); });
+
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    store.createChild();
+    const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
+
+    const first = store.saveNow(); // in flight, blocked on the gate
+    store.execOps([
+      makeOp<Op & { type: "setTitle" }>("setTitle", {
+        id: main.id,
+        title: "Versione corrente",
+        prev: main.title,
+      }),
+    ]);
+    const second = store.saveNow(); // arrives mid-save → queued, NOT dropped
+    expect(captured).toHaveLength(1); // only the first write has started
+    expect(JSON.parse(captured[0])[0].sheets[0].nodes[main.id].title).not.toBe("Versione corrente");
+
+    release(); // the first save may now complete…
+    await first;
+    await second;
+
+    // …and the queued re-run writes exactly ONE more time, newest content.
+    // (blobs = the portable file, written after the adapter write: waiting on
+    // it means the whole second save finished, download included.)
+    await vi.waitFor(() => expect(blobs).toHaveLength(2));
+    expect(captured).toHaveLength(2);
+    expect(JSON.parse(captured[0])[0].sheets[0].nodes[main.id].title).not.toBe("Versione corrente");
+    expect(JSON.parse(captured[1])[0].sheets[0].nodes[main.id].title).toBe("Versione corrente");
   });
 });
 
@@ -892,5 +946,77 @@ describe("canvas resize drag", () => {
 
     // No image bytes ever entered the document.
     expect(JSON.stringify(store.sheet.attachments)).not.toContain("\"image\":");
+  });
+});
+
+describe("orphan GC (T21-A)", () => {
+  /** Three levels whose exact weight the size() accounting can assert on. */
+  async function putAsset(store: IndexedDbAssetStore): Promise<string> {
+    return store.put(
+      {
+        original: { blob: new Blob(["ORIGINAL"]), w: 1200, h: 800 },
+        large: { blob: new Blob(["LARGE"]), w: 1024, h: 683 },
+        small: { blob: new Blob(["SMALL"]), w: 256, h: 171 },
+      },
+      { mime: "image/png", w: 1200, h: 800, bytes: 8 }
+    );
+  }
+
+  it("reports and recovers an asset orphaned by deleting its node", async () => {
+    const assetStore = new IndexedDbAssetStore(`gc-test-${Date.now()}-${Math.random()}`);
+    const id = await putAsset(assetStore);
+    const expectedBytes = await assetStore.size(id);
+    const confirm = vi.fn((_message: string) => true);
+    vi.stubGlobal("window", { confirm });
+
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const nodeId = root.childrenIds[root.childrenIds.length - 1];
+    store.attachImage(nodeId, { id, mime: "image/png", w: 1200, h: 800, bytes: 8 });
+    store.deleteNodes([nodeId]);
+
+    await store.gcOrphans(assetStore);
+
+    // The confirmation asked first, with cards + blobs + BYTES and the
+    // non-undoable declaration.
+    expect(confirm).toHaveBeenCalledTimes(1);
+    const prompt = confirm.mock.calls[0][0] as string;
+    expect(prompt).toMatch(/1 card and 1 image blob/);
+    expect(prompt).toContain("NOT undoable");
+    expect(prompt).toContain(`${expectedBytes}`);
+
+    // The card is gone from the document and the bytes from the store.
+    expect(store.sheet.attachments).toHaveLength(0);
+    expect(await assetStore.list()).toEqual([]);
+    expect(await assetStore.size(id)).toBe(0);
+
+    // The trap made explicit: undo restores the CARD, never the bytes.
+    store.undo();
+    expect(store.sheet.attachments).toHaveLength(1);
+    expect(await assetStore.size(id)).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("does not ask when there is nothing to collect", async () => {
+    const assetStore = new IndexedDbAssetStore(`gc-none-${Date.now()}-${Math.random()}`);
+    const id = await putAsset(assetStore);
+    const confirm = vi.fn((_message: string) => true);
+    vi.stubGlobal("window", { confirm });
+
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    const nodeId = root.childrenIds[root.childrenIds.length - 1];
+    store.attachImage(nodeId, { id, mime: "image/png", w: 1200, h: 800, bytes: 8 });
+
+    await store.gcOrphans(assetStore);
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(store.getSnapshot().message).toMatch(/Nothing to collect/);
+    // Nothing was touched.
+    expect(store.sheet.attachments).toHaveLength(1);
+    expect(await assetStore.list()).toEqual([id]);
+    vi.unstubAllGlobals();
   });
 });

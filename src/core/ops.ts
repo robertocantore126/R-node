@@ -10,7 +10,7 @@
  * applyOp mutates the sheet in place. inverseOf returns the operation(s)
  * that exactly reverse it, which is what the History stack uses for undo.
  */
-import type { Group, MindNode, Position, Relationship, Sheet, StructureConfig, Style, Summary, TaskInfo, TextRun } from "./types";
+import type { AttachmentInfo, Group, MindNode, Position, Relationship, Sheet, StructureConfig, Style, Summary, TaskInfo, TextRun } from "./types";
 import { nowIso } from "./doc";
 
 // ---------------------------------------------------------------------------
@@ -40,7 +40,8 @@ export type Op =
   | { opId: string; actorId: string; ts: string; type: "setGroup"; id: string; group: Group; prev: Group }
   | { opId: string; actorId: string; ts: string; type: "createSummary"; summary: Summary }
   | { opId: string; actorId: string; ts: string; type: "deleteSummary"; id: string; summary: Summary }
-  | { opId: string; actorId: string; ts: string; type: "setSummary"; id: string; summary: Summary; prev: Summary };
+  | { opId: string; actorId: string; ts: string; type: "setSummary"; id: string; summary: Summary; prev: Summary }
+  | { opId: string; actorId: string; ts: string; type: "setAttachments"; attachments: AttachmentInfo[]; prev: AttachmentInfo[] };
 
 export interface OpMeta {
   actorId?: string;
@@ -216,6 +217,14 @@ export function applyOp(sheet: Sheet, op: Op): void {
       if (idx >= 0) sheet.summaries[idx] = { ...op.summary, memberIds: [...op.summary.memberIds] };
       break;
     }
+    case "setAttachments":
+      // Whole-list replacement: the ONLY writer of this op is the orphan GC,
+      // which removes the unreferenced cards in one undoable step. The op
+      // carries the full previous list (`prev`), so undo restores the cards
+      // exactly — the images they point to, however, are gone (the blob
+      // deletion is not undoable); the GC confirmation says so explicitly.
+      sheet.attachments = op.attachments.map((a) => ({ ...a }));
+      break;
   }
 }
 
@@ -284,6 +293,8 @@ export function inverseOf(op: Op, meta?: OpMeta): Op[] {
       return [makeOp<Op & { type: "createSummary" }>("createSummary", { summary: op.summary }, m)];
     case "setSummary":
       return [makeOp<Op & { type: "setSummary" }>("setSummary", { id: op.id, summary: op.prev, prev: op.summary }, m)];
+    case "setAttachments":
+      return [makeOp<Op & { type: "setAttachments" }>("setAttachments", { attachments: op.prev, prev: op.attachments }, m)];
   }
 }
 

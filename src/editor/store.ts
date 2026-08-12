@@ -20,7 +20,7 @@ import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewp
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
-import { getAssetStore, referencedAssetIds, TauriAssetStore } from "../persist/assets";
+import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
 
@@ -154,6 +154,19 @@ export class EditorStore {
   private fileHandles = new Map<string, FileSystemFileHandle>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * One-position save queue (T21-B): a save is in flight, and a request
+   * arrived while it was running. The request is NEVER dropped — dropping it
+   * would report "Saved" while the disk holds a stale version — instead the
+   * save is re-run once when the current one finishes, with the content that
+   * exists at that moment.
+   */
+  private saveInFlight = false;
+  private saveQueued = false;
+  /** Assets that could not be copied into the current file by the last save
+   *  (adoptFile skips referenced-but-absent assets); the final toast reports
+   *  the number instead of staying silent (T21-C). */
+  private lastSaveSkipped = 0;
   /**
    * Live rich-text draft of the inline editor (TextRun[]), kept in sync by
    * the Lexical overlay on every change. The canvas pointer handler runs
@@ -385,6 +398,29 @@ export class EditorStore {
     // user is typing: commit the draft without closing the editor, so they
     // can keep going. The later blur/Enter commit finds the title up to date.
     this.commitDraftKeepEditing();
+    if (this.saveInFlight) {
+      // One-position queue, deliberately NOT an early return: the second
+      // Ctrl+S arrived after the running save started reading, so the content
+      // changed under it. Dropping the request would show "Saved" while the
+      // file on disk holds a stale version. Mark the re-run; the running
+      // save re-executes exactly once when it finishes.
+      this.saveQueued = true;
+      this.toast("Save queued — will run when the current save finishes");
+      return;
+    }
+    this.saveInFlight = true;
+    try {
+      await this.performSave();
+    } finally {
+      this.saveInFlight = false;
+      if (this.saveQueued) {
+        this.saveQueued = false;
+        void this.saveNow(); // exactly one re-run, with the content of THAT moment
+      }
+    }
+  }
+
+  private async performSave(): Promise<void> {
     try {
       if (this.adapter instanceof TauriStorageAdapter) {
         // Desktop: the document IS a single .rnode file — save writes the
@@ -408,7 +444,11 @@ export class EditorStore {
           if (!renamedTo) await this.adapter.save([this.model.doc]);
         }
         this.state.sync = "saved";
-        this.toast("Saved");
+        this.toast(
+          this.lastSaveSkipped > 0
+            ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be copied (missing from the source file)`
+            : "Saved"
+        );
         return;
       }
       await this.adapter.save(this.state.docs);
@@ -445,8 +485,10 @@ export class EditorStore {
       return false;
     }
     // adoptFile reads from the current path FIRST, then switches: the assets
-    // are never re-written into the same store before the file exists.
-    await assetStore.adoptFile(file, [...referencedAssetIds(this.sheet)]);
+    // are never re-written into the same store before the file exists. Its
+    // return value counts the referenced assets that could not be copied
+    // (missing from the source) — the final "Saved" toast reports them.
+    this.lastSaveSkipped = await assetStore.adoptFile(file, [...referencedAssetIds(this.sheet)]);
     this.adapter.setRoot(file);
     this.rootTitleBase = docFileBaseName(this.model.doc.title);
     // The ACTIVE document is saved, not docs[0]: on desktop the sidebar may
@@ -485,7 +527,7 @@ export class EditorStore {
       // Same order as save-as: read from the old file, write into the new,
       // only then switch. The old file is removed last, so a failure mid-way
       // leaves the document intact at its previous path.
-      await assetStore.adoptFile(target, [...referencedAssetIds(this.sheet)]);
+      this.lastSaveSkipped = await assetStore.adoptFile(target, [...referencedAssetIds(this.sheet)]);
       this.adapter.setRoot(target);
       this.rootTitleBase = base;
       await this.adapter.save([this.model.doc]);
@@ -1836,6 +1878,53 @@ export class EditorStore {
     });
     trace.applied("drop:image", { bytes: imported.meta.bytes, w: imported.meta.w, h: imported.meta.h });
     return { ok: true };
+  }
+
+  /**
+   * Garbage-collect the unreferenced image assets (T21-A): the palette
+   * command that finally calls the long-dormant collectOrphans. It shows
+   * how many cards, blobs and BYTES would be recovered, then asks for
+   * confirmation. On confirm: the orphan CARDS are removed in ONE undoable
+   * op (they modify the document), then the blobs are deleted — which is
+   * NOT undoable. The confirmation must say so: undoing after this restores
+   * the cards without their bytes.
+   */
+  async gcOrphans(assetStore?: AssetStore): Promise<void> {
+    const store = assetStore ?? getAssetStore();
+    const report = await collectOrphans(this.sheet, store);
+    if (report.cards.length === 0 && report.blobs.length === 0) {
+      this.toast("Nothing to collect — no orphaned images");
+      return;
+    }
+    let bytes = 0;
+    for (const id of report.blobs) bytes += await store.size(id);
+    const cardsLabel = `${report.cards.length} card${report.cards.length === 1 ? "" : "s"}`;
+    const blobsLabel = `${report.blobs.length} image blob${report.blobs.length === 1 ? "" : "s"}`;
+    const confirmed =
+      typeof window !== "undefined" && typeof window.confirm === "function"
+        ? window.confirm(
+            `Delete ${cardsLabel} and ${blobsLabel} (${formatBytes(bytes)})?\n\n` +
+              "This operation is NOT undoable: an undo after it would restore the cards without their image bytes."
+          )
+        : false;
+    if (!confirmed) {
+      this.toast("Collection cancelled");
+      return;
+    }
+    // 1) Cards first — a single undoable batch (the whole attachments list
+    // minus the orphans, with the previous list for the inverse).
+    if (report.cards.length > 0) {
+      this.execOps([
+        makeOp<Op & { type: "setAttachments" }>("setAttachments", {
+          attachments: this.sheet.attachments.filter((a) => !report.cards.includes(a.id)),
+          prev: this.sheet.attachments,
+        }),
+      ]);
+    }
+    // 2) Then the blobs — NOT undoable, and deliberately after the cards:
+    // the op above is the undoable half; the byte deletion is the purge half.
+    for (const id of report.blobs) await store.delete(id);
+    this.toast(`Removed ${cardsLabel} and ${blobsLabel} (${formatBytes(bytes)})`);
   }
 
   // -------------------------------------------------------------------------

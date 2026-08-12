@@ -84,6 +84,19 @@ describe("relationship / group / summary ops", () => {
     undo(model, history);
     expect(model.sheet.summaries).toHaveLength(1);
   });
+
+  it("setAttachments removes orphan cards and restores them exactly on undo", () => {
+    const { model } = freshDoc();
+    const history = new History();
+    const card = { id: "c1", mime: "image/png", w: 10, h: 10, bytes: 3, name: "x.png" };
+    const before = [{ ...card }];
+    exec(model, history, [makeOp<Op & { type: "setAttachments" }>("setAttachments", { attachments: [], prev: before })]);
+    expect(model.sheet.attachments).toHaveLength(0);
+    undo(model, history);
+    expect(model.sheet.attachments).toEqual(before);
+    redo(model, history);
+    expect(model.sheet.attachments).toHaveLength(0);
+  });
 });
 
 describe("create + delete", () => {

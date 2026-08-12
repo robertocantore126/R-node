@@ -124,6 +124,20 @@ describe("IndexedDbAssetStore", () => {
     expect(await store.meta("deadbeef")).toBeNull();
   });
 
+  it("size is the exact sum of every stored level (levels + meta row)", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+    const id = await store.put(makeLevels(), meta());
+    const fullMeta = (await store.meta(id))!;
+    const expected =
+      new TextEncoder().encode("ORIGINAL-IMAGE-BYTES").length +
+      new TextEncoder().encode("LARGE-1024").length +
+      new TextEncoder().encode("SMALL-256").length +
+      new TextEncoder().encode(JSON.stringify(fullMeta)).length;
+    expect(await store.size(id)).toBe(expected);
+    // An unknown id weighs zero, not an error.
+    expect(await store.size("deadbeef")).toBe(0);
+  });
+
   it("putUnderId stores levels under a caller-supplied id and is idempotent", async () => {
     const store = new IndexedDbAssetStore(uniqueDb());
     // The .rnode.zip importer case: no original to re-derive the address from.

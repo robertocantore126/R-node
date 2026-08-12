@@ -35,6 +35,7 @@ export function Palette(): JSX.Element | null {
       { label: "Export with images, compact (.rnode.zip)", hint: "", run: () => void store.exportRnodeZip("compact") },
       { label: "Export as Markdown", hint: "", run: () => store.exportMarkdown() },
       { label: "Export as PNG", hint: "", run: () => runExportPng() },
+      { label: "Collect orphaned images (GC)", hint: "not undoable", run: () => void store.gcOrphans() },
       { label: "Toggle outline panel", hint: "", run: () => store.toggleOutliner() },
       { label: "Toggle inspector", hint: "", run: () => store.toggleInspector() },
       { label: "Zen / focus mode", hint: "Ctrl+Shift+F", run: () => store.toggleZen() },

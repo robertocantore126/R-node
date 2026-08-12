@@ -73,9 +73,17 @@ export class Renderer {
    * the title/content actually changes (or the zoom crosses a power-of-two
    * boundary, where the bitmap is re-rendered sharper).
    */
-  private textCache = new Map<string, { canvas: HTMLCanvasElement; w: number; h: number }>();
+  private textCache = new Map<string, { canvas: HTMLCanvasElement; w: number; h: number; bytes: number }>();
+  private textBytes = 0;
   private textHits = 0;
   private textMisses = 0;
+  /**
+   * Byte budget for the text cache (T21-D). The bitmaps differ wildly in
+   * size (node width × height × resolution²), so a fixed ENTRY COUNT let
+   * five thousand big offscreen canvases reach hundreds of MB unnoticed.
+   * w×h×4 per entry, same accounting as IMAGE_BUDGET below.
+   */
+  private readonly TEXT_BUDGET = 64 * 1024 * 1024;
 
   /** Per-frame attachment resolver (invariant I9): set from state.sheet. */
   private resolveImage: ((id: string) => { w: number; h: number } | null) | null = null;
@@ -646,15 +654,21 @@ export class Renderer {
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
     const key = this.textCacheKey(n, color, maxW, res);
     let entry = this.textCache.get(key);
-    if (entry) this.textHits++;
-    if (!entry) {
-      this.textMisses++;
-      entry = this.renderTextBitmap(n, color, maxW, res);
+    if (entry) {
+      this.textHits++;
+      // LRU refresh (Map insertion order = recency), exactly like imageCache:
+      // without it the FIFO eviction could throw away the node the user is
+      // looking at while keeping one that scrolled off long ago.
+      this.textCache.delete(key);
       this.textCache.set(key, entry);
-      if (this.textCache.size > 5000) {
-        const first = this.textCache.keys().next().value;
-        if (first !== undefined) this.textCache.delete(first);
-      }
+    } else {
+      this.textMisses++;
+      const bitmap = this.renderTextBitmap(n, color, maxW, res);
+      const bytes = bitmap.canvas.width * bitmap.canvas.height * 4;
+      entry = { ...bitmap, bytes };
+      this.textCache.set(key, entry);
+      this.textBytes += bytes;
+      this.evictTextToBudget();
     }
     const totalH = entry.h;
     // With an image above, the text occupies the space below it and centers
@@ -778,6 +792,18 @@ export class Renderer {
     ctx.setLineDash([6, 4]);
     ctx.strokeRect(x, y, imgW, imgH);
     ctx.restore();
+  }
+
+  /** Byte-budget LRU eviction for the text cache: same shape as evictToBudget
+   *  (images), minus the bitmap close — canvas elements are plain JS memory. */
+  private evictTextToBudget(): void {
+    while (this.textBytes > this.TEXT_BUDGET && this.textCache.size > 0) {
+      const first = this.textCache.entries().next().value;
+      if (!first) break;
+      const [k, v] = first as [string, { bytes: number }];
+      this.textCache.delete(k);
+      this.textBytes -= v.bytes;
+    }
   }
 
   /** LRU eviction under the byte budget. Only ever called between frames. */
