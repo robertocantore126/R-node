@@ -19,7 +19,7 @@ import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer }
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
-import { LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
+import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { getAssetStore, referencedAssetIds, TauriAssetStore } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
@@ -272,7 +272,18 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   async init(): Promise<void> {
-    const docs = await this.adapter.load();
+    // A corrupt/unreadable stored document must never blank the app: load the
+    // reason, fall back to the sample map, and tell the user WHY instead of a
+    // bare "cannot open the document".
+    let docs: RnodeDocument[] = [];
+    let initError: string | null = null;
+    try {
+      docs = await this.adapter.load();
+    } catch (e) {
+      const err = e instanceof DocumentLoadError ? e : new DocumentLoadError("sqlite", e instanceof Error ? e.message : String(e));
+      trace.error(`init:${err.kind}`, err.message);
+      initError = documentLoadErrorLabel(err.kind);
+    }
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
     } else {
@@ -284,6 +295,7 @@ export class EditorStore {
     this.state = this.makeState();
     if (docs.length > 0) this.state.docs = docs;
     if (docs.length === 0) this.state.sync = "dirty";
+    if (initError) this.toast(`Could not open the saved document — ${initError}`);
     // Loading a document must respect positions explicitly placed by the
     // user. Forced layout is reserved for the explicit "Auto layout" command.
     this.scheduleLayout(false);
@@ -501,7 +513,15 @@ export class EditorStore {
     if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
       return false;
     }
-    const doc = await this.adapter.readDocumentAt(file);
+    let doc: RnodeDocument | null;
+    try {
+      doc = await this.adapter.readDocumentAt(file);
+    } catch (e) {
+      const err = e instanceof DocumentLoadError ? e : new DocumentLoadError("sqlite", e instanceof Error ? e.message : String(e));
+      trace.error(`open:${err.kind}`, err.message);
+      this.toast(`Cannot open "${file.split(/[\\/]/).pop() ?? file}" — ${documentLoadErrorLabel(err.kind)}`);
+      return false;
+    }
     if (!doc) {
       this.toast("Not a valid R-node document in that file");
       return false;
@@ -772,7 +792,8 @@ export class EditorStore {
       const id = this.importDocumentFromJson(text);
       if (id) this.toast(`Opened ${file.name}`);
       else this.toast("Not a valid R-node file");
-    } catch {
+    } catch (e) {
+      trace.error("loadFile", e instanceof Error ? e.message : String(e));
       this.toast("Could not read the file");
     }
   }

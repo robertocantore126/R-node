@@ -172,6 +172,35 @@ describe("TauriStorageAdapter", () => {
     expect(await a.readDocumentAt("C:/other.rnode")).toEqual(doc);
     expect(a.hasRoot).toBe(false);
   });
+
+  it("readDocumentAt returns null only for 'nothing to read' (no document row)", async () => {
+    installTauri(async () => null);
+    const a = new TauriStorageAdapter();
+    expect(await a.readDocumentAt("C:/empty.rnode")).toBeNull();
+  });
+
+  it("readDocumentAt throws invalid-json when the document row is not JSON", async () => {
+    installTauri(async () => "not-json{{");
+    const a = new TauriStorageAdapter();
+    await expect(a.readDocumentAt("C:/bad.rnode")).rejects.toMatchObject({
+      name: "DocumentLoadError",
+      kind: "invalid-json",
+    });
+  });
+
+  it("readDocumentAt throws incompatible-schema when JSON is not a document", async () => {
+    installTauri(async () => JSON.stringify({ documentId: "d1", title: "M" }));
+    const a = new TauriStorageAdapter();
+    await expect(a.readDocumentAt("C:/notdoc.rnode")).rejects.toMatchObject({ kind: "incompatible-schema" });
+  });
+
+  it("readDocumentAt surfaces the backend error with a kind instead of null", async () => {
+    installTauri(async () => {
+      throw new Error("file is not a database");
+    });
+    const a = new TauriStorageAdapter();
+    await expect(a.readDocumentAt("C:/corrupt.rnode")).rejects.toMatchObject({ kind: "corrupt" });
+  });
 });
 
 describe("desktop save flow", () => {
@@ -251,6 +280,19 @@ describe("desktop save flow", () => {
     const writes = calls.filter((c) => c.cmd === "write_document");
     expect(writes[writes.length - 1].args.path).toBe("C:/Docs/FileOnDisk.rnode");
     expect(calls.filter((c) => c.cmd === "remove_document")).toHaveLength(0);
+  });
+
+  it("openDesktop reports the corrupt-file reason instead of a generic error", async () => {
+    installTauri(async (cmd) => {
+      if (cmd === "pick_document_file") return "C:/corrupt.rnode";
+      if (cmd === "read_document") throw new Error("file is not a database");
+      return null;
+    });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    expect(await store.openDesktop()).toBe(false);
+    expect(store.getSnapshot().message).toMatch(/corrupt/i);
+    expect(store.getSnapshot().sync).toBe("dirty"); // nothing was opened
   });
 
   it("a later save overwrites the same file without asking again", async () => {
