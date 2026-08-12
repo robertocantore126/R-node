@@ -67,6 +67,7 @@ jsdom non implementa il layout. Vedi `AGENT_GUIDE.md` §3.
 | 2 | **T12b** — correzioni a T12a | 1 | agente | G-tsc, G-test |
 | 3 | **T12-1** — modello e misura | 2 | agente | G-tsc, G-test, **G-par** |
 | 4 | **T12-2** — disegno sul canvas | 3 | agente | G-tsc, G-test, **G-par** |
+| 4b | **T12-2b** — decodificare alla dimensione resa | 4 | agente | G-tsc, G-test, **G-par** |
 | 5 | **T12-3** — spazio riservato nell'overlay | 4 | agente | G-tsc, G-test, **G-par** |
 | 6 | **T12-4** — op `setNodeImage` e undo | 5 | agente | G-tsc, G-test |
 | 7 | **T13-1** — pipeline di import in un Worker | 6 | agente | G-tsc, G-test |
@@ -141,6 +142,61 @@ al passo 11 e alla regola §4bis di AGENT_GUIDE.
 
 **File**: `src/render/renderer.ts`, `src/ui/CanvasView.tsx`,
 `src/dev/trace.ts`.
+
+### Passo 4b — T12-2b: decodificare alla dimensione resa
+
+Correzione al passo 4. Lì `createImageBitmap(blob)` viene chiamato **senza**
+`resizeWidth`, quindi la bitmap si materializza alla dimensione di
+archiviazione invece che a quella che serve.
+
+Il tetto a 1024px regge lo stesso — lo impone il livello memorizzato — quindi
+non c'è rischio di esaurire la memoria. Ma il costo sì: su schermo retina
+(`dpr = 2`) la soglia `res <= 1` manda su `large` già sopra zoom 0.5, cioè
+bitmap da 1024×768 → **3MB l'una**. A zoom 0.8 con 50 nodi con immagine
+visibili sono 150MB: sopra il budget, quindi sfratto e ri-decodifica continui.
+
+**Va chiuso prima del passo 11**, altrimenti quella misura registra numeri
+gonfiati da una riga mancante e sembrerebbe che a non reggere sia la decisione
+di ADR-001 §12.
+
+**Il cambiamento**, in `renderer.ts`:
+
+```ts
+// pixel fisici realmente occupati DA QUESTA immagine, non lo zoom globale
+const neededPx = imgW * this.curScale * this.dpr;
+// quantizza a potenze di due: senza, ogni micro-variazione di zoom
+// produrrebbe una chiave nuova e la cache non colpirebbe mai
+const bucket = clamp(pow2ceil(neededPx), 128, 1024);
+const level: AssetLevel = bucket <= 256 ? "small" : "large";
+const key = `${imageId}@${bucket}`;
+...
+const bitmap = await createImageBitmap(blob, { resizeWidth: bucket, resizeQuality: "high" });
+```
+
+Quattro punti da non sbagliare:
+
+1. **La chiave deve contenere il bucket**, non il livello. Con dimensioni di
+   decodifica variabili e chiave per livello, una bitmap decodificata a 384px
+   verrebbe riusata quando ne servono 900 e l'immagine resterebbe sfocata per
+   sempre.
+2. **Mai ingrandire**: `bucket` non supera 1024, che è la larghezza del livello
+   `large` memorizzato. Decodificare più grande della sorgente spreca memoria
+   senza aggiungere qualità.
+3. **Passa solo `resizeWidth`**: l'altezza viene calcolata mantenendo le
+   proporzioni. Passarle entrambe rischia di deformare.
+4. Il conteggio dei byte (`bitmap.width * bitmap.height * 4`) e lo sfratto
+   restano com'erano: si adeguano da soli.
+
+**Effetto atteso**: a zoom 0.8 su retina, `neededPx = 240 × 0.8 × 2 = 384` →
+bucket 512 → ~786KB invece di 3MB. **Circa quattro volte meno**, e le cifre
+tornano a coincidere con la tabella di ADR-001 §12.
+
+**Mentre ci sei**, `imageResolver(store.sheet)` viene ricostruito a ogni render
+in `CanvasView.tsx` (riga ~634): memoizzalo su `store.sheet`.
+
+**File**: `src/render/renderer.ts`, `src/ui/CanvasView.tsx`.
+
+**Cancelli**: G-tsc, G-test, **G-par**.
 
 ### Passo 5 — T12-3: spazio riservato nell'overlay
 
