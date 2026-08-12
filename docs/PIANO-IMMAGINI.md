@@ -491,3 +491,96 @@ lavori, file singolo quando mandi.
   `assets/<id>/` con i quattro file.
 - Salvando un documento con immagini in una cartella **nuova**, le immagini
   vengono copiate: riaprendolo da lì non manca niente.
+
+---
+
+## 8. Passo 15 — T20: `.rnode` è un file SQLite
+
+**Sostituisce il backend di T19.** Il documento passa da cartella a **un solo
+file** con estensione propria: `MiaMappa.rnode`, che dentro è un database
+SQLite contenente il documento **e** le immagini.
+
+**Perché.** Il proprietario vuole una cosa singola, e uno zip non può esserlo:
+non si aggiorna in posto, quindi ogni salvataggio ricomprimerebbe centinaia di
+originali. SQLite dà file singolo **e** scrittura incrementale **e** transazioni
+atomiche, e `rusqlite` è già fra le dipendenze.
+
+**Perché adesso.** Il formato è la cosa più costosa da cambiare dopo: il codice
+si riscrive, i file degli utenti no. Oggi gli unici file esistenti sono quelli
+di test — è l'ultimo momento in cui la decisione è gratis.
+
+**Le interfacce non cambiano.** `AssetStore` e `StorageAdapter` restano
+identiche: cambia il **corpo** dei comandi Rust, da filesystem a SQL. È il
+motivo per cui i seam esistono.
+
+**File**: `src-tauri/src/lib.rs` · `src/persist/assets.ts` ·
+`src/persist/storage.ts` · `src/editor/store.ts` · `tests/tauriAdapter.test.ts`
+
+### Schema
+
+Un file = un documento.
+
+```sql
+CREATE TABLE meta      (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE document  (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL);
+CREATE TABLE assets    (id TEXT NOT NULL,      -- SHA-256
+                        level TEXT NOT NULL,   -- original | large | small | meta
+                        bytes BLOB NOT NULL,
+                        PRIMARY KEY (id, level));
+```
+
+`meta` porta almeno `schemaVersion` e `app`: serve a riconoscere il file e a
+poter migrare in futuro senza indovinare.
+
+### Il dettaglio che quasi tutti sbagliano
+
+**NON usare `journal_mode=WAL`.** È il default a cui si arriva per abitudine, ed
+è giusto per un server con lettori concorrenti. Qui è sbagliato: WAL crea
+`MiaMappa.rnode-wal` e `MiaMappa.rnode-shm` **accanto** al file, e "una cosa
+singola" era il requisito.
+
+Usa il journal di rollback predefinito (`DELETE`): crea un `-journal` solo
+**durante** una transazione di scrittura e lo rimuove alla fine. A riposo sul
+disco c'è esattamente un file.
+
+### Passi
+
+1. **Rust**: sostituisci i comandi asset basati su file con l'equivalente SQL.
+   La firma resta la stessa a meno di `root` → `path` del file `.rnode`.
+   Il salvataggio del documento è **una transazione**.
+2. **Rust**: `pick_document_file(mode: "open" | "save")` con `rfd`, filtro
+   sull'estensione `.rnode`. Sostituisce `pick_document_folder`.
+3. **Prima del primo salvataggio** serve comunque un posto dove mettere le
+   immagini: mantieni il comportamento di `default_asset_root` come
+   `<app-data>/scratch.rnode`. Allegare un'immagine a una mappa mai salvata
+   deve continuare a funzionare, e al primo salvataggio il contenuto viene
+   adottato nel file scelto.
+4. **`adoptRoot` → `adoptFile`**: copia gli asset referenziati nel nuovo file
+   **leggendo ancora dal vecchio**, e solo dopo commuta. Stesso ordine di T19,
+   stessa ragione.
+5. **TypeScript**: `TauriAssetStore` e `TauriStorageAdapter` cambiano il nome
+   dei comandi invocati e poco altro. La radice mutabile resta mutabile — la
+   trappola del `Renderer` che cattura lo store vale identica.
+6. **Byte grezzi sull'IPC**: oggi `get_asset` restituisce `Vec<u8>`, che Tauri
+   serializza come **array JSON di numeri**. Per i livelli di visualizzazione
+   (~100KB) va bene; per un originale da 50MB sono cinquanta milioni di numeri
+   da serializzare e riparsare. Tauri v2 permette di restituire byte grezzi
+   (`tauri::ipc::Response` o equivalente — **verifica l'API esatta della
+   versione in uso**). Se si rivela più complicato del previsto, **fermati e
+   segnalalo**: è un'ottimizzazione, non un requisito di questo passo.
+7. **Rimuovi** il backend a file di T19 (`assets/<id>/<level>`,
+   `read_document` / `write_document` su `document.json`). Niente migrazione:
+   gli unici file esistenti sono di test.
+
+### Fatto quando
+
+- G-tsc, G-test verdi; `cargo check` compila.
+- **Il giro desktop, finalmente su formato definitivo**: crei una mappa,
+  alleghi un'immagine, salvi come `MiaMappa.rnode`, **chiudi l'app**, riapri
+  quel file → l'immagine c'è.
+- **A riposo sul disco c'è un file solo**: nessun `-wal`, nessun `-shm`,
+  nessun `-journal` dopo un salvataggio concluso.
+- Salvando "con nome" su un file nuovo, le immagini vengono copiate: riaprendo
+  quello non manca niente.
+- Export `.rnode.zip` continua a funzionare (legge attraverso `AssetStore`,
+  quindi non dovrebbe accorgersi del cambiamento — verificalo).
