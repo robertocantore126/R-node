@@ -1,12 +1,17 @@
 # Piano di esecuzione — immagini nei nodi
 
+> **ARCHIVIATO (2026-08-12)** — piano completamente eseguito (passi 0–15,
+> task T12a–T20). Non descrive più lavoro da fare; resta come record storico.
+> Le decisioni sono registrate in [ADR-001](../ADR-001-immagini-e-piattaforma.md)
+> §12, e i risultati delle misure in ADR-001 §12 e qui §5.
+
 Sequenza completa, dall'archivio degli asset fino al desktop e alla
 condivisione. Pensata per essere consegnata **una volta** a un esecutore che
 la percorre da solo.
 
-Le specifiche di dettaglio stanno in [ROADMAP.md](ROADMAP.md); qui c'è
+Le specifiche di dettaglio stanno in [ROADMAP.md](../ROADMAP.md); qui c'è
 **l'ordine, i cancelli e le condizioni di arresto**. Le decisioni che stanno
-sotto tutto sono in [ADR-001](ADR-001-immagini-e-piattaforma.md) §12.
+sotto tutto sono in [ADR-001](../ADR-001-immagini-e-piattaforma.md) §12.
 
 ---
 

@@ -11,8 +11,14 @@ nothing is copied from other mind-mapping products.
   at 10,000+ topics.
 - **Keyboard-first** — Enter/Tab/Shift+Tab to create and structure topics,
   arrows to navigate, every action undoable.
-- **Local-first** — documents save when you decide (Ctrl+S, no hidden autosave); a desktop build with
-  SQLite persistence is scaffolded and ready.
+- **Local-first** — documents save when you decide (Ctrl+S, no hidden
+  autosave). On the web they live in localStorage; on desktop each document is
+  **one `.rnode` file** (a SQLite database holding the document *and* its
+  images).
+- **Images in nodes** — drop or paste an image onto a topic, resize it with a
+  slider or a canvas handle, and share the map as a single `.rnode.zip`.
+  Originals are preserved at full resolution; the canvas only ever decodes
+  pre-scaled levels inside a byte budget.
 - **Rich text on the canvas** — bold, italic, colours, headings and lists live
   in the topic itself, drawn by the canvas and edited in an overlay that
   matches it pixel for pixel (see [Text](#text-rich-text-on-a-canvas)).
@@ -23,21 +29,24 @@ nothing is copied from other mind-mapping products.
 
 ## Status
 
-**Phase 1 (core editor) — implemented and tested.** 101 unit tests passing,
-typecheck clean, performance-verified at 10k topics, editor/canvas text parity
-measured at 0 divergences.
+**Phase 1 (core editor) is implemented and tested; node images and the desktop
+app have landed.** 188 unit tests passing across 13 suites, typecheck clean,
+performance-verified at 10k topics, editor/canvas text parity measured at
+0 divergences (16/16 cases).
 
 | | |
 |---|---|
 | Document model | versioned JSON schema, tree with stable IDs, multi-sheet schema (first sheet active) |
 | Operation system | every edit is an idempotent, replayable op with an inverse — undo/redo for free, collaboration-ready |
-| Rendering | single `<canvas>`, viewport culling, shapes, curved connectors, relationships, PNG export |
+| Rendering | single `<canvas>`, viewport culling, shapes, curved connectors, relationships, marquee selection, PNG export |
 | Layout | mind map with balanced branches, exact measured extents, no overlap by construction |
-| Text | rich text per topic (`TextRun[]`): bold/italic/underline, colours, heading sizes, nested bullet lists — drawn by the canvas, edited in a single Lexical overlay |
-| Editing | create / sibling / child / promote, rename, delete, duplicate, copy/paste/cut, drag-and-drop reparenting |
-| Structure ops | collapse/expand, sort siblings, tasks, notes, styles, relationships |
+| Text | rich text per topic (`TextRun[]`): bold/italic/underline/strikethrough, colours, heading sizes, nested bullet lists — drawn by the canvas, edited in a single Lexical overlay |
+| Editing | create / sibling / child / promote, rename, delete, duplicate, copy/paste/cut, drag-and-drop reparenting, type-to-edit |
+| Structure ops | collapse/expand, sort siblings, tasks, notes, styles, relationships (arrows), groups, summaries |
+| Images | attach by drop/paste, three stored levels (original / 1024px / 256px), decode-at-paint-size with a byte-budgeted bitmap cache, resize slider + canvas handle, select / delete / reassign |
 | Workspace | outliner, inspector, command palette, search, light theme, Zen mode, manual save |
-| Import/export | JSON, Markdown, PNG; clipboard import sanitized from Word / Google Docs / Draw.io |
+| Import/export | JSON, Markdown, PNG; `.rnode.zip` with images (complete or compact); clipboard import sanitized from Word / Google Docs / Draw.io |
+| Desktop | Tauri 2 shell; each document is one `.rnode` SQLite file (document + assets in a single transaction), native open/save dialogs, drag files from the OS onto topics |
 
 ---
 
@@ -71,16 +80,18 @@ main interactions.
 | `Arrow keys` | navigate between topics |
 | `F2` / double-click | edit topic text |
 | `Space` | collapse / expand branch |
-| `Delete` / `Backspace` | delete branch |
-| `Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z` | undo / redo |
+| `Delete` / `Backspace` | delete branch (or the selected image / relationship / group) |
+| `Ctrl/Cmd+Z` / `Ctrl/Cmd+Shift+Z` / `Ctrl/Cmd+Y` | undo / redo |
 | `Ctrl/Cmd+D` | duplicate topic |
 | `Ctrl/Cmd+C` / `X` / `V` | copy / cut / paste |
+| `Ctrl/Cmd+Shift+C` | copy selection as an outline |
 | `Ctrl/Cmd+K` | command palette |
 | `Ctrl/Cmd+F` | search |
 | `Ctrl/Cmd+S` | save now |
+| `Ctrl/Cmd+O` | open a document |
 | `Ctrl/Cmd+E` | export JSON |
 | `Ctrl/Cmd+Enter` | toggle task complete |
-| `Ctrl/Cmd+1` / `0` | fit map to view / reset zoom |
+| `Ctrl/Cmd+1` / `0` | fit map to view |
 | `Ctrl/Cmd+=` / `-` | zoom in / out |
 | `Ctrl/Cmd+Shift+F` | Zen (focus) mode |
 | `Escape` | close editor / clear selection |
@@ -102,6 +113,7 @@ Documentation map:
 | [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) | **read before changing code** — invariants, the editor↔canvas parity contract, traps already paid for, definition of done |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | the ordered task list, one task at a time |
 | [docs/RICH_TEXT_EDITOR.md](docs/RICH_TEXT_EDITOR.md) | how rich text is modelled, measured, drawn and edited |
+| [docs/ADR-001-immagini-e-piattaforma.md](docs/ADR-001-immagini-e-piattaforma.md) | decision record: where images live, the decode-memory budget, and the desktop platform choice (A1+B1) |
 
 The code is split into clean, framework-free layers — only the UI uses React:
 
@@ -110,10 +122,12 @@ src/
 ├── core/      document schema, model + tree walks, operation system, history
 ├── layout/    measurement + placement engines (pure math, fully testable)
 ├── render/    camera/viewport, canvas renderer, themes, hit-testing, PNG export
-├── editor/    store (orchestration), keyboard shortcuts, context, export bridge
-├── persist/   storage adapters (localStorage now; IndexedDB, SQLite next)
+├── editor/    store (orchestration), keyboard shortcuts, context, export bridge,
+│              image-import pipeline (Web Worker)
+├── persist/   storage adapters (localStorage on web; `.rnode` SQLite via Tauri)
+│              + content-addressed asset store (IndexedDB on web, SQLite on desktop)
 └── ui/        React shell: canvas, sidebar, topbar, outliner, inspector, palette
-dev/           text parity harness (development only, not shipped)
+dev/           text parity harness + session tracer (development only, not shipped)
 ```
 
 ### Document model & operations
@@ -178,40 +192,54 @@ structure and emphasis survive, scripts, layout CSS and foreign fonts do not.
 
 Full detail in [docs/RICH_TEXT_EDITOR.md](docs/RICH_TEXT_EDITOR.md).
 
+### Images in nodes
+
+An image attaches to a topic (drop it on the node, or paste with a topic
+selected) and is drawn above the text inside the same box. On import the
+original is stored **intact** plus two derived levels (1024px and 256px on the
+long side); the canvas decodes only the level closest to what is actually
+painted, inside a byte-budgeted LRU cache, so a map with hundreds of images
+stays fluid. Resize with the Inspector slider or the canvas handle
+(proportions locked); select, delete or reassign an image without touching the
+node. The decision behind this — storage, decode-memory budget, and why the
+desktop is the primary home for images — is recorded in
+[docs/ADR-001-immagini-e-piattaforma.md](docs/ADR-001-immagini-e-piattaforma.md).
+
 ### Performance
 
 Verified with a permanent perf suite (`tests/perf.test.ts`). At 10k topics ops
-stay linear (~0.005 ms/op); the numbers the suite prints on each run are the
-reference — it reports `applyOps`, `layout`, `writeback` and tree walks
+stay linear (~0.005–0.008 ms/op); the numbers the suite prints on each run are
+the reference — it reports `applyOps`, `layout`, `writeback` and tree walks
 separately at 1k / 5k / 10k so a regression is attributable to one subsystem.
-The real constraint at scale is storage (a 10k map is ~3.6 MB in
-localStorage), which is exactly what the IndexedDB/SQLite adapters solve.
+The real constraint at scale is *web* storage (a 10k map is ~3.6 MB in
+localStorage); on desktop the document is a single `.rnode` SQLite file, and
+images live in a content-addressed store behind a byte-budgeted decode cache
+(measured at ~17 MB peak for 306 on-screen bitmaps, against a 128 MB budget —
+see ADR-001 §12).
 
 ---
 
 ## Desktop app (Tauri 2 + Rust)
 
-The `src-tauri/` shell is scaffolded and ready — it adds SQLite persistence
-for the same JSON documents, exposed to the frontend as
-`list_documents` / `load_document` / `save_document` / `delete_document`.
-It is **not compiled yet** because Rust isn't installed on this machine.
+R-node runs as a native desktop app. Each document is **one `.rnode` file** — a
+SQLite database that holds the document JSON *and* its images, committed in a
+single transaction, so "a document" is a single file on disk (no folder, no
+sidecars). Open and save use native dialogs, and you can drag image files from
+the OS onto topics. The shell is compiled and working on this machine.
 
-To enable it:
+Requirements: [Rust](https://rustup.rs) (stable) and the Tauri CLI
+(`cargo install tauri-cli --locked`), plus `npm install`. WebView2 is built
+into Windows 11.
 
 ```bash
-# 1. Install Rust (https://rustup.rs) — per-user, no admin needed
-rustup default stable
-# 2. Install the Tauri CLI
-cargo install tauri-cli --locked
-# 3. From r-node/:
-npm install
-cargo tauri dev
+cargo tauri dev       # dev build — starts Vite and opens the desktop window
+cargo tauri build     # release build → installer in src-tauri/target/release/
 ```
 
-Then swap in `TauriStorageAdapter` (in `src/persist/storage.ts`) to persist
-through SQLite instead of localStorage. Bundle icons and `bundle.active` are
-already configured, so `cargo tauri build` can produce an installer once Rust
-is installed.
+The web target keeps working unchanged (`npm run dev`) — it persists to
+localStorage and shares all the same code; only the storage adapter differs.
+Documents without images export as `.rnode.json`; maps with images share as a
+single `.rnode.zip` (complete = originals, compact = display levels only).
 
 ---
 
@@ -221,17 +249,17 @@ is installed.
 npm test
 ```
 
-101 tests across 8 suites: document operations, undo/redo round-trips,
+188 tests across 13 suites: document operations, undo/redo round-trips,
 reparenting and subtree moves, layout geometry (no-overlap, straddle,
 size-aware balance, upward propagation), text measurement (line boxes, block
 gaps, bullet columns, mid-word breaks), the Lexical ↔ runs bridge (including
-round-trip idempotence), clipboard sanitization, viewport math, and
-performance ceilings at 1k/5k/10k topics.
+round-trip idempotence), clipboard sanitization, viewport math, the asset
+store and image import pipeline, the Tauri storage adapter, export (including
+`.rnode.zip` round-trips), and performance ceilings at 1k/5k/10k topics.
 
 Text parity between the canvas and the editor is checked separately, in a real
 browser, at `http://localhost:5173/dev/parity.html` — jsdom cannot do it
-because it has no layout engine. Automating it is task T2 in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+because it has no layout engine.
 
 ---
 
@@ -272,11 +300,15 @@ two different bugs. A capture answers that in one line. How to read one is in
 ## Roadmap
 
 - **Phase 1 — Core editor (done):** document model, ops + undo/redo, canvas
-  renderer, mind-map layout, keyboard + mouse editing, drag-and-drop,
+  renderer, mind-map layout, keyboard + mouse editing, drag-and-drop, marquee,
   outliner, inspector, palette, manual save, rich text topics with measured
   editor/canvas parity, JSON/Markdown/PNG export.
-- **Phase 2 — Visual richness:** themes/styles polish, markers, labels, rich
-  notes, boundaries, summaries, relationships UI, callouts, attachments.
+- **Images & desktop (done):** content-addressed asset store, drop/paste
+  import in a Web Worker, decode-at-paint-size with a byte budget, resize
+  slider + handle, portable `.rnode.zip`, Tauri bring-up, and single-file
+  `.rnode` (SQLite) desktop documents. (ROADMAP tasks T12a–T20.)
+- **Phase 2 — Visual richness (in progress):** markers, labels, rich notes,
+  boundaries, callouts.
 - **Phase 3 — Structures:** logic chart, tree chart, org chart, timeline,
   fishbone/Ishikawa, matrix, tree table, mixed structures.
 - **Phase 4 — Productivity:** Gantt, full-text search+, templates,
