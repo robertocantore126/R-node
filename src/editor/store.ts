@@ -20,6 +20,8 @@ import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewp
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
+import { IndexedDbAssetStore } from "../persist/assets";
+import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
 
 declare global {
   interface Window {
@@ -1303,6 +1305,42 @@ export class EditorStore {
     this.setNodeImage(nodeId, card.id);
   }
 
+  /**
+   * Full import+attach flow (T13-2): validate, import in the worker, store
+   * the three levels in the AssetStore, then reference the node. Every
+   * rejection says why (rule §4bis of AGENT_GUIDE).
+   */
+  async attachImageFile(nodeId: string, file: Blob & { name?: string }): Promise<{ ok: boolean; reason?: string }> {
+    const v = validateImageSource(file.type, file.size);
+    if (!v.ok) {
+      trace.ignored(
+        "drop",
+        v.reason.startsWith("unsupported") ? "unsupported mime" : "too large",
+        { mime: file.type, bytes: file.size }
+      );
+      return { ok: false, reason: v.reason };
+    }
+    let imported: ImportedImage;
+    try {
+      imported = await importImageFile(file);
+    } catch (err) {
+      trace.ignored("drop", "decode failed", { error: String(err) });
+      return { ok: false, reason: String(err) };
+    }
+    const assetStore = new IndexedDbAssetStore();
+    const id = await assetStore.put(imported.levels, imported.meta);
+    this.attachImage(nodeId, {
+      id,
+      mime: imported.meta.mime,
+      w: imported.meta.w,
+      h: imported.meta.h,
+      bytes: imported.meta.bytes,
+      name: imported.meta.name,
+    });
+    trace.applied("drop:image", { bytes: imported.meta.bytes, w: imported.meta.w, h: imported.meta.h });
+    return { ok: true };
+  }
+
   // -------------------------------------------------------------------------
   // Canvas resize drag (Xmind-style handle) — ephemeral draft, single commit
   // -------------------------------------------------------------------------
@@ -1503,16 +1541,33 @@ export class EditorStore {
     // fall back to whatever plain text is on the clipboard (external sources,
     // or older engines that can't read custom MIME types).
     let text: string | null = null;
+    let items: ClipboardItems | null = null;
     try {
-      const items = await navigator.clipboard.read();
+      items = await navigator.clipboard.read();
+    } catch {
+      /* clipboard read with MIME types blocked — fall through to readText */
+    }
+    if (items) {
+      // An image on the clipboard beats text (T13-2): with a node selected, a
+      // copied/screenshotted image attaches instead of inserting text.
+      const imageItem = items.find((i) => i.types.some((t) => t.startsWith("image/")));
+      if (imageItem) {
+        const type = imageItem.types.find((t) => t.startsWith("image/"))!;
+        const blob = await imageItem.getType(type);
+        const node = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
+        if (node) {
+          await this.attachImageFile(node.id, new File([blob], "pasted-image", { type: blob.type || type }));
+        } else {
+          trace.ignored("paste:image", "no node selected");
+        }
+        return;
+      }
       for (const item of items) {
         if (item.types.includes("text/rnode")) {
           text = await item.getType("text/rnode").then((blob) => blob.text());
           break;
         }
       }
-    } catch {
-      /* clipboard read with MIME types blocked — fall through to readText */
     }
     if (text === null) text = await navigator.clipboard.readText().catch(() => null);
     if (!text) return;

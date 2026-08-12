@@ -624,6 +624,37 @@ export function CanvasView(): JSX.Element {
         }}
         onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}
+        onDragOver={(e) => {
+          // Accept the drop (T13-2): without preventDefault the browser would
+          // navigate away on drop. Highlight the node under the cursor while
+          // dragging so the user sees the target.
+          if (![...e.dataTransfer.types].includes("Files")) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          const { x, y } = localPoint(e as unknown as RPointerEvent);
+          const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+          const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+          store.setHover(hit);
+        }}
+        onDragLeave={() => {
+          if (!dragRef.current?.dragging) store.setHover(null);
+        }}
+        onDrop={async (e) => {
+          if (![...e.dataTransfer.types].includes("Files")) return;
+          e.preventDefault();
+          const file = e.dataTransfer.files[0];
+          if (!file) return;
+          const { x, y } = localPoint(e as unknown as RPointerEvent);
+          const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+          const target = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+          store.setHover(null);
+          if (!target) {
+            store.toast("Drop the image on a topic");
+            return;
+          }
+          const res = await store.attachImageFile(target, file);
+          if (!res.ok) store.toast(res.reason ?? "Could not import image");
+        }}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
       {marquee && (
