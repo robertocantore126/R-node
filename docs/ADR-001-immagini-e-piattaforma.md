@@ -598,6 +598,24 @@ di dieci volte: il problema che aveva motivato questo documento non si presenta.
 4. **T15** — `.rnode.zip` per la condivisione
 5. **Misura contro XMind** con il tracer, e solo allora si rivaluta
 
+### Verificato sul campo (2026-08-12)
+
+Le cifre della tabella qui sopra erano **stime**. Ora sono misurate: 344 nodi,
+300 immagini da 1600×1200, con i contatori del tracer.
+
+- Mappa normale al fit: 22 immagini visibili → **5,6 MB**, 2,5 ms/frame.
+- **Caso moodboard** (i 300 nodi impacchettati in griglia, cioè la condizione
+  di riapertura qui sotto): picco **17,4 MB** con 306 bitmap in cache, e
+  1,6–1,9 ms/frame a regime.
+
+Contro un budget di 128 MB il margine è **7×**, e nel caso peggiore previsto.
+Media ~57 KB per bitmap. **La condizione di riapertura non scatta.**
+
+Con un'avvertenza: la misura è a `devicePixelRatio = 1`. Su retina i byte
+crescono di circa 4× (picco stimato ~70 MB, margine 1,8×): resta sotto il
+budget, ma va rimisurato. Dettaglio in
+[PIANO-IMMAGINI.md](PIANO-IMMAGINI.md) §5.
+
 ### Cosa ribalterebbe questa decisione
 
 Una condizione sola, ed è verificabile: un caso d'uso **moodboard** — ~200

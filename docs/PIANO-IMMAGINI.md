@@ -287,3 +287,48 @@ Alla fine dei dodici passi, la sequenza va rivista da capo: un commit per
 passo rende possibile leggerla come storia. I punti da guardare per primi sono
 i cancelli **G-par** dei passi 3, 4, 5 e 9 — se la parità è tornata a 0 senza
 che nessuno abbia toccato `wrapRunLines`, il grosso è andato bene.
+
+---
+
+## 5. Risultati del passo 11 (T17) — misurato il 2026-08-12
+
+Mappa reale: **344 nodi, 300 immagini** da 1600×1200 attaccate, viewport
+1280×720, **`devicePixelRatio = 1`**.
+
+### Caso mappa normale (fit)
+
+| Regime | Immagini visibili | Bitmap in cache | RAM bitmap | ms/frame |
+|---|---|---|---|---|
+| fit (zoom 0.4) | 22 | 54 | **5,6 MB** | 2,5 |
+
+### Caso moodboard — 300 immagini impacchettate in griglia
+
+È la **condizione di riapertura** dichiarata in ADR-001 §12: molte immagini
+grandi tutte visibili insieme. Forzata spostando i 300 nodi con immagine in una
+griglia fitta.
+
+| Zoom | Immagini visibili | Bitmap in cache | RAM bitmap | ms/frame |
+|---|---|---|---|---|
+| 0,25 | **300** | 66 | 6,2 MB | 37,2 (burst iniziale di decodifica) |
+| 0,5 | 90 | 306 | **17,4 MB** | 1,9 |
+| 1,0 | 30 | 306 | 17,4 MB | 1,6 |
+
+### Verdetto: **G-mem passa**
+
+- Picco misurato **17,4 MB** contro un budget di 128 MB: **7 volte di margine**,
+  e nel caso peggiore previsto dall'ADR, non in quello favorevole.
+- Media **~57 KB per bitmap**. Senza la correzione del passo 4b sarebbero stati
+  ~3 MB l'una: le stesse 306 bitmap avrebbero fatto **~900 MB**, cioè sfratto
+  continuo. La correzione vale un fattore ~50 su questo carico.
+- Il frame time resta **1,6–1,9 ms** a regime. Il picco di 37 ms si presenta una
+  volta sola, quando 300 immagini entrano insieme nel viewport e la coda di
+  decodifica è satura; si riassorbe da solo.
+- **La condizione di riapertura di ADR-001 §12 non scatta.** Il caso moodboard
+  è stato provato e regge.
+
+### Avvertenza sulla misura
+
+`devicePixelRatio` era **1**. Su schermo retina i bucket salgono di un passo e i
+byte crescono di circa 4×: il picco stimato diventa **~70 MB**, ancora sotto il
+budget ma con margine 1,8× invece di 7×. **Da rimisurare su un monitor a dpr 2**
+prima di considerare chiusa la questione.
