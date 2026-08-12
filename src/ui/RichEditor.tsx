@@ -163,15 +163,15 @@ export function RichEditor({
 // sitting above the editable exactly where the canvas draws the image.
 // ---------------------------------------------------------------------------
 
-const overlayAssetStore = getAssetStore();
-
 function NodeImageBlock({ id, imgW, imgH, left, top }: { id: string; imgW: number; imgH: number; left: number; top: number }): JSX.Element {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     let created: string | null = null;
     void (async () => {
-      const blob = await overlayAssetStore.get(id, "large");
+      // Resolved here, at use time: the store singleton must be picked in the
+      // running environment, not at module scope (T18-D).
+      const blob = await getAssetStore().get(id, "large");
       if (cancelled || !blob) return;
       created = URL.createObjectURL(blob);
       setUrl(created);

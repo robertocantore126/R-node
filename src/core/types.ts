@@ -272,6 +272,12 @@ export interface AttachmentInfo {
   bytes: number; // weight of the original, shown to the user
   name?: string;
   alt?: string;
+  /**
+   * The original bytes are gone: the asset came from a compact .rnode.zip
+   * import, which carries only display levels (AGENT_GUIDE I11). A complete
+   * export of this document exports the resized level and must say so.
+   */
+  originalLost?: boolean;
 }
 
 // ---------------------------------------------------------------------------

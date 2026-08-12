@@ -135,12 +135,19 @@ export async function buildRnodeZip(
   store: AssetStore,
   mode: RnodeZipMode
 ): Promise<Uint8Array> {
+  const ids = [...referencedAssetIds(sheet)];
+  // A referenced asset whose original is gone (compact import, I11): a
+  // "complete" export of it is degraded — the zip carries the resized level.
+  // The manifest says so, and the store warns the user before generating.
+  const degraded = ids.some((id) => sheet.attachments.some((a) => a.id === id && a.originalLost));
   const files: Record<string, Uint8Array> = {
     "document.json": strToU8(JSON.stringify(doc)),
-    "manifest.json": strToU8(JSON.stringify({ mode })),
+    "manifest.json": strToU8(
+      JSON.stringify(degraded ? { mode, degraded: true } : { mode })
+    ),
   };
   const level = levelForMode(mode);
-  for (const id of referencedAssetIds(sheet)) {
+  for (const id of ids) {
     const [meta, blob] = await Promise.all([store.meta(id), store.get(id, level)]);
     if (!meta || !blob) continue; // referenced but absent: the zip cannot carry it
     files[`assets/${id}.${extForMime(meta.mime)}`] = new Uint8Array(await blob.arrayBuffer());
@@ -215,8 +222,20 @@ export async function importRnodeZip(
   const docRaw = files["document.json"];
   if (!docRaw) return null;
 
-  // manifest.json is informational: the level generator derives what it needs
-  // from whichever level the container carries.
+  // A compact container carries display levels only: the assets it restores
+  // have NO original, and the document must say so — otherwise a later
+  // "complete" export would claim to ship originals it does not have (I11).
+  let mode: RnodeZipMode = "complete";
+  const manifestRaw = files["manifest.json"];
+  if (manifestRaw) {
+    try {
+      const parsed = JSON.parse(strFromU8(manifestRaw)) as { mode?: RnodeZipMode };
+      if (parsed.mode === "compact") mode = "compact";
+    } catch {
+      // no readable manifest: assume the only level present is the original
+    }
+  }
+
   let doc: RnodeDocument;
   try {
     doc = JSON.parse(strFromU8(docRaw)) as RnodeDocument;
@@ -239,6 +258,7 @@ export async function importRnodeZip(
     const blob = new Blob([bytes.slice().buffer], { type: mime });
     const levels = await generate(blob, mime);
     const card = sheet.attachments.find((a) => a.id === id);
+    if (mode === "compact" && card) card.originalLost = true;
     const meta: AssetMeta = card ?? {
       id,
       mime,

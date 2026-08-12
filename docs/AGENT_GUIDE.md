@@ -61,6 +61,7 @@ via senza capirla.
 | I8 | Il round-trip `runs → editor → runs` è **idempotente**. | Non lo era: un titolo derivava a ogni modifica. Test a 3 cicli in `tests/lexicalRuns.test.ts`. |
 | I9 | Le costanti condivise hanno **una** definizione, in `src/layout/measure.ts`. | Vedi §3. Duplicarle è il modo classico in cui i due renderer divergono. |
 | I10 | La parità editor↔canvas è **misurata**, non dichiarata. | Vedi §3 e §4. |
+| I11 | L'id di un asset è lo **SHA-256 dell'originale**, tranne per gli asset ripristinati da un container `.rnode.zip` compact (`putUnderId`): quelli portano `AttachmentInfo.originalLost` e un export `complete` deve dichiararlo. | Il compact non porta gli originali: l'id non può essere ri-derivato. Se nulla lo segna, un export `complete` dichiara originali che non ha. |
 
 ### Costanti condivise (I9)
 

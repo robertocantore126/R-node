@@ -40,6 +40,20 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export type PortableFormat = "json" | "zip";
+
+/**
+ * Storage key of the picked file handle for a document+format pair. The
+ * portable format of a document CHANGES when images appear or disappear
+ * (save switches between .rnode.json and .rnode.zip): a key on the docId
+ * alone would silently write zip bytes into the user's .json file. One
+ * handle per format means removing the images later goes back to the
+ * original file, and the format switch merely re-asks where to save.
+ */
+export function portableFileKey(docId: string, format: PortableFormat): string {
+  return `r-node.file-handle.${docId}:${format}`;
+}
+
 /**
  * Validate/sanitize titleRuns coming from an imported document: only plain
  * text with bold/italic/underline/color survives; anything else is dropped.
@@ -342,16 +356,20 @@ export class EditorStore {
   private async writePortableBytes(
     blob: Blob,
     fileName: string,
-    pickerType: { description: string; accept: Record<string, string[]> }
+    pickerType: { description: string; accept: Record<string, string[]> },
+    format: PortableFormat
   ): Promise<boolean> {
     const docId = this.model.doc.documentId;
-    const key = `r-node.file-handle.${docId}`;
+    const key = portableFileKey(docId, format);
+    const otherKey = portableFileKey(docId, format === "zip" ? "json" : "zip");
 
-    // 1) Reuse the stored handle → silent overwrite, no dialog, no download.
-    let handle = this.fileHandles.get(docId) ?? null;
+    // 1) Reuse the stored handle for THIS format → silent overwrite, no
+    //    dialog, no download. The other format's handle is left alone: if the
+    //    document loses its images later, the save goes back to that file.
+    let handle = this.fileHandles.get(key) ?? null;
     if (!handle) {
       handle = await this.loadFileHandle(key);
-      if (handle) this.fileHandles.set(docId, handle);
+      if (handle) this.fileHandles.set(key, handle);
     }
     if (handle) {
       try {
@@ -361,19 +379,30 @@ export class EditorStore {
         return true;
       } catch {
         // Handle stale (file moved/deleted) → drop it and ask again.
-        this.fileHandles.delete(docId);
+        this.fileHandles.delete(key);
         await this.clearFileHandle(key);
       }
     }
 
     // 2) No handle but the API exists → let the user pick where to save.
     if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
+      // Reaching the picker with a handle for the OTHER format means the
+      // portable format of this document just changed: say why, instead of
+      // silently asking for a new location.
+      const otherHandle = this.fileHandles.get(otherKey) ?? (await this.loadFileHandle(otherKey));
+      if (otherHandle) {
+        this.toast(
+          format === "zip"
+            ? "The document now contains images — choose where to save the .rnode.zip"
+            : "The images were removed — choose where to save the .rnode.json"
+        );
+      }
       try {
         const picked = await window.showSaveFilePicker({ suggestedName: fileName, types: [pickerType] });
         const writable = await picked.createWritable();
         await writable.write(blob);
         await writable.close();
-        this.fileHandles.set(docId, picked);
+        this.fileHandles.set(key, picked);
         await this.storeFileHandle(key, picked);
         return true;
       } catch (e) {
@@ -387,11 +416,22 @@ export class EditorStore {
     return true;
   }
 
+  /**
+   * Referenced assets whose original bytes are gone (a compact .rnode.zip
+   * import). A complete export of them would silently ship the resized
+   * level, so the count is shown before generating (T18-B).
+   */
+  private degradedAssetCount(): number {
+    const referenced = referencedAssetIds(this.sheet);
+    return this.sheet.attachments.filter((a) => a.originalLost && referenced.has(a.id)).length;
+  }
+
   private async writePortableFile(json: string): Promise<boolean> {
     return this.writePortableBytes(
       new Blob([json], { type: "application/json" }),
       this.docFileName(),
-      { description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } }
+      { description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } },
+      "json"
     );
   }
 
@@ -403,12 +443,19 @@ export class EditorStore {
   private async writePortableZip(): Promise<boolean> {
     const store = getAssetStore();
     const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, "complete");
-    this.toast(`Exporting .rnode.zip (~${formatBytes(estimate)})…`);
+    const degraded = this.degradedAssetCount();
+    const est = formatBytes(estimate);
+    this.toast(
+      degraded > 0
+        ? `${degraded} asset${degraded === 1 ? "" : "s"} lost their original in a compact import — exporting display levels (~${est})`
+        : `Exporting .rnode.zip (~${est})…`
+    );
     const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, "complete");
     return this.writePortableBytes(
       new Blob([bytes.slice().buffer], { type: "application/zip" }),
       this.docZipName(),
-      { description: "R-node document with images", accept: { "application/zip": [".rnode.zip"] } }
+      { description: "R-node document with images", accept: { "application/zip": [".rnode.zip"] } },
+      "zip"
     );
   }
 
@@ -420,7 +467,15 @@ export class EditorStore {
   async exportRnodeZip(mode: RnodeZipMode): Promise<void> {
     const store = getAssetStore();
     const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, mode);
-    this.toast(`Exporting .rnode.zip (~${formatBytes(estimate)})…`);
+    const est = formatBytes(estimate);
+    // Compact is explicitly lossy, so only complete mode must warn about
+    // assets whose originals are gone (T18-B).
+    const degraded = mode === "complete" ? this.degradedAssetCount() : 0;
+    this.toast(
+      degraded > 0
+        ? `${degraded} asset${degraded === 1 ? "" : "s"} lost their original in a compact import — exporting display levels (~${est})`
+        : `Exporting .rnode.zip (~${est})…`
+    );
     const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, mode);
     this.download(new Blob([bytes.slice().buffer], { type: "application/zip" }), this.docZipName());
   }

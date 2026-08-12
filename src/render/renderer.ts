@@ -44,9 +44,6 @@ interface Placed {
   visible: boolean;
 }
 
-/** One asset store for the whole app; overridable per-Renderer in tests. */
-const sharedAssetStore: AssetStore = getAssetStore();
-
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private dpr = 1;
@@ -99,7 +96,11 @@ export class Renderer {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2d context unavailable");
     this.ctx = ctx;
-    this.assetStore = opts.assetStore ?? sharedAssetStore;
+    // Resolved at construction, not at module scope: getAssetStore() is a
+    // singleton that sticks on first call, and module init may run before
+    // Tauri injects window.__TAURI__ — the backend must be picked when the
+    // renderer is actually created, in the running environment.
+    this.assetStore = opts.assetStore ?? getAssetStore();
     this.onRepaint = opts.onRepaint ?? null;
   }
 

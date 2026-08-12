@@ -235,10 +235,52 @@ describe(".rnode.zip import", () => {
 
     // The document keeps its original id (content address of the original,
     // which compact did not carry) — and the store serves it under that id.
-    expect(imported).toEqual(doc);
+    expect(imported).not.toBeNull();
     expect(await fresh.list()).toEqual([id]);
     expect(await fresh.get(id, "large")).not.toBeNull();
     expect(await fresh.get(id, "small")).not.toBeNull();
+  });
+
+  it("compact import marks the asset cards as originalLost", async () => {
+    const source = new IndexedDbAssetStore(uniqueDb());
+    const id = await putTestAsset(source);
+    const doc = makeDocWithImage(id);
+    const zip = await buildRnodeZip(doc, doc.sheets[0], source, "compact");
+
+    const fresh = new IndexedDbAssetStore(uniqueDb());
+    const imported = (await importRnodeZip(zip, fresh, fakeGenerate))!;
+    expect(imported.sheets[0].attachments.find((a) => a.id === id)?.originalLost).toBe(true);
+  });
+
+  it("complete import leaves the cards unmarked", async () => {
+    const source = new IndexedDbAssetStore(uniqueDb());
+    const id = await putTestAsset(source);
+    const doc = makeDocWithImage(id);
+    const zip = await buildRnodeZip(doc, doc.sheets[0], source, "complete");
+
+    const fresh = new IndexedDbAssetStore(uniqueDb());
+    const imported = (await importRnodeZip(zip, fresh, fakeGenerate))!;
+    expect(imported.sheets[0].attachments.find((a) => a.id === id)?.originalLost).toBeUndefined();
+  });
+
+  it("a complete export of a compact-imported doc flags degraded in the manifest", async () => {
+    const source = new IndexedDbAssetStore(uniqueDb());
+    const id = await putTestAsset(source);
+    const doc = makeDocWithImage(id);
+    const compactZip = await buildRnodeZip(doc, doc.sheets[0], source, "compact");
+
+    const fresh = new IndexedDbAssetStore(uniqueDb());
+    const imported = (await importRnodeZip(compactZip, fresh, fakeGenerate))!;
+
+    // Store serves the display level under the same id, and the complete
+    // export of the degraded document says so in its manifest.
+    const completeZip = await buildRnodeZip(imported, imported.sheets[0], fresh, "complete");
+    const manifest = JSON.parse(strFromU8(unzipSync(completeZip)["manifest.json"]));
+    expect(manifest).toEqual({ mode: "complete", degraded: true });
+
+    // A fresh complete export of the same doc (no degradation) stays clean.
+    const cleanZip = await buildRnodeZip(doc, doc.sheets[0], source, "complete");
+    expect(JSON.parse(strFromU8(unzipSync(cleanZip)["manifest.json"]))).toEqual({ mode: "complete" });
   });
 
   it("returns null for a corrupt container", async () => {

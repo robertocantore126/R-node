@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EditorStore } from "../src/editor/store";
+import { EditorStore, portableFileKey } from "../src/editor/store";
 import { makeOp, type Op } from "../src/core/ops";
 import type { StorageAdapter } from "../src/persist/storage";
 
@@ -8,6 +8,20 @@ const memoryAdapter: StorageAdapter = {
   async load() { return []; },
   async save() { /* no-op */ },
 };
+
+describe("portableFileKey", () => {
+  it("derives a distinct key per format for the same document", () => {
+    const json = portableFileKey("doc-1", "json");
+    const zip = portableFileKey("doc-1", "zip");
+    expect(json).not.toBe(zip);
+    expect(json).toBe("r-node.file-handle.doc-1:json");
+    expect(zip).toBe("r-node.file-handle.doc-1:zip");
+  });
+
+  it("does not collide across documents", () => {
+    expect(portableFileKey("doc-1", "json")).not.toBe(portableFileKey("doc-2", "json"));
+  });
+});
 
 describe("new topic defaults", () => {
   it("gives every newly created topic a useful editable title", () => {

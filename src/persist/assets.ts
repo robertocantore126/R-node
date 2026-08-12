@@ -39,6 +39,12 @@ export interface AssetStore {
    * stored levels (what `put` does) would change it and every reference in
    * the imported document would break. Idempotent like `put`: an id that
    * already exists is left untouched.
+   *
+   * INVARIANT EXCEPTION (AGENT_GUIDE I11): by taking the id as an argument
+   * this breaks `id === sha256(original)`. That is only reachable through the
+   * .rnode.zip importer, and only for assets whose original is lost (the
+   * compact mode carries display levels only) — those assets carry the
+   * `originalLost` flag on their AttachmentInfo card so an export can warn.
    */
   putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void>;
   get(id: string, level: AssetLevel): Promise<Blob | null>;
