@@ -1,14 +1,19 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   IndexedDbAssetStore,
   collectOrphans,
+  referencedAssetIds,
   sha256Hex,
   type AssetBlob,
   type AssetLevel,
   type AssetMeta,
 } from "../src/persist/assets";
 import { DEFAULT_STRUCTURE, type MindNode, type Sheet } from "../src/core/types";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function blob(text: string, mime = "image/png"): Blob {
   return new Blob([text], { type: mime });
@@ -51,6 +56,10 @@ function nodeWithImage(id: string, imageId: string): MindNode {
     task: null,
     metadata: { createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
   };
+}
+
+function attachmentCard(id: string, name: string): Sheet["attachments"][number] {
+  return { id, mime: "image/png", w: 1200, h: 800, bytes: 9, name };
 }
 
 function makeSheet(overrides: Partial<Sheet> = {}): Sheet {
@@ -144,49 +153,87 @@ describe("IndexedDbAssetStore", () => {
     // The sibling asset is untouched.
     expect(await store.get(keepId, "original")).not.toBeNull();
   });
+
+  it("F3 — concurrent puts of the same content are atomic: one record, first wins", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+
+    // Release both digest calls at the same instant so the two puts race
+    // through their existence checks instead of serializing. Without the
+    // single-transaction put, both checks pass and the second write wins.
+    let release: () => void = () => {};
+    const barrier = new Promise<void>((r) => {
+      release = r;
+    });
+    let pending = 0;
+    const realDigest = crypto.subtle.digest.bind(crypto.subtle);
+    vi.spyOn(crypto.subtle, "digest").mockImplementation(
+      async (...args: Parameters<SubtleCrypto["digest"]>) => {
+        const out = await realDigest(...args);
+        pending += 1;
+        if (pending === 2) release();
+        await barrier;
+        return out;
+      },
+    );
+
+    const [id1, id2] = await Promise.all([
+      store.put(makeLevels(), meta({ name: "first.png" })),
+      store.put(makeLevels(), meta({ name: "second.png" })),
+    ]);
+
+    expect(id2).toBe(id1);
+    // One record, not two; the first writer's metadata survives.
+    expect(await store.list()).toEqual([id1]);
+    expect((await store.meta(id1))?.name).toBe("first.png");
+  });
+});
+
+describe("referencedAssetIds", () => {
+  it("roots are the nodes only: an unattached attachment card is not a root", () => {
+    const sheet = makeSheet({
+      attachments: [attachmentCard("card-only", "card.png")],
+      nodes: { n1: nodeWithImage("n1", "via-node") },
+    });
+
+    expect(referencedAssetIds(sheet)).toEqual(new Set(["via-node"]));
+  });
 });
 
 describe("collectOrphans", () => {
-  it("finds only ids no node references any more, and deletes nothing", async () => {
+  it("F1 — reports orphan cards and orphan blobs, and deletes nothing", async () => {
     const store = new IndexedDbAssetStore(uniqueDb());
     const viaNode = await store.put(makeLevels("VIA-NODE"), meta());
-    const viaList = await store.put(makeLevels("VIA-LIST"), meta());
-    const orphan = await store.put(makeLevels("ORPHAN"), meta());
+    const cardOnly = await store.put(makeLevels("CARD-ONLY"), meta());
+    const blobOnly = await store.put(makeLevels("BLOB-ONLY"), meta());
 
     const sheet = makeSheet({
-      // One channel: the sheet's attachment list.
-      attachments: [
-        {
-          id: viaList,
-          mime: "image/png",
-          w: 1200,
-          h: 800,
-          displayW: 1024,
-          displayH: 683,
-          bytes: 9,
-          name: "via-list.png",
-        },
-      ],
-      // The other channel: a node's Style.image.
+      // A card for B with no node behind it: garbage itself, not a root.
+      attachments: [attachmentCard(cardOnly, "card.png")],
+      // A node that references A.
       nodes: { n1: nodeWithImage("n1", viaNode) },
     });
 
-    const orphans = await collectOrphans(sheet, store);
+    const report = await collectOrphans(sheet, store);
 
-    expect(orphans).toEqual([orphan]);
+    // The orphaned card is reported as a card and as a blob (nothing in the
+    // store references it either); C is a blob-only orphan.
+    expect(report.cards).toEqual([cardOnly]);
+    expect(report.blobs).toContain(cardOnly);
+    expect(report.blobs).toContain(blobOnly);
+    expect(report.blobs).not.toContain(viaNode);
 
     // Nothing was deleted: all three assets are still listed and readable.
-    expect((await store.list()).sort()).toEqual([viaNode, viaList, orphan].sort());
-    expect(await store.get(orphan, "original")).not.toBeNull();
+    expect((await store.list()).sort()).toEqual([viaNode, cardOnly, blobOnly].sort());
     expect(await store.get(viaNode, "original")).not.toBeNull();
-    expect(await store.get(viaList, "original")).not.toBeNull();
+    expect(await store.get(cardOnly, "original")).not.toBeNull();
+    expect(await store.get(blobOnly, "original")).not.toBeNull();
   });
 
-  it("returns an empty list when every stored id is referenced", async () => {
+  it("returns empty cards and blobs when every stored id is referenced", async () => {
     const store = new IndexedDbAssetStore(uniqueDb());
     const id = await store.put(makeLevels(), meta());
 
     const sheet = makeSheet({ nodes: { n1: nodeWithImage("n1", id) } });
-    expect(await collectOrphans(sheet, store)).toEqual([]);
+    expect(await collectOrphans(sheet, store)).toEqual({ cards: [], blobs: [] });
   });
 });

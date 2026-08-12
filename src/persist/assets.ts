@@ -68,6 +68,11 @@ function openDb(dbName: string): Promise<IDBDatabase> {
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+    // A version-change upgrade waits for other open connections. Never hang
+    // forever: reject loudly instead of leaving the promise pending.
+    req.onblocked = () => {
+      reject(new Error(`openDb("${dbName}"): upgrade blocked by an open connection`));
+    };
   });
 }
 
@@ -110,12 +115,25 @@ export class IndexedDbAssetStore implements AssetStore {
 
   async put(levels: Record<AssetLevel, AssetBlob>, meta: Omit<AssetMeta, "id">): Promise<string> {
     const id = await sha256Hex(await levels.original.blob.arrayBuffer());
-    // Content-addressed: an existing id is returned as-is, never rewritten
-    // or duplicated. First write wins, so later calls cannot clobber data.
-    if (await this.meta(id)) return id;
     const db = await this.db();
     const record: AssetRecord = { id, ...levels, meta: { ...meta, id } };
-    await txDone(db, "readwrite", (s) => s.put(record));
+    // Existence check and write in ONE readwrite transaction: two concurrent
+    // puts of identical content cannot both pass the check. Content-addressed
+    // first write wins — an existing id is returned as-is, never rewritten.
+    // Deliberately not add()-and-catch: a failed request aborts the
+    // transaction unless its error event is default-prevented.
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+      const s = tx.objectStore(STORE);
+      const getReq = s.get(id);
+      getReq.onsuccess = () => {
+        if (getReq.result === undefined) s.put(record);
+      };
+      getReq.onerror = () => reject(getReq.error);
+    });
     return id;
   }
 
@@ -146,17 +164,35 @@ export class IndexedDbAssetStore implements AssetStore {
 }
 
 /**
- * Ids in the store that no node references any more — neither through
- * `Style.image` nor through the sheet's attachment list. Returns them
- * WITHOUT deleting anything: garbage collection must be an explicit user
- * action (a command), never a side-effect of undo or save.
+ * The single source of truth for "which asset is in use". The roots are the
+ * nodes alone: an `attachments` card whose node is gone is garbage too, so
+ * it must never act as a root. Future referrers (callouts, boundaries) are
+ * added here, in one place.
  */
-export async function collectOrphans(sheet: Sheet, store: AssetStore): Promise<string[]> {
+export function referencedAssetIds(sheet: Sheet): Set<string> {
   const referenced = new Set<string>();
-  for (const att of sheet.attachments) referenced.add(att.id);
   for (const node of Object.values(sheet.nodes)) {
     if (node.style.image) referenced.add(node.style.image);
   }
+  return referenced;
+}
+
+export interface OrphanReport {
+  /** Cards in sheet.attachments that no node references. */
+  cards: string[];
+  /** Ids in the store that no node references. */
+  blobs: string[];
+}
+
+/**
+ * What is unreachable from the nodes. Returns an OrphanReport WITHOUT
+ * deleting anything: garbage collection must be an explicit user action (a
+ * command), never a side-effect of undo or save.
+ */
+export async function collectOrphans(sheet: Sheet, store: AssetStore): Promise<OrphanReport> {
+  const referenced = referencedAssetIds(sheet);
+  const cards = sheet.attachments.map((a) => a.id).filter((id) => !referenced.has(id));
   const ids = await store.list();
-  return ids.filter((id) => !referenced.has(id));
+  const blobs = ids.filter((id) => !referenced.has(id));
+  return { cards, blobs };
 }

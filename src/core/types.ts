@@ -267,8 +267,6 @@ export interface AttachmentInfo {
   mime: string; // image/png | image/jpeg | image/gif | image/webp
   w: number; // intrinsic pixels of the ORIGINAL
   h: number;
-  displayW: number; // pixels of the variant the canvas decodes
-  displayH: number;
   bytes: number; // weight of the original, shown to the user
   name?: string;
   alt?: string;
