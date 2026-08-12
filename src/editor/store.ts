@@ -19,8 +19,8 @@ import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer }
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
-import { LocalStorageAdapter, type StorageAdapter } from "../persist/storage";
-import { getAssetStore, referencedAssetIds } from "../persist/assets";
+import { LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
+import { getAssetStore, referencedAssetIds, TauriAssetStore } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
 
@@ -331,6 +331,26 @@ export class EditorStore {
     // can keep going. The later blur/Enter commit finds the title up to date.
     this.commitDraftKeepEditing();
     try {
+      if (this.adapter instanceof TauriStorageAdapter) {
+        // Desktop: the document IS a folder — save writes document.json only.
+        // The first save has no folder yet: it becomes a "Save as…" that
+        // picks one, copies the referenced assets into it and switches both
+        // the adapter and the asset store to it. Every later save just
+        // rewrites document.json (T19).
+        if (!this.adapter.hasRoot) {
+          const ok = await this.saveAsDesktop();
+          if (!ok) {
+            this.state.sync = "dirty";
+            this.toast("Save cancelled — no folder chosen");
+            return;
+          }
+        } else {
+          await this.adapter.save(this.state.docs);
+        }
+        this.state.sync = "saved";
+        this.toast("Saved");
+        return;
+      }
       await this.adapter.save(this.state.docs);
       // Images live outside the document (T12a): a plain .rnode.json would
       // arrive without them. With images the portable save is a .rnode.zip.
@@ -343,6 +363,63 @@ export class EditorStore {
     } catch {
       this.state.sync = "dirty";
       this.toast("Save failed — check storage");
+    }
+  }
+
+  /**
+   * Desktop "Save as…": native folder picker → copy every referenced asset
+   * into the folder (all three levels + meta — the same per-asset data the
+   * zip exporter iterates, a folder instead of an archive), then write
+   * document.json and switch the storage adapter AND the asset store to the
+   * folder. The Renderer holds the same asset store instance, so it starts
+   * reading the new folder without any re-instantiation (T19 trap).
+   */
+  async saveAsDesktop(): Promise<boolean> {
+    const folder = await this.pickDesktopFolder();
+    if (!folder) return false;
+    const assetStore = getAssetStore();
+    if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
+      return false;
+    }
+    // adoptRoot reads from the current root FIRST, then switches: the assets
+    // are never re-written into the same store before the folder exists.
+    await assetStore.adoptRoot(folder, [...referencedAssetIds(this.sheet)]);
+    this.adapter.setRoot(folder);
+    await this.adapter.save(this.state.docs);
+    return true;
+  }
+
+  /**
+   * Desktop "Open…": native folder picker → read document.json → switch both
+   * the adapter and the asset store to the folder. The root is switched only
+   * after the document is known to be valid, so a wrong folder never moves
+   * the app away from the current document.
+   */
+  async openDesktop(): Promise<boolean> {
+    const folder = await this.pickDesktopFolder();
+    if (!folder) return false;
+    const assetStore = getAssetStore();
+    if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
+      return false;
+    }
+    const doc = await this.adapter.readDocumentAt(folder);
+    if (!doc) {
+      this.toast("No valid document.json in that folder");
+      return false;
+    }
+    assetStore.setRoot(folder);
+    this.adapter.setRoot(folder);
+    this.importDocumentFromJson(JSON.stringify(doc));
+    this.toast("Opened document folder");
+    return true;
+  }
+
+  private async pickDesktopFolder(): Promise<string | null> {
+    if (typeof window === "undefined" || !window.__TAURI__) return null;
+    try {
+      return ((await window.__TAURI__.core.invoke("pick_document_folder")) as string | null) ?? null;
+    } catch {
+      return null;
     }
   }
 
@@ -543,6 +620,12 @@ export class EditorStore {
    * PK\x03\x04 magic bytes, never by extension alone.
    */
   async loadFile(): Promise<void> {
+    // Desktop: the document is a folder — "Open" picks the folder, not a
+    // single file. The web file-input flow below stays for the browser.
+    if (this.adapter instanceof TauriStorageAdapter) {
+      await this.openDesktop();
+      return;
+    }
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".rnode.json,.rmind.json,.rnode.zip,application/json,application/zip";

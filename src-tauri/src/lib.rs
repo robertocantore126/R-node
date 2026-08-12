@@ -95,21 +95,9 @@ fn delete_document(state: State<Db>, document_id: String) -> Result<(), String> 
     Ok(())
 }
 
-/// Root of the asset store: `<app-data>/assets`, one directory per asset id
-/// (a SHA-256 hex string), containing `original`, `large`, `small` and the
-/// `meta` JSON. Content-addressed: the same image imported twice occupies
-/// one directory.
-fn asset_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {e}"))?;
-    Ok(dir.join("assets"))
-}
-
 /// A path segment from the frontend must never escape the assets tree.
 /// Ids are hex SHA-256 and levels come from our own enum, but a hostile or
-/// corrupt caller must not be able to write outside `assets/`.
+/// corrupt caller must not be able to write outside the chosen folder.
 fn safe_component(part: &str) -> Result<(), String> {
     if part.is_empty()
         || part == "."
@@ -122,21 +110,28 @@ fn safe_component(part: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where assets live inside a document folder: `<root>/assets/<id>/<level>`.
+/// `root` is explicit and user-chosen (T19): Rust keeps no hidden state, a
+/// wrong root is a bug visible in the call, not a desynced app-data dir.
+fn assets_dir(root: &str) -> PathBuf {
+    PathBuf::from(root).join("assets")
+}
+
 #[tauri::command]
-fn put_asset(app: AppHandle, id: String, level: String, bytes: Vec<u8>) -> Result<(), String> {
+fn put_asset(root: String, id: String, level: String, bytes: Vec<u8>) -> Result<(), String> {
     safe_component(&id)?;
     safe_component(&level)?;
-    let file = asset_dir(&app)?.join(&id).join(&level);
+    let file = assets_dir(&root).join(&id).join(&level);
     let parent = file.parent().ok_or("no parent dir")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     fs::write(&file, bytes).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn get_asset(app: AppHandle, id: String, level: String) -> Result<Option<Vec<u8>>, String> {
+fn get_asset(root: String, id: String, level: String) -> Result<Option<Vec<u8>>, String> {
     safe_component(&id)?;
     safe_component(&level)?;
-    let file = asset_dir(&app)?.join(&id).join(&level);
+    let file = assets_dir(&root).join(&id).join(&level);
     if !file.is_file() {
         return Ok(None); // the AssetStore contract: get of a missing id -> null
     }
@@ -144,9 +139,9 @@ fn get_asset(app: AppHandle, id: String, level: String) -> Result<Option<Vec<u8>
 }
 
 #[tauri::command]
-fn delete_asset(app: AppHandle, id: String) -> Result<(), String> {
+fn delete_asset(root: String, id: String) -> Result<(), String> {
     safe_component(&id)?;
-    let dir = asset_dir(&app)?.join(&id);
+    let dir = assets_dir(&root).join(&id);
     if dir.is_dir() {
         fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     }
@@ -154,8 +149,8 @@ fn delete_asset(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_assets(app: AppHandle) -> Result<Vec<String>, String> {
-    let dir = asset_dir(&app)?;
+fn list_assets(root: String) -> Result<Vec<String>, String> {
+    let dir = assets_dir(&root);
     let mut out = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -166,6 +161,47 @@ fn list_assets(app: AppHandle) -> Result<Vec<String>, String> {
     }
     out.sort();
     Ok(out)
+}
+
+/// The default working root before a document folder is chosen: the app-data
+/// assets dir. Attaching an image before the first save lands here; the first
+/// "Save as…" then copies everything into the chosen folder.
+#[tauri::command]
+fn default_asset_root(app: AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data dir: {e}"))?;
+    Ok(dir.join("assets").to_string_lossy().into_owned())
+}
+
+/// Native folder picker (rfd): the desktop open/save-as entry point. The
+/// frontend never synthesizes paths for the user's documents.
+#[tauri::command]
+fn pick_document_folder() -> Result<Option<String>, String> {
+    let picked = rfd::FileDialog::new()
+        .set_title("Choose the R-node document folder")
+        .pick_folder();
+    Ok(picked.map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Read `<root>/document.json`, or None when the folder has none.
+#[tauri::command]
+fn read_document(root: String) -> Result<Option<String>, String> {
+    let file = PathBuf::from(&root).join("document.json");
+    if !file.is_file() {
+        return Ok(None);
+    }
+    fs::read_to_string(&file).map(Some).map_err(|e| e.to_string())
+}
+
+/// Write `<root>/document.json`, creating the folder if needed. Only the
+/// document is rewritten on save: the assets are written once, at import.
+#[tauri::command]
+fn write_document(root: String, data: String) -> Result<(), String> {
+    let dir = PathBuf::from(&root);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(dir.join("document.json"), data).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -184,7 +220,11 @@ pub fn run() {
             put_asset,
             get_asset,
             delete_asset,
-            list_assets
+            list_assets,
+            default_asset_root,
+            pick_document_folder,
+            read_document,
+            write_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running r-node");
