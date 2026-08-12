@@ -236,8 +236,14 @@ fn document_file_exists(path: String) -> Result<bool, String> {
 /// is not an R-node document. Never creates the file.
 #[tauri::command]
 fn read_document(path: String) -> Result<Option<String>, String> {
-    let Ok(conn) = open_readable(&path) else {
-        return Ok(None); // no file yet — nothing to read, not an error
+    // Distinguish "no file yet" (benign: nothing to read) from "the file
+    // exists but cannot be opened" (permission, corrupt, I/O). Collapsing
+    // both into None made every real failure read as "not a valid document"
+    // with no way to know why.
+    let conn = match open_readable(&path) {
+        Ok(c) => c,
+        Err(_) if !Path::new(&path).exists() => return Ok(None),
+        Err(e) => return Err(format!("cannot open {path}: {e}")),
     };
     let json: Option<String> = conn
         .query_row("SELECT json FROM document WHERE id = 1", [], |row| row.get(0))

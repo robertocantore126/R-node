@@ -14,6 +14,63 @@ export interface StorageAdapter {
   save(docs: RnodeDocument[]): Promise<void>;
 }
 
+/**
+ * Why opening a document failed. "R-node cannot open the document" is not a
+ * diagnosis; each kind maps to a user-facing label and the original backend
+ * message is always preserved on the error, so the trace buffer carries the
+ * exact reason.
+ */
+export type DocumentLoadErrorKind =
+  | "not-found" // file does not exist
+  | "permission" // exists but not readable
+  | "corrupt" // exists but is not a valid SQLite/.rnode database
+  | "sqlite" // other SQLite/IO failure while reading
+  | "invalid-json" // the document row is not valid JSON
+  | "incompatible-schema"; // JSON, but not an R-node document
+
+export class DocumentLoadError extends Error {
+  readonly kind: DocumentLoadErrorKind;
+
+  constructor(kind: DocumentLoadErrorKind, message: string) {
+    super(message);
+    this.name = "DocumentLoadError";
+    this.kind = kind;
+  }
+}
+
+export function documentLoadErrorLabel(kind: DocumentLoadErrorKind): string {
+  switch (kind) {
+    case "not-found":
+      return "file not found";
+    case "permission":
+      return "permission denied";
+    case "corrupt":
+      return "the file is corrupt (not a valid .rnode database)";
+    case "sqlite":
+      return "SQLite error while reading the file";
+    case "invalid-json":
+      return "the document row is not valid JSON";
+    case "incompatible-schema":
+      return "not an R-node document (no sheets)";
+  }
+}
+
+/**
+ * Map a rejected Tauri `read_document` call to a typed error. The kind is a
+ * best-effort reading of the backend message; the message itself is always
+ * preserved verbatim because it is what the developer needs.
+ */
+function classifyTauriReadError(path: string, e: unknown): DocumentLoadError {
+  const msg = e instanceof Error ? e.message : String(e);
+  const lower = msg.toLowerCase();
+  let kind: DocumentLoadErrorKind;
+  if (/not a database|malformed|file is encrypted/i.test(lower)) kind = "corrupt";
+  else if (/permission|denied|access/i.test(lower)) kind = "permission";
+  else if (/no such file|unable to open database file/i.test(lower)) kind = "not-found";
+  else kind = "sqlite";
+  return new DocumentLoadError(kind, `${msg} (${path})`);
+}
+
 // Storage key for the R-node brand. The app was previously named "R-mind":
 // the old key is read once and migrated so existing documents are never lost.
 const KEY = "r-node.docs.v1";
@@ -54,7 +111,11 @@ export class LocalStorageAdapter implements StorageAdapter {
         }
       }
       return docs;
-    } catch {
+    } catch (e) {
+      // Corrupt localStorage must never block the app, but it must not be
+      // silent either: a bare "cannot open the document" with no reason is
+      // what this logging is here to prevent.
+      console.error("r-node: stored documents could not be parsed; starting empty", e);
       return [];
     }
   }
@@ -102,16 +163,40 @@ export class TauriStorageAdapter implements StorageAdapter {
     return window.__TAURI__.core.invoke(cmd, args);
   }
 
-  /** Read the document from `<path>` WITHOUT switching this adapter's path. */
+  /**
+   * Read the document from `<path>` WITHOUT switching this adapter's path.
+   *
+   * Returns `null` only for the benign "nothing to read" cases (no document
+   * row / not an R-node document). Every real failure throws a
+   * `DocumentLoadError` whose `kind` says WHY — corrupt file, invalid JSON,
+   * incompatible schema, permission — instead of collapsing into `null`.
+   */
   async readDocumentAt(path: string): Promise<RnodeDocument | null> {
+    let text: string | null;
     try {
-      const text = (await this.invoke("read_document", { path })) as string | null;
-      if (!text) return null;
-      const doc = JSON.parse(text) as RnodeDocument;
-      return Array.isArray(doc.sheets) ? doc : null;
-    } catch {
-      return null;
+      text = (await this.invoke("read_document", { path })) as string | null;
+    } catch (e) {
+      throw classifyTauriReadError(path, e);
     }
+    // null = the backend reported "nothing to read" (no file yet / not an
+    // R-node document). Benign: the caller reports it as invalid, not broken.
+    if (text == null) return null;
+    let doc: unknown;
+    try {
+      doc = JSON.parse(text);
+    } catch {
+      throw new DocumentLoadError(
+        "invalid-json",
+        `the document row in "${path}" is not valid JSON`
+      );
+    }
+    if (!Array.isArray((doc as RnodeDocument)?.sheets)) {
+      throw new DocumentLoadError(
+        "incompatible-schema",
+        `"${path}" is not an R-node document (schemaVersion ${(doc as RnodeDocument)?.schemaVersion ?? "unknown"})`
+      );
+    }
+    return doc as RnodeDocument;
   }
 
   async load(): Promise<RnodeDocument[]> {

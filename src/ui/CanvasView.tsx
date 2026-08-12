@@ -119,6 +119,27 @@ export function CanvasView(): JSX.Element {
   const [resizeHover, setResizeHover] = useState(false);
   const [imgResizeHover, setImgResizeHover] = useState(false);
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // Ghost preview of an image being dragged to another node (internal
+  // reassignment): world coords of the cursor + the image to draw. Read by
+  // paint/currentRenderState on every frame; the renderer draws the cached
+  // bitmap semi-transparent until the drop lands.
+  // True once the user has touched the canvas (pointer/wheel/click): the
+  // startup auto-fit must NOT override a view the user has already started
+  // to use — otherwise the fit fires right after a click and the camera
+  // "jumps" under the cursor.
+  const interactedRef = useRef(false);
+  const ghostRef = useRef<{ imageId: string; x: number; y: number; nodeId: string } | null>(null);
+  // Marquee preview: ids of the topics inside the drag box, live-updated on
+  // every move so the canvas can paint the "will be selected" rings (the
+  // box itself is a DOM div; the rings need canvas repaints).
+  const marqueeSelRef = useRef<Set<string> | null>(null);
+  // External drag (Explorer / browser): DOM ghost that follows the cursor.
+  // `src` is either an objectURL (revoke on cleanup) or the image URL from
+  // text/uri-list. Resolved once per drag, positioned via the el ref (no
+  // React re-render on every dragover).
+  const extGhostRef = useRef<{ src: string; revoke: boolean } | null>(null);
+  const extGhostElRef = useRef<HTMLImageElement | null>(null);
+  const [extGhostSrc, setExtGhostSrc] = useState<string | null>(null);
 
   const paint = useCallback(() => {
     const renderer = rendererRef.current;
@@ -140,6 +161,8 @@ export function CanvasView(): JSX.Element {
       groupSel: s.groupSel,
       summarySel: s.summarySel,
       imageSel: s.imageSel,
+      ghostImage: ghostRef.current,
+      marqueeSel: marqueeSelRef.current,
     };
     renderer.render(rs);
   }, [store]);
@@ -156,19 +179,38 @@ export function CanvasView(): JSX.Element {
     const renderer = new Renderer(canvas, { onRepaint: schedule });
     rendererRef.current = renderer;
 
+    let firstResize = true;
     const ro = new ResizeObserver(() => {
       const rect = canvas.parentElement!.getBoundingClientRect();
-      sizeRef.current = { w: rect.width, h: rect.height };
-      viewSize.w = rect.width;
-      viewSize.h = rect.height;
-      renderer.resize(canvas, rect.width, rect.height);
+      const old = sizeRef.current;
+      const nw = rect.width;
+      const nh = rect.height;
+      // Keep the map visually anchored when the canvas area resizes
+      // (Inspector/panel toggle, window resize). Without this the map jumps
+      // sideways by half the size delta: the camera stays centered on the
+      // canvas center, so when the panel opens and the canvas narrows the
+      // whole map shifts — the "GUI moves the canvas view" bug. The first
+      // observation is skipped (sizeRef still holds the 1200x800 default).
+      if (!firstResize && old.w > 0 && old.h > 0 && nw > 0 && nh > 0) {
+        const dW = nw - old.w;
+        const dH = nh - old.h;
+        if (dW !== 0 || dH !== 0) store.panBy(-dW / 2, -dH / 2);
+      }
+      firstResize = false;
+      sizeRef.current = { w: nw, h: nh };
+      viewSize.w = nw;
+      viewSize.h = nh;
+      renderer.resize(canvas, nw, nh);
       schedule();
     });
     ro.observe(canvas.parentElement!);
     renderer.resize(canvas, sizeRef.current.w, sizeRef.current.h);
     schedule();
-    // fit the map into view once layout settles after mount
+    // fit the map into view once layout settles after mount — but only if
+    // the user hasn't already interacted with the canvas (a click/pan/zoom
+    // before the timer fires must not be overridden by the startup fit).
     const fitTimer = setTimeout(() => {
+      if (interactedRef.current) return;
       store.fitView(sizeRef.current.w, sizeRef.current.h);
     }, 150);
 
@@ -212,6 +254,7 @@ export function CanvasView(): JSX.Element {
       // from the store camera on every render (see editStyle below), so a
       // pan/zoom here keeps the overlay glued to the node.
       e.preventDefault();
+      interactedRef.current = true;
       const { w, h } = sizeRef.current;
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
@@ -240,6 +283,7 @@ export function CanvasView(): JSX.Element {
       wheelTarget.removeEventListener("wheel", onWheel as EventListener);
       uninstallTrace();
       setExportPngHandler(null);
+      clearExternalGhost(); // revoke a pending objectURL on unmount
     };
   }, [store, schedule]);
 
@@ -259,6 +303,7 @@ export function CanvasView(): JSX.Element {
   };
 
   const onPointerDown = (e: RPointerEvent): void => {
+    interactedRef.current = true;
     // Best-effort: capture keeps move/up events coming if the pointer leaves
     // the element mid-gesture. Untrusted/synthetic events have no active
     // pointer and throw here — never let that kill the handler.
@@ -275,6 +320,8 @@ export function CanvasView(): JSX.Element {
     drag.lastX = x;
     drag.lastY = y;
     drag.moved = false;
+    ghostRef.current = null; // no stale ghost between gestures
+    marqueeSelRef.current = null; // no stale marquee preview between gestures
 
     // Panning is right-drag (or middle-drag / pan mode): left-click never
     // pans, it only selects or drags topics. Works while editing too — over
@@ -364,6 +411,9 @@ export function CanvasView(): JSX.Element {
       drag.grabOffsetY = rect ? world.y - rect.y : 0;
       store.select(hit, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
       drag.dragging = hit;
+      // Capture the pre-drag position: the final op's `prev` must be this,
+      // so undo restores the exact pre-drag state (see commitNodeDrag).
+      store.beginNodeDrag(hit);
       drag.marqueeStartX = null;
     } else {
       // Overlay objects first: a relationship line, a group box, a summary
@@ -455,16 +505,31 @@ export function CanvasView(): JSX.Element {
         w: Math.abs(x - mx0),
         h: Math.abs(y - my0),
       });
+      // Live preview of what the release will select: same geometry as the
+      // commit path (world rect corners -> nodesInRect), repainted now so
+      // the purple rings follow the box instead of appearing on release.
+      const s = store.getSnapshot();
+      const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, mx0, my0);
+      const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
+      marqueeSelRef.current = ids.length > 0 ? new Set(ids) : null;
+      schedule();
       return;
     }
     // Image move: the dragged image highlights the node under the pointer as
     // its new home (the "child" drop indicator); the source node is never a
-    // target. Threshold before feedback, same as node dragging.
+    // target. Threshold before feedback, same as node dragging. The ghost
+    // preview follows the cursor (set BEFORE setDrop — the store change
+    // repaints synchronously and must already see it).
     if (drag.imgDragging) {
       if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
       drag.moved = true;
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const srcNode = store.doc.node(drag.imgDragging);
+      ghostRef.current = srcNode?.style.image
+        ? { imageId: srcNode.style.image, x: world.x, y: world.y, nodeId: drag.imgDragging }
+        : null;
       const hit = rendererRef.current!.hitTest(currentRenderState(), world.x, world.y);
       if (hit && hit !== drag.imgDragging) {
         store.setDrop({ mode: "child", nodeId: hit });
@@ -494,19 +559,30 @@ export function CanvasView(): JSX.Element {
     const rs = currentRenderState();
     const hit = renderer.hitTest(rs, world.x, world.y);
 
+    let dropMode: "child" | "before" | "after" | "floating" | "none" = "none";
     if (hit && hit !== drag.dragging && !isDescendantOf(store.doc, drag.dragging, hit)) {
       const r = renderer.nodeWorldRect(rs, hit);
       if (r) {
         const relY = (world.y - r.y) / r.h;
-        const mode = relY < 0.28 ? "before" : relY > 0.72 ? "after" : "child";
-        store.setDrop({ mode, nodeId: hit });
+        dropMode = relY < 0.28 ? "before" : relY > 0.72 ? "after" : "child";
+        store.setDrop({ mode: dropMode, nodeId: hit });
       }
     } else {
       // Only main topics (root children) and floating topics can be pinned to
       // a free position — deeper hierarchical nodes stay in the auto layout.
       const dragged = store.doc.node(drag.dragging);
       const canFloat = !!dragged && (!dragged.parentId || dragged.parentId === store.sheet.rootNodeId);
-      store.setDrop(canFloat ? { mode: "floating", nodeId: drag.dragging } : { mode: "none", nodeId: drag.dragging });
+      dropMode = canFloat ? "floating" : "none";
+      store.setDrop({ mode: dropMode, nodeId: drag.dragging });
+    }
+    // Live follow (fluid drag): while the node is free-floating it follows
+    // the cursor and its subtree re-flows around it every move. Over a drop
+    // target it returns to its slot so the reorder indicator stays usable;
+    // deeper nodes never float, so nothing moves for them.
+    if (dropMode === "floating") {
+      store.setNodeDragDraft(drag.dragging, world.x - drag.grabOffsetX, world.y - drag.grabOffsetY);
+    } else {
+      store.resetNodeDragDraft(drag.dragging);
     }
   };
 
@@ -524,10 +600,12 @@ export function CanvasView(): JSX.Element {
       const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
       if (ids.length > 0) store.selectMany(ids, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
+      marqueeSelRef.current = null;
       drag.marqueeActive = false;
       drag.marqueeStartX = null;
       drag.marqueeStartY = null;
       setMarquee(null);
+      schedule();
       return;
     }
     if (drag.imgResizing) {
@@ -561,6 +639,7 @@ export function CanvasView(): JSX.Element {
         }
       }
       store.setDrop(null);
+      ghostRef.current = null;
       drag.imgDragging = null;
       drag.moved = false;
       return;
@@ -572,7 +651,7 @@ export function CanvasView(): JSX.Element {
         const { x, y } = localPoint(e);
         const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
         const target = drop.mode === "floating" ? null : drop.nodeId;
-        store.dropAt(
+        store.commitNodeDrag(
           drag.dragging,
           target,
           drop.mode,
@@ -686,8 +765,38 @@ export function CanvasView(): JSX.Element {
       relSel: s.relSel,
       groupSel: s.groupSel,
       summarySel: s.summarySel,
+      ghostImage: ghostRef.current,
+      marqueeSel: marqueeSelRef.current,
     };
   };
+
+  // -------------------------------------------------------------------------
+  // External drag ghost (Explorer / browser drags)
+  // -------------------------------------------------------------------------
+
+  const clearExternalGhost = useCallback(() => {
+    const g = extGhostRef.current;
+    if (g?.revoke) URL.revokeObjectURL(g.src);
+    extGhostRef.current = null;
+    setExtGhostSrc(null);
+  }, []);
+
+  /** Resolve the dragged payload into a previewable src, once per drag. */
+  const ensureExternalGhost = useCallback((dt: DataTransfer) => {
+    if (extGhostRef.current) return; // already resolved for this drag
+    const file = firstImageFile(dt.files);
+    let src: string | null = null;
+    let revoke = false;
+    if (file) {
+      src = URL.createObjectURL(file);
+      revoke = true;
+    } else {
+      src = firstUriFromList(dt.getData("text/uri-list"));
+    }
+    if (!src) return;
+    extGhostRef.current = { src, revoke };
+    setExtGhostSrc(src);
+  }, []);
 
   // -------------------------------------------------------------------------
   // Inline editor overlay
@@ -756,13 +865,27 @@ export function CanvasView(): JSX.Element {
           if (!acceptsExternalDrop(e.dataTransfer)) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
+          // Ghost preview: resolve the dragged payload once, then pin the
+          // image under the cursor (direct DOM update — dragover fires at
+          // ~10Hz and React re-renders are wasted here).
+          ensureExternalGhost(e.dataTransfer);
+          const el = extGhostElRef.current;
+          if (el && extGhostRef.current) {
+            const rect = canvasRef.current!.getBoundingClientRect();
+            el.style.left = `${e.clientX - rect.left + 16}px`;
+            el.style.top = `${e.clientY - rect.top + 12}px`;
+          }
           const { x, y } = localPoint(e as unknown as RPointerEvent);
           const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
           const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
           store.setHover(hit);
         }}
-        onDragLeave={() => {
+        onDragLeave={(e) => {
           if (!dragRef.current?.dragging) store.setHover(null);
+          // The canvas has no children: relatedTarget is null only when the
+          // drag actually leaves the canvas area — clear the ghost then.
+          // Moving over the editing overlay (a sibling) keeps the preview.
+          if (!e.relatedTarget) clearExternalGhost();
         }}
         onDrop={async (e) => {
           // External sources: an OS file (Explorer, or a browser image that
@@ -770,6 +893,7 @@ export function CanvasView(): JSX.Element {
           // (text/uri-list, the only payload some browsers hand over).
           if (!acceptsExternalDrop(e.dataTransfer)) return;
           e.preventDefault();
+          clearExternalGhost();
           const { x, y } = localPoint(e as unknown as RPointerEvent);
           const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
           const target = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
@@ -796,6 +920,7 @@ export function CanvasView(): JSX.Element {
         }}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
+      {extGhostSrc && <img ref={extGhostElRef} className="ext-drop-ghost" src={extGhostSrc} alt="" draggable={false} />}
       {marquee && (
         <div
           className="marquee"

@@ -19,7 +19,7 @@ import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer }
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
-import { LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
+import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { getAssetStore, referencedAssetIds, TauriAssetStore } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
@@ -272,7 +272,18 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   async init(): Promise<void> {
-    const docs = await this.adapter.load();
+    // A corrupt/unreadable stored document must never blank the app: load the
+    // reason, fall back to the sample map, and tell the user WHY instead of a
+    // bare "cannot open the document".
+    let docs: RnodeDocument[] = [];
+    let initError: string | null = null;
+    try {
+      docs = await this.adapter.load();
+    } catch (e) {
+      const err = e instanceof DocumentLoadError ? e : new DocumentLoadError("sqlite", e instanceof Error ? e.message : String(e));
+      trace.error(`init:${err.kind}`, err.message);
+      initError = documentLoadErrorLabel(err.kind);
+    }
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
     } else {
@@ -284,6 +295,7 @@ export class EditorStore {
     this.state = this.makeState();
     if (docs.length > 0) this.state.docs = docs;
     if (docs.length === 0) this.state.sync = "dirty";
+    if (initError) this.toast(`Could not open the saved document — ${initError}`);
     // Loading a document must respect positions explicitly placed by the
     // user. Forced layout is reserved for the explicit "Auto layout" command.
     this.scheduleLayout(false);
@@ -340,6 +352,21 @@ export class EditorStore {
       trace.layout(Object.keys(this.sheet.nodes).length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
       this.notify();
     }, 30);
+  }
+
+  /**
+   * Apply the pending layout IMMEDIATELY (no 30ms debounce). Used after
+   * structural ops (node creation) so the result appears in its FINAL
+   * position on the very first paint — a new topic must not flash at the
+   * provisional estimated spot and then jump to its layout slot 30ms later.
+   */
+  private settleLayoutNow(): void {
+    if (this.layoutTimer) {
+      clearTimeout(this.layoutTimer);
+      this.layoutTimer = null;
+    }
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
   }
 
   // -------------------------------------------------------------------------
@@ -486,7 +513,15 @@ export class EditorStore {
     if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
       return false;
     }
-    const doc = await this.adapter.readDocumentAt(file);
+    let doc: RnodeDocument | null;
+    try {
+      doc = await this.adapter.readDocumentAt(file);
+    } catch (e) {
+      const err = e instanceof DocumentLoadError ? e : new DocumentLoadError("sqlite", e instanceof Error ? e.message : String(e));
+      trace.error(`open:${err.kind}`, err.message);
+      this.toast(`Cannot open "${file.split(/[\\/]/).pop() ?? file}" — ${documentLoadErrorLabel(err.kind)}`);
+      return false;
+    }
     if (!doc) {
       this.toast("Not a valid R-node document in that file");
       return false;
@@ -757,7 +792,8 @@ export class EditorStore {
       const id = this.importDocumentFromJson(text);
       if (id) this.toast(`Opened ${file.name}`);
       else this.toast("Not a valid R-node file");
-    } catch {
+    } catch (e) {
+      trace.error("loadFile", e instanceof Error ? e.message : String(e));
       this.toast("Could not read the file");
     }
   }
@@ -1260,6 +1296,9 @@ export class EditorStore {
     const position = this.createNodePosition(type === "main" ? parent : node);
     const style = this.createNodeStyle(type, parent.id, index);
     this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: parent.id, index, title: this.defaultTopicTitle(type, parent.id), position, style })]);
+    // The layout must settle BEFORE the editor opens, or the overlay would
+    // mount on the provisional position and the topic would appear to jump.
+    this.settleLayoutNow();
     this.startEdit(id);
   }
 
@@ -1273,7 +1312,7 @@ export class EditorStore {
     // Tab spawns the child without entering edit mode: the selection stays on
     // the source node, so repeated Tab keeps adding siblings under the same
     // parent instead of nesting (or stealing the selection).
-    this.notify();
+    this.settleLayoutNow();
   }
 
   createParent(): void {
@@ -1304,6 +1343,7 @@ export class EditorStore {
       }));
     }
     this.execOps(ops);
+    this.settleLayoutNow();
     this.select(newId);
   }
 
@@ -1319,6 +1359,7 @@ export class EditorStore {
         position: { x, y, manual: true },
       }),
     ]);
+    this.settleLayoutNow();
     this.startEdit(id);
   }
 
@@ -1607,6 +1648,75 @@ export class EditorStore {
     }
     this.setDrop(null);
     this.select(draggedId);
+  }
+
+  /**
+   * Main-topic drag (live repositioning): a movable node (root child or
+   * floating topic) FOLLOWS the cursor during the drag — ephemeral manual
+   * position, no op, no history — and its subtree re-flows around it on
+   * every move, so the whole branch slides with the pointer. commitNodeDrag
+   * emits ONE setPosition op whose `prev` is the PRE-drag position, so a
+   * single undo restores the exact pre-drag state.
+   */
+  private nodeDragState: { nodeId: string; origPos: Position } | null = null;
+
+  /** A node drag started: capture the pre-drag position for the final op. */
+  beginNodeDrag(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    this.nodeDragState = { nodeId, origPos: { ...node.position } };
+  }
+
+  /**
+   * Live position during the drag. The layout runs SYNCHRONOUSLY (the 30ms
+   * debounce of scheduleLayout would starve during a continuous drag — the
+   * subtree would never follow until the pointer stops); manual is set
+   * transiently so applyLayout does not snap the node back to its slot.
+   */
+  setNodeDragDraft(nodeId: string, worldX: number, worldY: number): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    node.position = { ...node.position, x: worldX, y: worldY, manual: true };
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  /** Restore the pre-drag position (the drag left the free-position zone). */
+  resetNodeDragDraft(nodeId: string): void {
+    const d = this.nodeDragState;
+    if (!d || d.nodeId !== nodeId) return;
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    node.position = { ...d.origPos };
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  /**
+   * End of the drag: restore the model to the pre-drag state, then commit
+   * through dropAt — its ops therefore carry `prev: origPos` (undo restores
+   * exactly) and releaseManualPosition sees the ORIGINAL manual flag.
+   *
+   * The tree is then settled SYNCHRONOUSLY: dropAt's execOps only schedules
+   * the 30ms-debounced layout, and waiting for it would (a) leave the
+   * released subtree detached from its new position for a few frames (the
+   * release glitch) and (b) let a late reflow fire while the user has
+   * already moved on — e.g. clicking another node that then visibly shifts.
+   */
+  commitNodeDrag(draggedId: string, targetId: string | null, mode: "child" | "before" | "after" | "floating", worldX: number, worldY: number): void {
+    const d = this.nodeDragState;
+    this.nodeDragState = null;
+    if (d) {
+      const node = this.model.node(d.nodeId);
+      if (node) node.position = { ...d.origPos };
+    }
+    this.dropAt(draggedId, targetId, mode, worldX, worldY);
+    if (this.layoutTimer) {
+      clearTimeout(this.layoutTimer);
+      this.layoutTimer = null;
+    }
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
   }
 
   // -------------------------------------------------------------------------
