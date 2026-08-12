@@ -10,6 +10,16 @@ import { isDescendantOf } from "../core/tree";
 import type { MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { installTrace, trace } from "../dev/trace";
+import { fetchImageAsFile, firstImageFile, firstUriFromList } from "../editor/externalImage";
+
+/**
+ * Accept OS file drags (Explorer) and browser image-URL drags (text/uri-list);
+ * anything else (text, links) is left to the browser default.
+ */
+function acceptsExternalDrop(dt: DataTransfer): boolean {
+  const types = [...dt.types];
+  return types.includes("Files") || types.includes("text/uri-list");
+}
 
 /**
  * Paint synchronously on every store change. rAF is unreliable in embedded
@@ -40,6 +50,8 @@ interface DragState {
   imgResizing: string | null;
   imgResizeStartWorldX: number;
   imgResizeStartWidth: number;
+  /** Image move: dragging a selected image onto another node. */
+  imgDragging: string | null;
   /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
   marqueeStartX: number | null;
   marqueeStartY: number | null;
@@ -90,6 +102,7 @@ export function CanvasView(): JSX.Element {
     imgResizing: null,
     imgResizeStartWorldX: 0,
     imgResizeStartWidth: 0,
+    imgDragging: null,
     marqueeStartX: null,
     marqueeStartY: null,
     marqueeActive: false,
@@ -126,6 +139,7 @@ export function CanvasView(): JSX.Element {
       relSel: s.relSel,
       groupSel: s.groupSel,
       summarySel: s.summarySel,
+      imageSel: s.imageSel,
     };
     renderer.render(rs);
   }, [store]);
@@ -316,6 +330,22 @@ export function CanvasView(): JSX.Element {
       return;
     }
 
+    // Image body hit (before the node body hit test): the image inside a
+    // node is a selectable target of its own — a click selects it, a drag
+    // moves it onto another node. Skipped while picking a relationship
+    // target, like the resize handles.
+    const imgHit = s.relFrom ? null : renderer.hitTestImage(rs, world.x, world.y);
+    if (imgHit) {
+      const rect = renderer.imageWorldRect(rs, imgHit);
+      drag.grabOffsetX = rect ? world.x - rect.x : 0;
+      drag.grabOffsetY = rect ? world.y - rect.y : 0;
+      store.selectImage(imgHit);
+      drag.imgDragging = imgHit;
+      drag.dragging = null;
+      drag.marqueeStartX = null;
+      return;
+    }
+
     const hit = renderer.hitTest(rs, world.x, world.y);
 
     if (s.relFrom) {
@@ -427,6 +457,22 @@ export function CanvasView(): JSX.Element {
       });
       return;
     }
+    // Image move: the dragged image highlights the node under the pointer as
+    // its new home (the "child" drop indicator); the source node is never a
+    // target. Threshold before feedback, same as node dragging.
+    if (drag.imgDragging) {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const hit = rendererRef.current!.hitTest(currentRenderState(), world.x, world.y);
+      if (hit && hit !== drag.imgDragging) {
+        store.setDrop({ mode: "child", nodeId: hit });
+      } else {
+        store.setDrop({ mode: "none", nodeId: drag.imgDragging });
+      }
+      return;
+    }
     if (!drag.dragging) {
       const p = localPoint(e);
       const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, p.x, p.y);
@@ -503,6 +549,20 @@ export function CanvasView(): JSX.Element {
       drag.panning = false;
       drag.dragging = null;
       setPanning(false);
+      return;
+    }
+    // Image move dropped: assign the image to the highlighted node. A plain
+    // click (no move) only leaves the image selected — never moves it.
+    if (drag.imgDragging) {
+      if (drag.moved) {
+        const drop = store.getSnapshot().drop;
+        if (drop && drop.mode !== "none" && drop.nodeId !== drag.imgDragging) {
+          store.assignImageToNode(drag.imgDragging, drop.nodeId);
+        }
+      }
+      store.setDrop(null);
+      drag.imgDragging = null;
+      drag.moved = false;
       return;
     }
     if (drag.dragging && drag.moved) {
@@ -693,7 +753,7 @@ export function CanvasView(): JSX.Element {
           // Accept the drop (T13-2): without preventDefault the browser would
           // navigate away on drop. Highlight the node under the cursor while
           // dragging so the user sees the target.
-          if (![...e.dataTransfer.types].includes("Files")) return;
+          if (!acceptsExternalDrop(e.dataTransfer)) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
           const { x, y } = localPoint(e as unknown as RPointerEvent);
@@ -705,10 +765,11 @@ export function CanvasView(): JSX.Element {
           if (!dragRef.current?.dragging) store.setHover(null);
         }}
         onDrop={async (e) => {
-          if (![...e.dataTransfer.types].includes("Files")) return;
+          // External sources: an OS file (Explorer, or a browser image that
+          // Chromium materializes as a temp file) OR a browser image URL
+          // (text/uri-list, the only payload some browsers hand over).
+          if (!acceptsExternalDrop(e.dataTransfer)) return;
           e.preventDefault();
-          const file = e.dataTransfer.files[0];
-          if (!file) return;
           const { x, y } = localPoint(e as unknown as RPointerEvent);
           const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
           const target = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
@@ -716,6 +777,19 @@ export function CanvasView(): JSX.Element {
           if (!target) {
             store.toast("Drop the image on a topic");
             return;
+          }
+          let file = firstImageFile(e.dataTransfer.files);
+          if (!file) {
+            const url = firstUriFromList(e.dataTransfer.getData("text/uri-list"));
+            if (!url) {
+              store.toast("Drop an image file or a browser image on a topic");
+              return;
+            }
+            file = await fetchImageAsFile(url);
+            if (!file) {
+              store.toast("Could not load the image from its URL");
+              return;
+            }
           }
           const res = await store.attachImageFile(target, file);
           if (!res.ok) store.toast(res.reason ?? "Could not import image");

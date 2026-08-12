@@ -32,6 +32,8 @@ export interface RenderState {
   relSel?: string | null;
   groupSel?: string | null;
   summarySel?: string | null;
+  /** Node whose image is selected (mutually exclusive with node selection). */
+  imageSel?: string | null;
   showHidden?: boolean; // export: include collapsed subtrees
 }
 
@@ -454,9 +456,13 @@ export class Renderer {
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
-
-      // Image resize handle (T14): bottom-right corner of the image, same
-      // outline style as the width handles. Same rect as imageWorldRect.
+    }
+    // Image resize handle (T14): bottom-right corner of the image, same
+    // outline style as the width handles. Same rect as imageWorldRect. Drawn
+    // for a selected node OR a selected IMAGE (the image is then the focus —
+    // resize must stay reachable without reselecting the node).
+    if (selected || state.imageSel === n.id) {
+      const hs = 9;
       const ir = this.imageWorldRect(state, n.id);
       if (ir) {
         const hx = ir.x + ir.w - hs / 2;
@@ -468,6 +474,18 @@ export class Renderer {
         ctx.strokeStyle = theme.selection;
         ctx.lineWidth = 1.6;
         ctx.stroke();
+      }
+    }
+    // Image selection ring: the image is selected (not the node) — outline
+    // around the image so Backspace/Delete knows what it will remove.
+    if (state.imageSel === n.id) {
+      const ir = this.imageWorldRect(state, n.id);
+      if (ir) {
+        const pad = 3;
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([]);
+        ctx.strokeRect(ir.x - pad, ir.y - pad, ir.w + pad * 2, ir.h + pad * 2);
       }
     }
     if (state.hoverId === n.id && !selected) {
@@ -1054,7 +1072,9 @@ export class Renderer {
    */
   hitTestImageResize(state: RenderState, worldX: number, worldY: number): string | null {
     const hs = 12;
-    for (const id of state.selection) {
+    const ids = new Set(state.selection);
+    if (state.imageSel) ids.add(state.imageSel);
+    for (const id of ids) {
       if (state.editingId === id) continue;
       const rect = this.imageWorldRect(state, id);
       if (!rect) continue;
@@ -1069,6 +1089,11 @@ export class Renderer {
   imageWorldRect(state: RenderState, id: string): { x: number; y: number; w: number; h: number } | null {
     const p = this.placedNodes(state).find((p) => p.node.id === id);
     if (!p) return null;
+    return this.imageRectForPlaced(p);
+  }
+
+  /** World-space rect of the image of an already-placed node, or null. */
+  private imageRectForPlaced(p: Placed): { x: number; y: number; w: number; h: number } | null {
     const n = p.node;
     const imageId = n.style.image;
     if (!imageId || !this.resolveImage) return null;
@@ -1077,6 +1102,23 @@ export class Renderer {
     const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
     const imgH = (imgW * att.h) / att.w;
     return { x: p.x + (p.w - imgW) / 2, y: p.y + (n.style.padding ?? 10), w: imgW, h: imgH };
+  }
+
+  /**
+   * Hit test for the image INSIDE a node: the image is a selectable target
+   * of its own (select → Backspace deletes only it; drag moves it to another
+   * node). Checked before the node-body hit test so the image wins inside
+   * its own rect.
+   */
+  hitTestImage(state: RenderState, worldX: number, worldY: number): string | null {
+    const placed = this.placedNodes(state).filter((p) => p.visible);
+    for (let i = placed.length - 1; i >= 0; i--) {
+      const r = this.imageRectForPlaced(placed[i]);
+      if (r && worldX >= r.x && worldX <= r.x + r.w && worldY >= r.y && worldY <= r.y + r.h) {
+        return placed[i].node.id;
+      }
+    }
+    return null;
   }
 
   hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {

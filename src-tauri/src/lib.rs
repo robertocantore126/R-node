@@ -160,8 +160,11 @@ fn default_document_path(app: AppHandle) -> Result<String, String> {
 }
 
 /// Native file picker restricted to `.rnode`. `mode` is "open" or "save"; a
-/// cancelled dialog returns None. On save the extension is guaranteed even
-/// when the user types a name without it.
+/// cancelled dialog returns None. On save the dialog is pre-filled with
+/// `suggested_name` (the document title from the GUI, sanitized by the
+/// frontend) so the name typed in the app becomes the real file's name — the
+/// filesystem dialog already knows it. The extension is guaranteed even when
+/// the user types a name without it.
 ///
 /// Uses `tauri-plugin-dialog` (NOT raw rfd): a blocking rfd dialog inside a
 /// sync command runs on the main thread, fighting the webview's message pump
@@ -170,7 +173,11 @@ fn default_document_path(app: AppHandle) -> Result<String, String> {
 /// the main thread, parented to the window, and this command is async so the
 /// main thread stays free.
 #[tauri::command]
-async fn pick_document_file(app: AppHandle, mode: String) -> Result<Option<String>, String> {
+async fn pick_document_file(
+    app: AppHandle,
+    mode: String,
+    suggested_name: Option<String>,
+) -> Result<Option<String>, String> {
     let parent = app.get_webview_window("main");
     let dialog = |title: &str, save: bool| {
         let mut builder = app.dialog().file().add_filter("R-node document", &["rnode"]);
@@ -179,7 +186,11 @@ async fn pick_document_file(app: AppHandle, mode: String) -> Result<Option<Strin
         }
         builder = builder.set_title(title);
         if save {
-            builder = builder.set_file_name("MiaMappa.rnode");
+            let mut name = suggested_name.clone().unwrap_or_else(|| "MiaMappa".into());
+            if !name.to_lowercase().ends_with(".rnode") {
+                name.push_str(".rnode");
+            }
+            builder = builder.set_file_name(name);
         }
         builder
     };
@@ -200,6 +211,25 @@ async fn pick_document_file(app: AppHandle, mode: String) -> Result<Option<Strin
         path.push_str(".rnode");
     }
     Ok(Some(path))
+}
+
+/// Delete the `.rnode` file. Used by the rename-on-save flow, AFTER the new
+/// file is fully written and the app switched to it — the old file is only
+/// removed once the document provably lives at the new path.
+#[tauri::command]
+fn remove_document(path: String) -> Result<(), String> {
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // already gone
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Whether a file exists at `path`. The rename flow refuses to clobber an
+/// existing document under the new name.
+#[tauri::command]
+fn document_file_exists(path: String) -> Result<bool, String> {
+    Ok(Path::new(&path).is_file())
 }
 
 /// Read the document JSON from `<path>`, or None when the file is missing or
@@ -359,6 +389,8 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // CORS-free HTTP for images dragged from a browser page (text/uri-list).
+        .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![
             put_asset,
             get_asset,
@@ -367,7 +399,9 @@ pub fn run() {
             default_document_path,
             pick_document_file,
             read_document,
-            write_document
+            write_document,
+            remove_document,
+            document_file_exists
         ])
         .run(tauri::generate_context!())
         .expect("error while running r-node");

@@ -196,8 +196,61 @@ describe("desktop save flow", () => {
     expect(calls.filter((c) => c.cmd === "put_asset")).toHaveLength(0);
     const write = calls.find((c) => c.cmd === "write_document");
     expect(write?.args.path).toBe("C:/MiaMappa.rnode");
-    // The picker for the save mode carries the mode argument.
-    expect(calls.find((c) => c.cmd === "pick_document_file")?.args.mode).toBe("save");
+    // The picker for the save mode carries the mode argument and the document
+    // title as the suggested file name — the filesystem dialog already knows it.
+    const pick = calls.find((c) => c.cmd === "pick_document_file");
+    expect(pick?.args.mode).toBe("save");
+    expect(pick?.args.suggestedName).toBe("R-node_Roadmap");
+  });
+
+  it("renaming the document renames the REAL file on the next save", async () => {
+    const calls = installTauri(async (cmd) => {
+      if (cmd === "pick_document_file") return "C:/Docs/Old.rnode";
+      if (cmd === "document_file_exists") return false;
+      return null;
+    });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    await store.saveNow(); // first save -> C:/Docs/Old.rnode
+    store.renameDocument(store.getSnapshot().activeDocId, "Vacation");
+    await store.saveNow();
+
+    const writes = calls.filter((c) => c.cmd === "write_document");
+    // The second save wrote to the NEW name, not the old file.
+    expect(writes[writes.length - 1].args.path).toBe("C:/Docs/Vacation.rnode");
+    // The old file was removed only after the new one was written.
+    const removals = calls.filter((c) => c.cmd === "remove_document");
+    expect(removals).toHaveLength(1);
+    expect(removals[0].args.path).toBe("C:/Docs/Old.rnode");
+    const writeIdx = writes.findIndex((w) => w.args.path === "C:/Docs/Vacation.rnode");
+    const removeIdx = calls.findIndex((c) => c.cmd === "remove_document");
+    expect(writeIdx).toBeGreaterThan(-1);
+    expect(removeIdx).toBeGreaterThan(writeIdx); // remove comes after the write
+    // The rename did not re-ask where to save.
+    expect(calls.filter((c) => c.cmd === "pick_document_file")).toHaveLength(1);
+  });
+
+  it("opening a file whose title differs from its name does NOT rename it on save", async () => {
+    const doc = {
+      documentId: "d1",
+      title: "Internal Title",
+      sheets: [{ rootNodeId: "r", nodes: { r: { id: "r", title: "r", childrenIds: [] } } }],
+    };
+    const calls = installTauri(async (cmd) => {
+      if (cmd === "pick_document_file") return "C:/Docs/FileOnDisk.rnode";
+      if (cmd === "read_document") return JSON.stringify(doc);
+      if (cmd === "document_file_exists") return false;
+      return null;
+    });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    await store.loadFile(); // open FileOnDisk.rnode (internal title: Internal Title)
+    expect(store.getSnapshot().docs.length).toBe(2);
+    await store.saveNow();
+
+    const writes = calls.filter((c) => c.cmd === "write_document");
+    expect(writes[writes.length - 1].args.path).toBe("C:/Docs/FileOnDisk.rnode");
+    expect(calls.filter((c) => c.cmd === "remove_document")).toHaveLength(0);
   });
 
   it("a later save overwrites the same file without asking again", async () => {

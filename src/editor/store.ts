@@ -55,6 +55,22 @@ export function portableFileKey(docId: string, format: PortableFormat): string {
 }
 
 /**
+ * Filesystem-safe base name for a document title. The name typed in the GUI
+ * is the name of the real file (desktop .rnode and the portable saves): the
+ * save dialog is pre-filled with it and a later rename renames the file.
+ */
+export function docFileBaseName(title: string): string {
+  const base = title.replace(/[^\w-]+/g, "_").trim();
+  return base || "Untitled map";
+}
+
+/** Directory of a file path (with trailing separator), or "" when none. */
+function pathDirname(p: string): string {
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i < 0 ? "" : p.slice(0, i + 1);
+}
+
+/**
  * Validate/sanitize titleRuns coming from an imported document: only plain
  * text with bold/italic/underline/color survives; anything else is dropped.
  * Falls back to a single plain run of `title` when no valid runs are present.
@@ -110,6 +126,9 @@ export interface EditorState {
   relSel: string | null;
   groupSel: string | null;
   summarySel: string | null;
+  /** The node whose IMAGE is selected (image selection is exclusive: the
+   *  node itself is not in `selection` then). Null = no image selected. */
+  imageSel: string | null;
 }
 
 export class EditorStore {
@@ -124,6 +143,14 @@ export class EditorStore {
    * OVERWRITE the .rnode.json the user picked instead of re-downloading.
    * Handles are persisted in IndexedDB to survive reloads.
    */
+  /**
+   * Sanitized document title when the current desktop root was established
+   * (open or save-as). A rename in the GUI changes the title; on save the
+   * REAL file is renamed to match ONLY when the title moved away from this
+   * baseline — a file opened with a different internal title is never
+   * silently renamed on the first save. Null = no desktop root yet.
+   */
+  private rootTitleBase: string | null = null;
   private fileHandles = new Map<string, FileSystemFileHandle>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
@@ -211,6 +238,7 @@ export class EditorStore {
       relSel: null,
       groupSel: null,
       summarySel: null,
+      imageSel: null,
     };
   }
 
@@ -345,7 +373,12 @@ export class EditorStore {
             return;
           }
         } else {
-          await this.adapter.save(this.state.docs);
+          // A rename in the GUI becomes a rename of the REAL file: if the
+          // title moved away from the file's name, save writes the document
+          // under the new name (and drops the old file). Otherwise the file
+          // is just rewritten in place.
+          const renamedTo = await this.renameDesktopFile();
+          if (!renamedTo) await this.adapter.save([this.model.doc]);
         }
         this.state.sync = "saved";
         this.toast("Saved");
@@ -376,7 +409,9 @@ export class EditorStore {
    * (the T19 trap, unchanged).
    */
   async saveAsDesktop(): Promise<boolean> {
-    const file = await this.pickDesktopFile("save");
+    // The save dialog already knows the name: pre-fill it with the document
+    // title typed in the GUI, so the real file takes that name.
+    const file = await this.pickDesktopFile("save", docFileBaseName(this.model.doc.title));
     if (!file) return false;
     const assetStore = getAssetStore();
     if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
@@ -386,8 +421,56 @@ export class EditorStore {
     // are never re-written into the same store before the file exists.
     await assetStore.adoptFile(file, [...referencedAssetIds(this.sheet)]);
     this.adapter.setRoot(file);
-    await this.adapter.save(this.state.docs);
+    this.rootTitleBase = docFileBaseName(this.model.doc.title);
+    // The ACTIVE document is saved, not docs[0]: on desktop the sidebar may
+    // still carry the never-saved sample, and saving it over the chosen file
+    // would corrupt the document on disk.
+    await this.adapter.save([this.model.doc]);
     return true;
+  }
+
+  /**
+   * Desktop rename-on-save: when the GUI title moved away from the title the
+   * current file was opened/saved with, the REAL file is renamed to match
+   * (assets adopted into the new file first, old file removed only after the
+   * new one is fully written and the app switched to it). Returns the new
+   * file name, or null when nothing was renamed (then the caller saves to
+   * the current file as usual).
+   */
+  private async renameDesktopFile(): Promise<string | null> {
+    if (!(this.adapter instanceof TauriStorageAdapter)) return null;
+    const current = this.adapter.currentPath;
+    if (!current || this.rootTitleBase === null) return null;
+    const base = docFileBaseName(this.model.doc.title);
+    if (base === this.rootTitleBase) return null; // title did not change
+    const target = pathDirname(current) + base + ".rnode";
+    if (target.toLowerCase() === current.toLowerCase()) return null; // same file
+    const assetStore = getAssetStore();
+    if (!(assetStore instanceof TauriAssetStore) || typeof window === "undefined" || !window.__TAURI__) {
+      return null;
+    }
+    try {
+      const exists = (await window.__TAURI__.core.invoke("document_file_exists", { path: target })) as boolean;
+      if (exists) {
+        this.toast(`A file named "${base}.rnode" already exists — saved to the current file`);
+        return null;
+      }
+      // Same order as save-as: read from the old file, write into the new,
+      // only then switch. The old file is removed last, so a failure mid-way
+      // leaves the document intact at its previous path.
+      await assetStore.adoptFile(target, [...referencedAssetIds(this.sheet)]);
+      this.adapter.setRoot(target);
+      this.rootTitleBase = base;
+      await this.adapter.save([this.model.doc]);
+      await window.__TAURI__.core.invoke("remove_document", { path: current }).catch((e) => {
+        console.warn("remove_document failed", e); // best-effort: the new file is already saved
+      });
+      return `${base}.rnode`;
+    } catch (e) {
+      this.toast("Rename failed — saved to the current file");
+      console.warn("renameDesktopFile failed", e);
+      return null;
+    }
   }
 
   /**
@@ -411,6 +494,10 @@ export class EditorStore {
     assetStore.setRoot(file);
     this.adapter.setRoot(file);
     this.importDocumentFromJson(JSON.stringify(doc));
+    // Baseline for rename-on-save: the OPENED document's own title. Opening a
+    // file whose internal title differs from its file name must never rename
+    // the file on the first save — only a later GUI rename does.
+    this.rootTitleBase = docFileBaseName(doc.title);
     this.toast("Opened document file");
     return true;
   }
@@ -423,12 +510,17 @@ export class EditorStore {
    */
   private pickBusy = false;
 
-  private async pickDesktopFile(mode: "open" | "save"): Promise<string | null> {
+  private async pickDesktopFile(mode: "open" | "save", suggestedName?: string): Promise<string | null> {
     if (typeof window === "undefined" || !window.__TAURI__) return null;
     if (this.pickBusy) return null;
     this.pickBusy = true;
     try {
-      return ((await window.__TAURI__.core.invoke("pick_document_file", { mode })) as string | null) ?? null;
+      return (
+        ((await window.__TAURI__.core.invoke("pick_document_file", {
+          mode,
+          suggestedName: mode === "save" ? suggestedName : undefined,
+        })) as string | null) ?? null
+      );
     } catch {
       return null;
     } finally {
@@ -782,11 +874,11 @@ export class EditorStore {
   }
 
   private docFileName(): string {
-    return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rnode.json`;
+    return `${docFileBaseName(this.model.doc.title)}.rnode.json`;
   }
 
   private docZipName(): string {
-    return `${this.model.doc.title.replace(/[^\w-]+/g, "_")}.rnode.zip`;
+    return `${docFileBaseName(this.model.doc.title)}.rnode.zip`;
   }
 
   // -------------------------------------------------------------------------
@@ -810,6 +902,7 @@ export class EditorStore {
     this.state.relSel = null;
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     if (opts?.center) this.centerOnNode(id);
     this.notify();
   }
@@ -830,17 +923,39 @@ export class EditorStore {
     this.state.relSel = null;
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     this.notify();
   }
 
   clearSelection(): void {
     this.commitDraftOnLeave();
-    if (this.state.selection.length === 0 && !this.state.relSel && !this.state.groupSel && !this.state.summarySel) return;
+    if (
+      this.state.selection.length === 0 &&
+      !this.state.relSel &&
+      !this.state.groupSel &&
+      !this.state.summarySel &&
+      !this.state.imageSel
+    )
+      return;
     this.state.selection = [];
     this.state.editingId = null;
     this.state.relSel = null;
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
+    this.notify();
+  }
+
+  /** Select the IMAGE of a node (exclusive: clears every other selection). */
+  selectImage(nodeId: string): void {
+    this.commitDraftOnLeave();
+    this.state.selection = [];
+    this.state.editingId = null;
+    this.state.pendingInsert = null;
+    this.state.relSel = null;
+    this.state.groupSel = null;
+    this.state.summarySel = null;
+    this.state.imageSel = nodeId;
     this.notify();
   }
 
@@ -861,6 +976,7 @@ export class EditorStore {
     this.state.selection = [id];
     this.state.editingId = id;
     this.state.pendingInsert = null;
+    this.state.imageSel = null;
     this.editOriginal = { title: node.title, titleRuns: node.titleRuns };
     // Seed the draft with the current title so layout keeps measuring the
     // node at its current size until the editor reports its first change.
@@ -1308,6 +1424,7 @@ export class EditorStore {
       this.state.relSel = null;
       this.state.groupSel = null;
       this.state.summarySel = null;
+      this.state.imageSel = null;
       this.notify();
     }
   }
@@ -1515,6 +1632,51 @@ export class EditorStore {
     this.execOps([
       makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId, imageId, prevImageId }),
     ]);
+  }
+
+  /**
+   * Delete the SELECTED image (Backspace/Delete with the image selected):
+   * removes only the reference from the node, never the node itself. The
+   * attachment card stays (it may be shared; collectOrphans is the GC).
+   */
+  deleteSelectedImage(): void {
+    const nodeId = this.state.imageSel;
+    if (!nodeId) return;
+    const node = this.model.node(nodeId);
+    this.state.imageSel = null;
+    if (!node?.style.image) {
+      this.notify();
+      return;
+    }
+    this.setNodeImage(nodeId, null);
+    this.notify();
+  }
+
+  /**
+   * Move a node's image reference to another node (image drag & drop). Both
+   * reference changes are ONE undoable batch: undo restores the image to its
+   * original node. After the move the image on the TARGET stays selected.
+   */
+  assignImageToNode(fromNodeId: string, toNodeId: string): void {
+    if (fromNodeId === toNodeId) return;
+    const from = this.model.node(fromNodeId);
+    const to = this.model.node(toNodeId);
+    if (!from || !to) return;
+    const imageId = from.style.image;
+    if (!imageId) return;
+    const ops: Op[] = [];
+    const prevFrom = from.style.image ?? null;
+    const prevTo = to.style.image ?? null;
+    if (prevFrom !== prevTo) {
+      ops.push(
+        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: fromNodeId, imageId: null, prevImageId: prevFrom })
+      );
+      ops.push(
+        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: toNodeId, imageId, prevImageId: prevTo })
+      );
+      this.execOps(ops);
+    }
+    this.selectImage(toNodeId);
   }
 
   /**
@@ -1981,6 +2143,7 @@ export class EditorStore {
     this.state.selection = [];
     this.state.groupSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     this.state.relSel = id;
     this.notify();
   }
@@ -1989,6 +2152,7 @@ export class EditorStore {
     this.state.selection = [];
     this.state.relSel = null;
     this.state.summarySel = null;
+    this.state.imageSel = null;
     this.state.groupSel = id;
     this.notify();
   }
@@ -1997,6 +2161,7 @@ export class EditorStore {
     this.state.selection = [];
     this.state.relSel = null;
     this.state.groupSel = null;
+    this.state.imageSel = null;
     this.state.summarySel = id;
     this.notify();
   }
@@ -2366,6 +2531,10 @@ export class EditorStore {
     if (!doc) return;
     doc.title = title;
     doc.updatedAt = nowIso();
+    // The active document's model is what gets saved (and what the desktop
+    // rename-on-save detection reads): keep the two titles in sync so the
+    // GUI name becomes the real file's name.
+    if (this.state.activeDocId === id) this.model.doc.title = title;
     this.state.sync = "dirty";
     this.notify();
   }

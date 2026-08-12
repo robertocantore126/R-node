@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EditorStore, portableFileKey } from "../src/editor/store";
+import { EditorStore, docFileBaseName, portableFileKey } from "../src/editor/store";
 import { makeOp, type Op } from "../src/core/ops";
 import type { StorageAdapter } from "../src/persist/storage";
 
@@ -20,6 +20,15 @@ describe("portableFileKey", () => {
 
   it("does not collide across documents", () => {
     expect(portableFileKey("doc-1", "json")).not.toBe(portableFileKey("doc-2", "json"));
+  });
+});
+
+describe("docFileBaseName", () => {
+  it("makes a filesystem-safe name out of the GUI title", () => {
+    expect(docFileBaseName("Vacation Plan")).toBe("Vacation_Plan");
+    expect(docFileBaseName("R-node — Roadmap")).toBe("R-node_Roadmap");
+    expect(docFileBaseName("a:b*?c\"d<e>f|g")).toBe("a_b_c_d_e_f_g");
+    expect(docFileBaseName("")).toBe("Untitled map");
   });
 });
 
@@ -350,6 +359,102 @@ describe("save / load file", () => {
     await store.saveNow();
     expect(blobs).toHaveLength(1); // the file is written with current content
     expect(store.getSnapshot().sync).toBe("saved");
+  });
+});
+
+describe("image selection, delete and move", () => {
+  const IMG_ID = "f".repeat(64);
+  const card = { id: IMG_ID, mime: "image/png", w: 10, h: 10, bytes: 3 };
+
+  function twoMainTopics(store: EditorStore): [string, string] {
+    store.createChild();
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    return [root.childrenIds[0], root.childrenIds[1]];
+  }
+
+  it("selects the image exclusively: clears node selection, and a node select clears it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a] = twoMainTopics(store);
+    store.attachImage(a, card);
+
+    store.select(a);
+    expect(store.getSnapshot().selection).toEqual([a]);
+
+    store.selectImage(a);
+    const s = store.getSnapshot();
+    expect(s.imageSel).toBe(a);
+    expect(s.selection).toEqual([]);
+
+    // Selecting the node again drops the image selection.
+    const root = store.sheet.rootNodeId;
+    store.select(root);
+    expect(store.getSnapshot().imageSel).toBeNull();
+  });
+
+  it("deleteSelectedImage removes only the image (node survives) and undo restores it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a] = twoMainTopics(store);
+    store.attachImage(a, card);
+    store.selectImage(a);
+
+    store.deleteSelectedImage();
+    const node = store.doc.node(a)!;
+    expect(node.style.image).toBeUndefined();
+    expect(node).toBeDefined(); // the node itself is NOT deleted
+    expect(store.getSnapshot().imageSel).toBeNull();
+    // The attachment card stays: GC is explicit (collectOrphans).
+    expect(store.sheet.attachments.some((c) => c.id === IMG_ID)).toBe(true);
+
+    store.undo();
+    expect(store.doc.node(a)!.style.image).toBe(IMG_ID);
+  });
+
+  it("deleteSelectedImage on a node without an image is a no-op", () => {
+    const store = new EditorStore(memoryAdapter);
+    // The root has no image and the store still has zero ops in history.
+    store.selectImage(store.sheet.rootNodeId);
+    store.deleteSelectedImage();
+    expect(store.getSnapshot().canUndo).toBe(false); // no op was created
+  });
+
+  it("assignImageToNode moves the image between nodes as ONE undoable batch", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a, b] = twoMainTopics(store);
+    store.attachImage(a, card);
+
+    store.assignImageToNode(a, b);
+    expect(store.doc.node(a)!.style.image).toBeUndefined();
+    expect(store.doc.node(b)!.style.image).toBe(IMG_ID);
+    // The image on the target stays selected.
+    expect(store.getSnapshot().imageSel).toBe(b);
+
+    store.undo();
+    expect(store.doc.node(a)!.style.image).toBe(IMG_ID);
+    expect(store.doc.node(b)!.style.image).toBeUndefined();
+    store.redo();
+    expect(store.doc.node(a)!.style.image).toBeUndefined();
+    expect(store.doc.node(b)!.style.image).toBe(IMG_ID);
+  });
+
+  it("assignImageToNode no-ops for the same node, an image-less source, or a missing target", () => {
+    const store = new EditorStore(memoryAdapter);
+    const rootId = store.sheet.rootNodeId;
+    store.createChild();
+    const main = store.doc.node(rootId)!.childrenIds[0];
+    store.attachImage(main, card);
+    expect(store.doc.node(main)!.style.image).toBe(IMG_ID);
+
+    store.assignImageToNode(main, main); // same node
+    store.assignImageToNode("missing", main); // missing source
+    store.assignImageToNode(rootId, main); // image-less source
+    expect(store.doc.node(main)!.style.image).toBe(IMG_ID);
+
+    // None of the no-ops pushed history: one undo reverts the attach itself.
+    store.undo();
+    expect(store.doc.node(main)!.style.image).toBeUndefined();
+    store.redo();
+    expect(store.doc.node(main)!.style.image).toBe(IMG_ID);
   });
 });
 

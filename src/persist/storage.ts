@@ -90,6 +90,11 @@ export class TauriStorageAdapter implements StorageAdapter {
     return this.root !== null;
   }
 
+  /** The current document path, or null before the first open/save-as. */
+  get currentPath(): string | null {
+    return this.root;
+  }
+
   private invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
     if (typeof window === "undefined" || !window.__TAURI__) {
       throw new Error("TauriStorageAdapter used outside the Tauri webview");
