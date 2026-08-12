@@ -409,3 +409,85 @@ ma dipende da un ordine che non controlliamo.
   manifest.
 - Nessuna chiamata a `getAssetStore()` allo scope di modulo.
 - G-tsc, G-test verdi.
+
+---
+
+## 7. Passo 14 — T19: il documento è una cartella (solo desktop)
+
+**Obiettivo.** Su desktop un documento diventa una cartella che contiene tutto:
+
+```
+MiaMappa.rnode/
+├── document.json
+└── assets/<id>/{original,large,small,meta}
+```
+
+**Perché.** Oggi il desktop è a metà: le immagini stanno su file veri (passo
+10) ma il **documento resta nel localStorage della webview** —
+`TauriStorageAdapter` è uno stub e nessuno lo istanzia. Conseguenze: il cap da
+~5MB di localStorage vale ancora su desktop, e se quello storage viene
+ripulito restano file immagine orfani sul disco senza il documento che li
+referenziava.
+
+**Perché una cartella e non uno zip.** Uno zip va riscritto per intero a ogni
+salvataggio: con centinaia di originali sono GB ricompressi a ogni Ctrl+S. È la
+struttura di `.xmind` senza il suo costo di salvataggio — qui `document.json`
+si riscrive da solo, poche centinaia di KB, e le immagini si scrivono una volta
+all'import e non si toccano più.
+
+`.rnode.zip` **resta** il formato di scambio (passo 12). Cartella mentre
+lavori, file singolo quando mandi.
+
+**File**: `src-tauri/src/lib.rs` · `src/persist/assets.ts` ·
+`src/persist/storage.ts` · `src/editor/store.ts` · `src/main.tsx`
+
+### Passi
+
+1. **Rust**: i comandi asset prendono una **radice esplicita** invece di usare
+   la cartella dati dell'app: `put_asset(root, id, level, bytes)` e simili.
+   Senza stato nascosto: una radice sbagliata è un bug visibile nella chiamata,
+   non uno stato desincronizzato. Mantieni la guardia anti path-traversal.
+2. **Rust**: `pick_document_folder() -> Option<String>` con un dialogo nativo
+   (es. crate `rfd`), così non serve una dipendenza npm — coerente con come è
+   stato fatto il passo 10.
+3. **`TauriAssetStore`**: tiene la radice corrente come **stato mutabile
+   interno**, non catturata alla costruzione.
+
+   > **Trappola.** Il `Renderer` cattura il suo `assetStore` nel costruttore.
+   > Se aprire un altro documento creasse un'istanza nuova, il renderer
+   > continuerebbe a leggere dalla vecchia e mostrerebbe le immagini del
+   > documento precedente. L'istanza deve restare la stessa e cambiare radice.
+
+4. **`TauriStorageAdapter`**: legge e scrive `document.json` sotto la radice
+   corrente. Niente più localStorage sul desktop.
+5. **`main.tsx`**: costruisce `EditorStore` con `TauriStorageAdapter` quando
+   `window.__TAURI__` è presente, `LocalStorageAdapter` altrimenti — stesso
+   schema della factory degli asset.
+6. **Apri / Salva con nome**: selettore cartella → imposta la radice → scrive
+   `document.json` **e garantisce che ogni asset referenziato esista sotto
+   `<root>/assets`**, copiandolo dallo store corrente se manca.
+
+   > Senza il passo 6b il documento salvato referenzia id che nella sua
+   > cartella non ci sono, e riaprendolo le immagini mancano. È la stessa
+   > logica di `buildRnodeZip`, che scrive in una cartella invece che in un
+   > archivio: riusala, non riscriverla.
+
+7. **`saveNow`** su desktop scrive **solo** `document.json`.
+
+### Fuori scope, di proposito
+
+- **Non toccare la sidebar / la lista documenti.** Con il documento-cartella la
+  "libreria" diventa un elenco di cartelle recenti: è un cambiamento di
+  prodotto e va progettato a parte. Questo task apre e salva **un** documento.
+- **Non migrare** gli asset già in `<app-data>/assets` dai test del passo 10.
+- **Non toccare il percorso web**: IndexedDB resta com'è.
+
+### Fatto quando
+
+- G-tsc, G-test verdi.
+- Sul desktop: crei una mappa, alleghi un'immagine, salvi in una cartella
+  scelta tu, **chiudi l'app**, la riapri da quella cartella → l'immagine c'è.
+- La cartella si ispeziona da Esplora risorse: `document.json` leggibile e
+  `assets/<id>/` con i quattro file.
+- Salvando un documento con immagini in una cartella **nuova**, le immagini
+  vengono copiate: riaprendolo da lì non manca niente.
