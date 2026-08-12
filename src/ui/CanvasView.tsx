@@ -118,7 +118,9 @@ export function CanvasView(): JSX.Element {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const renderer = new Renderer(canvas);
+    // Image decodes finish asynchronously; the repaint callback brings them
+    // on screen without waiting for the next user gesture.
+    const renderer = new Renderer(canvas, { onRepaint: schedule });
     rendererRef.current = renderer;
 
     const ro = new ResizeObserver(() => {

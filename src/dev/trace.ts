@@ -31,7 +31,7 @@ export type TraceEvent =
   | { kind: "input"; t: number; n: number; what: string; outcome: "applied" | "ignored"; reason?: string; detail?: Detail }
   | { kind: "op"; t: number; n: number; types: string; count: number; ms: number }
   | { kind: "layout"; t: number; n: number; nodes: number; ms: number }
-  | { kind: "render"; t: number; n: number; frames: number; scale: number; nodes: number; visible: number; rels: number; relsDrawn: number; links: number; linksDrawn: number; textHits: number; textMisses: number; maxMs: number }
+  | { kind: "render"; t: number; n: number; frames: number; scale: number; nodes: number; visible: number; rels: number; relsDrawn: number; links: number; linksDrawn: number; textHits: number; textMisses: number; imgVisible: number; imgCached: number; imgBytes: number; imgInflight: number; maxMs: number }
   | { kind: "edit"; t: number; n: number; what: string; nodeId?: string; detail?: Detail }
   | { kind: "invariant"; t: number; n: number; message: string }
   | { kind: "error"; t: number; n: number; message: string; stack?: string };
@@ -89,6 +89,10 @@ interface RenderSample {
   linksDrawn: number;
   textHits: number;
   textMisses: number;
+  imgVisible: number;
+  imgCached: number;
+  imgBytes: number;
+  imgInflight: number;
 }
 
 let pending: RenderSample | null = null;
@@ -117,6 +121,10 @@ function flushRender(): void {
       linksDrawn: pending.linksDrawn,
       textHits: pending.textHits,
       textMisses: pending.textMisses,
+      imgVisible: pending.imgVisible,
+      imgCached: pending.imgCached,
+      imgBytes: pending.imgBytes,
+      imgInflight: pending.imgInflight,
       maxMs: Math.round(pendingMaxMs * 100) / 100,
     },
     `render:${shapeOf(pending)}`

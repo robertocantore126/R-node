@@ -8,7 +8,8 @@
  */
 import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { createCanvasTextMeasurer, FONT_STACK, imageResolver, LINE_HEIGHT_FACTOR, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { IndexedDbAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
@@ -43,6 +44,9 @@ interface Placed {
   visible: boolean;
 }
 
+/** One asset store for the whole app; overridable per-Renderer in tests. */
+const sharedAssetStore: AssetStore = new IndexedDbAssetStore();
+
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private dpr = 1;
@@ -62,10 +66,37 @@ export class Renderer {
   private textHits = 0;
   private textMisses = 0;
 
-  constructor(canvas: HTMLCanvasElement) {
+  /** Per-frame attachment resolver (invariant I9): set from state.sheet. */
+  private resolveImage: ((id: string) => { w: number; h: number } | null) | null = null;
+  /** Node ids with an image that were visible in the last painted frame. */
+  private visibleImageNodes = new Set<string>();
+  /**
+   * Image bitmap cache (ADR-001 §12): decoded at the level closest to the
+   * current zoom, LRU with a byte budget (w×h×4 per bitmap, 128MB cap).
+   * Evicted bitmaps are closed — ImageBitmap memory is not JS heap and the
+   * GC cannot free it predictably.
+   */
+  private imageCache = new Map<string, { bitmap: ImageBitmap; bytes: number }>();
+  private imageBytes = 0;
+  private imageFailed = new Set<string>();
+  /** Decodes in flight, key → requesting nodeId (a finished one for a node
+   * that scrolled off is closed immediately, never cached). */
+  private inflight = new Map<string, string>();
+  private inflightCount = 0;
+  private readonly IMAGE_BUDGET = 128 * 1024 * 1024;
+  private readonly MAX_INFLIGHT = 5;
+  private assetStore: AssetStore;
+  private onRepaint: (() => void) | null = null;
+
+  constructor(
+    canvas: HTMLCanvasElement,
+    opts: { assetStore?: AssetStore; onRepaint?: () => void } = {}
+  ) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2d context unavailable");
     this.ctx = ctx;
+    this.assetStore = opts.assetStore ?? sharedAssetStore;
+    this.onRepaint = opts.onRepaint ?? null;
   }
 
   resize(canvas: HTMLCanvasElement, cssW: number, cssH: number): void {
@@ -87,9 +118,9 @@ export class Renderer {
 
     // Nodes with images must be measured with the sheet's attachment cards
     // (invariant I9): the layout, the renderer and the overlay all agree.
-    const resolveImage = imageResolver(state.sheet);
+    this.resolveImage = imageResolver(state.sheet);
     const add = (n: MindNode): void => {
-      const m = measureNode(n, this.measurer, resolveImage);
+      const m = measureNode(n, this.measurer, this.resolveImage ?? undefined);
       const x = n.position.x;
       const y = n.position.y;
       const visible =
@@ -140,6 +171,9 @@ export class Renderer {
     this.textMisses = 0;
 
     const placed = this.placedNodes(state);
+    this.visibleImageNodes = new Set(
+      placed.filter((p) => p.visible && !!p.node.style.image).map((p) => p.node.id)
+    );
     const byId = new Map(placed.map((p) => [p.node.id, p]));
 
     // Viewport in world units, with the same 40px margin placedNodes uses.
@@ -211,6 +245,10 @@ export class Renderer {
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
+    // Evict only at the end of the frame: a closed bitmap still referenced by
+    // the current paint would throw.
+    this.evictToBudget();
+
     // Per-frame counters: they are what separates "not drawn" from "drawn but
     // invisible" when someone reports something missing on screen.
     trace.render(
@@ -224,6 +262,12 @@ export class Renderer {
         linksDrawn,
         textHits: this.textHits,
         textMisses: this.textMisses,
+        imgVisible: placed.filter(
+          (p) => p.visible && !!p.node.style.image && !!this.resolveImage?.(p.node.style.image)
+        ).length,
+        imgCached: this.imageCache.size,
+        imgBytes: this.imageBytes,
+        imgInflight: this.inflightCount,
       },
       (typeof performance !== "undefined" ? performance.now() : 0) - tStart
     );
@@ -425,9 +469,13 @@ export class Renderer {
       ctx.fill();
     }
 
-    // text (rich, bitmap-cached). The node being edited is skipped: the
-    // HTML overlay owns it, no ghosting.
-    if (!editing) this.drawText(theme, p, textColor);
+    // image between shape and text (ADR-001 §12); skipped while editing —
+    // the HTML overlay owns it, no double-render (same rule as the text).
+    const imgH = this.imageH(p);
+    if (!editing) {
+      this.drawImage(p);
+      this.drawText(theme, p, textColor, imgH);
+    }
 
     // collapsed badge (mirror to the left when the branch is left-side)
     if (n.collapsed && n.childrenIds.length > 0) {
@@ -515,7 +563,17 @@ export class Renderer {
     ctx.closePath();
   }
 
-  private drawText(_theme: RenderTheme, p: Placed, color: string): void {
+  /** Height of the node's image in world units (0 = none), matching measureTopic. */
+  private imageH(p: Placed): number {
+    const n = p.node;
+    if (!n.style.image || !this.resolveImage) return 0;
+    const att = this.resolveImage(n.style.image);
+    if (!att || att.w <= 0) return 0;
+    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    return (imgW * att.h) / att.w;
+  }
+
+  private drawText(_theme: RenderTheme, p: Placed, color: string, imgH = 0): void {
     const n = p.node;
     const pad = n.style.padding ?? 10;
     const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
@@ -535,9 +593,90 @@ export class Renderer {
       }
     }
     const totalH = entry.h;
-    const startY = p.y + p.h / 2 - totalH / 2;
+    // With an image above, the text occupies the space below it and centers
+    // inside that area; otherwise it centers in the whole box (as before).
+    const startY =
+      imgH > 0
+        ? p.y + pad + imgH + IMAGE_GAP + Math.max(0, (p.h - pad * 2 - imgH - IMAGE_GAP - totalH) / 2)
+        : p.y + p.h / 2 - totalH / 2;
     const startX = p.x + pad;
     if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, startX, startY, entry.w, entry.h);
+  }
+
+  /**
+   * Draw the node's image into its reserved rect (cached bitmap), or start a
+   * decode. Sync by design: no await inside the paint path.
+   */
+  private drawImage(p: Placed): void {
+    const n = p.node;
+    const imageId = n.style.image;
+    if (!imageId || !this.resolveImage) return;
+    const att = this.resolveImage(imageId);
+    if (!att || att.w <= 0) return;
+    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    const imgH = (imgW * att.h) / att.w;
+    // Level by the same zoom bucket schema as the text cache: zoomed out →
+    // small (256px), zoomed in → large (1024px). The original is never
+    // decoded — the hard 1024px cap of ADR-001 §12 is enforced here.
+    const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
+    const level: AssetLevel = res <= 1 ? "small" : "large";
+    const key = `${imageId}@${level}`;
+
+    const entry = this.imageCache.get(key);
+    if (entry) {
+      // LRU refresh (Map insertion order = recency).
+      this.imageCache.delete(key);
+      this.imageCache.set(key, entry);
+      const x = p.x + (p.w - imgW) / 2;
+      const y = p.y + (n.style.padding ?? 10);
+      this.ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
+      return;
+    }
+    if (this.imageFailed.has(key)) return; // corrupt/unavailable: not per frame
+    if (this.inflight.has(key) || this.inflightCount >= this.MAX_INFLIGHT) return;
+    this.startDecode(key, imageId, n.id, level);
+  }
+
+  private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel): Promise<void> {
+    this.inflight.set(key, nodeId);
+    this.inflightCount++;
+    try {
+      const blob = await this.assetStore.get(assetId, level);
+      if (!blob) {
+        this.imageFailed.add(key);
+        return;
+      }
+      const bitmap = await createImageBitmap(blob);
+      if (!this.visibleImageNodes.has(nodeId)) {
+        // The requesting node scrolled off while decoding: close immediately,
+        // never cache it.
+        bitmap.close();
+        return;
+      }
+      const bytes = bitmap.width * bitmap.height * 4;
+      this.imageCache.set(key, { bitmap, bytes });
+      this.imageBytes += bytes;
+      this.evictToBudget();
+      // A repaint lets the fresh bitmap appear without waiting for the next
+      // user gesture (and starts the next pending decodes).
+      this.onRepaint?.();
+    } catch {
+      this.imageFailed.add(key);
+    } finally {
+      if (this.inflight.delete(key)) this.inflightCount--;
+    }
+  }
+
+  /** LRU eviction under the byte budget. Only ever called between frames. */
+  private evictToBudget(): void {
+    while (this.imageBytes > this.IMAGE_BUDGET && this.imageCache.size > 0) {
+      const first = this.imageCache.entries().next().value;
+      if (!first) break;
+      const [k, v] = first as [string, { bitmap: ImageBitmap; bytes: number }];
+      this.imageCache.delete(k);
+      this.imageBytes -= v.bytes;
+      v.bitmap.close();
+    }
   }
 
   private textCacheKey(n: MindNode, color: string, maxW: number, res: number): string {
