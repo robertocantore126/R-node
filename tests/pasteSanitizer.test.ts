@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { htmlToRuns, plainTextToRuns, sanitizeHtml } from "../src/ui/pasteSanitizer";
+import { $getRoot, $getSelection, createEditor } from "lexical";
+import { ListItemNode, ListNode } from "@lexical/list";
+import { HeadingNode } from "@lexical/rich-text";
+import { htmlDropCensus, htmlToRuns, plainTextToRuns, sanitizeHtml } from "../src/ui/pasteSanitizer";
 import { runsToPlain } from "../src/core/text";
+import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "../src/ui/lexicalRuns";
 
 describe("sanitizeHtml — Word / Google Docs emphasis via CSS", () => {
   it("converts span font-weight:700 to <strong>", () => {
@@ -61,6 +65,18 @@ describe("sanitizeHtml — Word lists (MsoListParagraph / margin-left)", () => {
     expect(out).toContain("<li>");
     expect(out).toContain("Item");
   });
+
+  it("keeps non-li children inside a ul (div items) instead of losing them", () => {
+    // Some editors emit invalid-but-common list markup: <ul><div>item</div>….
+    // The old branch recursed non-li children into a throwaway array, so the
+    // list came back as an empty <ul> and a whole pasted block collapsed to
+    // just its surrounding text — the "paste shows only the title" bug.
+    const out = sanitizeHtml(`<ul><div><strong>One:</strong> first item</div><div><strong>Two:</strong> second item</div></ul>`);
+    const lis = out.match(/<li>/g) ?? [];
+    expect(lis.length).toBe(2);
+    expect(out).toContain("first item");
+    expect(out).toContain("second item");
+  });
 });
 
 describe("sanitizeHtml — web pages and Draw.io", () => {
@@ -87,6 +103,20 @@ describe("sanitizeHtml — web pages and Draw.io", () => {
     const out = sanitizeHtml(`<p><span style="font-weight: bold; font-family: Arial;">draw io bold</span></p>`);
     expect(out).toContain("<strong>draw io bold</strong>");
     expect(out).not.toContain("font-family");
+  });
+});
+
+describe("htmlDropCensus — which structures the sanitizer removes", () => {
+  it("counts svg/img/script elements it would drop", () => {
+    const out = htmlDropCensus(`<div><strong>Title</strong></div><svg><text>bullet text</text></svg><img src="a.png"><script>1</script>`);
+    expect(out.svg).toBe(1);
+    expect(out.img).toBe(1);
+    expect(out.script).toBe(1);
+    expect(out.iframe).toBeUndefined();
+  });
+
+  it("returns an empty census for plain clean html", () => {
+    expect(htmlDropCensus(`<p><strong>Title</strong></p><ul><li>one</li></ul>`)).toEqual({});
   });
 });
 
@@ -211,5 +241,60 @@ describe("plainTextToRuns — list markers from plain text", () => {
     const items = runs.filter((r) => r.listIndent !== undefined);
     expect(items.map((r) => r.text)).toEqual(["one", "two"]);
     expect(items.every((r) => r.listIndent === 1)).toBe(true);
+  });
+
+  it("turns bullet-marked lines with literal ** emphasis into list items", () => {
+    // the dark-block source the user pasted: bullet markers with literal **
+    const runs = plainTextToRuns("• **Dukkha-dukkha:** Plain physical or mental pain like injury, sickness, sadness, or grief.");
+    const item = runs.find((r) => r.listIndent !== undefined)!;
+    expect(item.listIndent).toBe(1);
+    expect(item.text).toBe("**Dukkha-dukkha:** Plain physical or mental pain like injury, sickness, sadness, or grief.");
+  });
+});
+
+describe("full paste pipeline — sanitize → runs → insert → editor state", () => {
+  // A heading plus a list, the shape of the pasted BBC/reader block. This is
+  // a REGRESSION GATE for the "pasted a block, node shows only the title"
+  // class of bugs: the list must survive every stage of the real paste path.
+  const BLOCK_HTML = `<div><strong>The Three Forms of Dukkha</strong></div>
+<ul>
+<li><strong>Dukkha-dukkha:</strong> Plain physical or mental pain like injury, sickness, sadness, or grief.</li>
+<li><strong>Viparinama-dukkha:</strong> The pain of change. This is the sadness when good times end, or the secret worry that happy moments will not last.</li>
+<li><strong>Sankhara-dukkha:</strong> Background existential unease. It is a subtle, constant dissatisfaction that comes from having a body and mind bound to changing conditions.</li>
+</ul>`;
+
+  it("produces listIndent runs from the sanitized HTML", () => {
+    const runs = htmlToRuns(sanitizeHtml(BLOCK_HTML));
+    const items = runs.filter((r) => r.listIndent !== undefined);
+    expect(items.map((r) => r.listIndent)).toEqual([1, 1, 1]);
+    // bold lead-ins survive the sanitize/run round trip
+    expect(items.every((r) => r.bold)).toBe(true);
+  });
+
+  it("turns div-items inside a ul into real list runs (the user's BBC block shape)", () => {
+    const runs = htmlToRuns(
+      sanitizeHtml(`<div><strong>The Three Forms of Dukkha</strong></div><ul><div><strong>Dukkha-dukkha:</strong> Plain physical or mental pain like injury, sickness, sadness, or grief.</div><div><strong>Sankhara-dukkha:</strong> Background existential unease.</div></ul>`)
+    );
+    const items = runs.filter((r) => r.listIndent !== undefined);
+    expect(items.map((r) => r.listIndent)).toEqual([1, 1]);
+    expect(items.every((r) => r.bold)).toBe(true);
+  });
+
+  it("keeps the heading and every list item when pasted into an existing title", async () => {
+    const runs = htmlToRuns(sanitizeHtml(BLOCK_HTML));
+    const editor = createEditor({ nodes: [ListNode, ListItemNode, HeadingNode], onError: (e) => { throw e; } });
+    setEditorRuns(editor, [{ text: "The Three Forms of Dukkha" }]);
+    await Promise.resolve();
+    await editor.update(() => {
+      const paragraphs = runsToParagraphNodes(runs);
+      const sel = $getSelection();
+      if (sel) sel.insertNodes(paragraphs);
+      else $getRoot().append(...paragraphs);
+    });
+    const back = editorStateToRuns(editor.getEditorState());
+    // the pasted title AND all three items come back after the commit path
+    expect(back.some((r) => r.text.includes("The Three Forms of Dukkha"))).toBe(true);
+    expect(back.filter((r) => r.listIndent !== undefined).map((r) => r.listIndent)).toEqual([1, 1, 1]);
+    expect(back.some((r) => r.text.includes("Sankhara-dukkha:"))).toBe(true);
   });
 });

@@ -1266,6 +1266,12 @@ export class EditorStore {
     this.commitDraftOnLeave();
     const node = this.selectionNode;
     if (!node) return;
+    trace.applied("paste-to-edit:trigger", {
+      nodeId: node.id,
+      chars: text.length,
+      lines: text.split(/\r\n|\r|\n/).length,
+      firstLine: text.split(/\n/)[0]?.slice(0, 40) ?? "",
+    });
     this.state.selection = [node.id];
     this.state.editingId = node.id;
     this.state.pendingInsert = text;
@@ -1346,9 +1352,16 @@ export class EditorStore {
    * never loses typed text. Undo restores the pre-edit title exactly.
    */
   commitEdit(): void {
-    trace.edit("commit", this.state.editingId ?? undefined);
     const id = this.state.editingId;
     const runs = this.editingDraftRuns;
+    // listItems is the decisive number: how many pasted items carry listIndent
+    // when the edit is committed. 0 here means the structure never survived
+    // the seed→editor round trip, however many markers the source had.
+    trace.edit("commit", id ?? undefined, {
+      runs: runs?.length ?? -1,
+      listItems: runs ? runs.filter((r) => r.listIndent !== undefined).length : -1,
+      plainLen: runs ? runsToPlain(runs).length : -1,
+    });
     const original = this.editOriginal;
     this.state.editingId = null;
     this.editingDraftRuns = null;
@@ -2417,6 +2430,27 @@ export class EditorStore {
     } catch {
       /* clipboard read with MIME types blocked — fall through to readText */
     }
+    trace.applied("paste:clipboard", {
+      mimeItems: items?.length ?? 0,
+      types: items ? items.map((i) => i.types.join("+")).join(",").slice(0, 120) : null,
+    });
+    // Read a sample of the HTML clipboard, if any: it tells us whether the
+    // SOURCE really carried a list (<ul>/<li>) or only looked like one on
+    // screen — the difference between "paste drops the list" and "the source
+    // never had one".
+    let htmlSample: string | null = null;
+    if (items) {
+      for (const item of items) {
+        if (item.types.includes("text/html")) {
+          try {
+            htmlSample = (await item.getType("text/html").then((b) => b.text())).slice(0, 240);
+          } catch {
+            /* html read failed — not fatal for the paste itself */
+          }
+          break;
+        }
+      }
+    }
     if (items) {
       // An image on the clipboard beats text (T13-2): with a node selected, a
       // copied/screenshotted image attaches instead of inserting text.
@@ -2452,6 +2486,23 @@ export class EditorStore {
       // selected topic instead of rejecting it as "not a map".
       const target = this.selectionNode;
       if (target) {
+        // Diagnose the plain-text paste BEFORE the editor consumes it:
+        // listMarkerLines counts lines that plainTextToRuns will turn into
+        // list items — 0 here and bullets are impossible no matter the fix.
+        const lines = text.split(/\r\n|\r|\n/);
+        const markerLines = lines.filter((l) => /^\s*(?:[-*•–]|\d+[.)])\s+/.test(l)).length;
+        trace.applied("paste:plain", {
+          chars: text.length,
+          lines: lines.length,
+          listMarkerLines: markerLines,
+          firstLine: lines[0]?.slice(0, 40) ?? "",
+          html: htmlSample
+            ? htmlSample.includes("<ul") || htmlSample.includes("<li")
+              ? "has-list-tags"
+              : "no-list-tags"
+            : null,
+          htmlHead: htmlSample ? htmlSample.replace(/\s+/g, " ").slice(0, 100) : null,
+        });
         this.typeToEdit(text);
         this.toast("Pasted into topic");
       } else {

@@ -28,11 +28,12 @@ import { ListItemNode, ListNode } from "@lexical/list";
 import { useStore } from "../editor/context";
 import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
-import { nodeRuns, plainToRuns } from "../core/text";
+import { nodeRuns } from "../core/text";
 import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, IMAGE_GAP, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, TEXT_INSET } from "../layout/measure";
 import { getAssetStore } from "../persist/assets";
+import { trace } from "../dev/trace";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
-import { htmlToRuns, plainTextToRuns, sanitizeHtml } from "./pasteSanitizer";
+import { htmlDropCensus, htmlToRuns, plainTextToRuns, sanitizeHtml } from "./pasteSanitizer";
 
 /**
  * Lexical wants these NESTED under `text`. Flat keys (`textBold`) are silently
@@ -322,8 +323,17 @@ function DraftSyncPlugin({ store, node }: { store: EditorStore; node: MindNode }
     if (seeded.current) return;
     seeded.current = true;
     // Type/paste-to-edit hands us initial content that replaces the title.
+    // Plain-to-runs used to flatten a pasted list into ONE unstyled run: the
+    // whole block rendered as literal lines and the renderer never drew a
+    // bullet. plainTextToRuns parses the same markers/indentation the HTML
+    // path understands, so a Ctrl+V list lands as real list items.
     const pending = store.consumePendingInsert();
-    const initial = pending !== null ? plainToRuns(pending) : nodeRuns(node.title, node.titleRuns);
+    const initial = pending !== null ? plainTextToRuns(pending) : nodeRuns(node.title, node.titleRuns);
+    if (pending !== null) {
+      // What the paste-to-edit seed produced: listItems > 0 means the overlay
+      // AND the canvas will draw bullets; 0 means the markers never parsed.
+      trace.applied("paste-to-edit", { chars: pending.length, runs: initial.length, listItems: initial.filter((r) => r.listIndent !== undefined).length });
+    }
     setEditorRuns(editor, initial);
     store.setEditingDraftRuns(initial);
     const focusTimer = setTimeout(() => editor.focus(), 0);
@@ -394,7 +404,29 @@ function PasteSanitizerPlugin(): null {
         // dash in the title forever. Route it through the same run pipeline
         // so list markers become real list items — the canvas draws both
         // paste flavors from the same runs.
-        const runs = html ? htmlToRuns(sanitizeHtml(html)) : plainTextToRuns(text);
+        let cleaned = "";
+        let runs: TextRun[];
+        if (html) {
+          cleaned = sanitizeHtml(html);
+          runs = htmlToRuns(cleaned);
+        } else {
+          runs = plainTextToRuns(text);
+        }
+        // The overlay paste result: listItems is what the renderer needs to
+        // draw bullets. 0 here with a list-looking source points at the HTML
+        // path (source tags), not at the plain-text marker parser. droppedTags
+        // counts the elements sanitizeHtml REMOVES: if the source renders its
+        // list as svg/img/iframe, the census shows it and the fix belongs in
+        // the sanitizer, not in the paste handler.
+        trace.applied("paste:overlay", {
+          html: !!html,
+          chars: text.length,
+          runs: runs.length,
+          listItems: runs.filter((r) => r.listIndent !== undefined).length,
+          boldRuns: runs.filter((r) => r.bold).length,
+          droppedTags: html ? JSON.stringify(htmlDropCensus(html)) : undefined,
+          sanitizedHead: cleaned.slice(0, 160).replace(/\s+/g, " "),
+        });
         editor.update(() => {
           // ALWAYS route through our run pipeline (not Lexical's DOM import):
           // $insertNodes converts HeadingNode to paragraph at a collapsed

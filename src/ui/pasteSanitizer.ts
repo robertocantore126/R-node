@@ -52,6 +52,28 @@ const DROP_TAGS = new Set([
   "script", "style", "iframe", "noscript", "link", "meta", "title", "template", "svg", "img", "video", "audio", "object", "embed", "form", "input", "button", "select", "textarea",
 ]);
 
+/**
+ * Count the elements sanitizeHtml will REMOVE from a fragment, per tag.
+ *
+ * When a paste loses content this is the first question: was the text in a
+ * structure the sanitizer deliberately drops (svg/img/iframe render the
+ * source's bullets as images or drawings)? 0 for every tag means the loss is
+ * elsewhere; a high count pinpoints the structure that ate it.
+ */
+export function htmlDropCensus(html: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    for (const el of Array.from(doc.body.querySelectorAll("*"))) {
+      const tag = el.tagName.toLowerCase();
+      if (DROP_TAGS.has(tag)) counts[tag] = (counts[tag] ?? 0) + 1;
+    }
+  } catch {
+    /* unparseable html — the census is a no-op, the paste itself decides */
+  }
+  return counts;
+}
+
 const BLOCK_TAGS = new Set(["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "ul", "ol", "li"]);
 
 // ---------------------------------------------------------------------------
@@ -233,7 +255,16 @@ function buildClean(doc: Document, el: Element, ctx: Ctx, out: Node[]): void {
           li.appendChild(wrapText(doc, child.textContent ?? "", ownCtx));
           block.appendChild(li);
         } else if (child.nodeType === Node.ELEMENT_NODE) {
-          buildClean(doc, child as Element, ownCtx, [block]);
+          // Invalid-but-common list markup: some editors emit <ul><div>item</div>
+          // instead of <li>. The old branch recursed such children into a
+          // throwaway array, so their content vanished and the list came back
+          // as an empty <ul> — a whole pasted block collapsed to just the text
+          // around it. Treat a non-li child as a list item.
+          const li = doc.createElement("li");
+          const itemOut: Node[] = [];
+          buildClean(doc, child as Element, ownCtx, itemOut);
+          for (const n of itemOut) li.appendChild(n);
+          block.appendChild(li);
         }
       }
       out.push(block);
