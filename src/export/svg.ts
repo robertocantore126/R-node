@@ -23,6 +23,7 @@
  */
 import type { MindNode, Sheet, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
+import { buildReport, publishReport, type ExportReport } from "./report";
 import {
   FONT_STACK,
   IMAGE_GAP,
@@ -274,6 +275,8 @@ export interface SvgExportResult {
   imagesMissing: number;
   width: number;
   height: number;
+  /** Self-audit: coverage, declared gaps, threshold warnings. */
+  report: ExportReport;
   /** Total size, and how much of it is embedded image data. Reported because
    *  on a picture-heavy map the images ARE the file: an export measured at
    *  110MB turned out to be 103MB of base64. */
@@ -281,12 +284,39 @@ export interface SvgExportResult {
   imageBytes: number;
 }
 
+/**
+ * Read the document back.
+ *
+ * A file that does not parse renders as nothing, and "nothing" is
+ * indistinguishable from "empty map" until a person opens it — which is how a
+ * blank PDF reached the user tonight while every structural check passed.
+ * Also asserts the drawing is inside the viewBox: geometry outside it is
+ * invisible without being malformed.
+ */
+function selfCheckSvg(svg: string, minX: number, minY: number, w: number, h: number): { ok: boolean; detail: string } {
+  if (typeof DOMParser === "undefined") return { ok: true, detail: "not attempted (no DOMParser)" };
+  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const err = doc.querySelector("parsererror");
+  if (err) return { ok: false, detail: `XML does not parse: ${err.textContent?.slice(0, 160) ?? "?"}` };
+  let outside = 0;
+  for (const r of Array.from(doc.querySelectorAll("rect, image"))) {
+    const x = Number(r.getAttribute("x") ?? 0);
+    const y = Number(r.getAttribute("y") ?? 0);
+    if (x < minX - 1 || y < minY - 1 || x > minX + w + 1 || y > minY + h + 1) outside++;
+  }
+  return outside === 0
+    ? { ok: true, detail: "parses; all geometry inside the viewBox" }
+    : { ok: false, detail: `${outside} shapes outside the viewBox — invisible when opened` };
+}
+
 export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<SvgExportResult> {
+  const t0 = performance.now();
   const pad = opts.pad ?? 40;
   const placed = placeAll(sheet, opts.measurer);
   if (placed.length === 0) {
     const empty = `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>`;
-    return { svg: empty, nodes: 0, images: 0, imagesMissing: 0, width: 1, height: 1, bytes: empty.length, imageBytes: 0 };
+    const report = buildReport({ format: "svg", sheet, ms: 0, bytes: empty.length, emitted: {}, honoured: [], units: {} });
+    return { svg: empty, nodes: 0, images: 0, imagesMissing: 0, width: 1, height: 1, bytes: empty.length, imageBytes: 0, report };
   }
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -371,5 +401,22 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   parts.push("</svg>");
 
   const svg = parts.join("");
-  return { svg, nodes: placed.length, images, imagesMissing, width, height, bytes: svg.length, imageBytes };
+  const elements = (svg.match(/<(text|tspan|path|rect|ellipse|polygon|image|g)[ />]/g) ?? []).length;
+  const report = buildReport({
+    format: "svg",
+    sheet,
+    ms: performance.now() - t0,
+    bytes: svg.length,
+    emitted: { nodes: placed.length, images, relationships: 0, boundaries: 0, summaries: 0 },
+    // Declared, not detected: an exporter cannot notice what it never thought
+    // of, so it lists what it covers and the gap is computed against the
+    // document. Everything absent here is a known omission.
+    honoured: ["fill", "textColor", "fontSize", "fontWeight", "italic", "underline", "shape", "cornerRadius", "image", "imageWidth", "align", "width", "height"],
+    units: { elements, imageBytes },
+    // The document is parsed back: an SVG that does not parse renders as
+    // nothing, which is exactly how the PDF failure stayed invisible.
+    selfCheck: selfCheckSvg(svg, minX, minY, width, height),
+  });
+  void publishReport(report);
+  return { svg, nodes: placed.length, images, imagesMissing, width, height, bytes: svg.length, imageBytes, report };
 }

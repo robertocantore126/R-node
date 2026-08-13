@@ -33,8 +33,12 @@ function traceSink(): Plugin {
           try {
             const body = Buffer.concat(chunks).toString("utf8");
             mkdirSync(dir, { recursive: true });
-            // `latest.json` is the rolling window anyone can just read.
-            writeFileSync(resolve(dir, "latest.json"), body, "utf8");
+            // `?name=` lets a second producer (the export self-audit) use the
+            // same sink without overwriting the session trace. Stripped to a
+            // safe stem: this is a local dev server, but a path is a path.
+            const asked = new URL(req.url ?? "/", "http://localhost").searchParams.get("name");
+            const stem = (asked ?? "latest").replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 64) || "latest";
+            writeFileSync(resolve(dir, `${stem}.json`), body, "utf8");
             // A keypress capture also gets a timestamped copy: those are the
             // ones with a note attached, and they must not be overwritten by
             // the next automatic flush a second later.

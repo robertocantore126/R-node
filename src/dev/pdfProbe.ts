@@ -22,7 +22,8 @@
 // deflateSync emits RAW deflate with no header. A viewer cannot decode that, so
 // it renders nothing — a completely blank page from a file whose structure,
 // xref and offsets are all perfectly valid.
-import { zlibSync } from "fflate";
+import { unzlibSync, zlibSync } from "fflate";
+import { buildReport, publishReport, type ExportReport } from "../export/report";
 import type { MindNode, Sheet } from "../core/types";
 import { nodeRuns } from "../core/text";
 import {
@@ -113,6 +114,8 @@ export interface PdfProbeResult {
   /** 1 = ordinary page. Above 1 the page relies on /UserUnit support. */
   userUnit: number;
   ms: number;
+  /** Self-audit: coverage, declared gaps, threshold warnings. */
+  report: ExportReport;
 }
 
 export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<PdfProbeResult> {
@@ -148,6 +151,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
 
   const cmds: string[] = [];
   let ops = 0;
+  /** Every text size emitted, so the report can flag an unreadable export. */
+  const fontSizes: number[] = [];
 
   // --- connectors -----------------------------------------------------------
   const byId = new Map(placed.map((p) => [p.node.id, p]));
@@ -268,6 +273,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
       const runSize = (line.segments[0]?.run.fontSize ?? size) * scale;
       const str = line.segments.map((s) => s.text).join("").replace(/\s+$/, "");
       if (str) {
+        fontSizes.push(Math.max(0.01, runSize));
         cmds.push(
           `/F1 ${f(Math.max(0.01, runSize))} Tf`,
           `1 0 0 1 ${f(X(x))} ${f(Y(baselineY))} Tm`,
@@ -326,9 +332,40 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
   putStr(`trailer\n<< /Size ${count} /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`);
 
   const blob = new Blob(chunks as BlobPart[], { type: "application/pdf" });
+
+  // Read the payload back. The container passed every structural check while
+  // the content stream was raw deflate instead of zlib, and the file rendered
+  // as a blank page: valid xref, correct offsets, right MediaBox, nothing
+  // visible. Only decompressing what was just written catches that.
+  let selfCheck: { ok: boolean; detail: string };
+  try {
+    const back = new TextDecoder("latin1").decode(unzlibSync(stream));
+    const drawn = (back.match(/ (re f|c S|Tj|Do|c f)$/gm) ?? []).length;
+    selfCheck =
+      drawn > 0
+        ? { ok: true, detail: `stream decompresses; ${drawn.toLocaleString()} drawing operators` }
+        : { ok: false, detail: "stream decompresses but contains no drawing operators" };
+  } catch (e) {
+    selfCheck = { ok: false, detail: `content stream does not decompress: ${String(e)} — the page will be blank` };
+  }
+
+  const minFontPt = Math.min(...fontSizes, Infinity) * userUnit;
+  const report = buildReport({
+    format: "pdf",
+    sheet,
+    ms: performance.now() - t0,
+    bytes: blob.size,
+    emitted: { nodes: placed.length, images, relationships: 0, boundaries: 0, summaries: 0 },
+    honoured: ["fill", "textColor", "fontSize", "shape", "cornerRadius", "image", "imageWidth", "align", "width", "height"],
+    units: { operators: ops, streamBytes: stream.length, userUnit, scale: Math.round(scale * 1e4) / 1e4 },
+    minEffectiveFontPt: Number.isFinite(minFontPt) ? minFontPt : undefined,
+    selfCheck,
+  });
+  void publishReport(report);
+
   return {
     blob, nodes: placed.length, images, ops,
     bytes: blob.size, streamBytes: stream.length,
-    pageW, pageH, scale, userUnit, ms: Math.round(performance.now() - t0),
+    pageW, pageH, scale, userUnit, ms: Math.round(performance.now() - t0), report,
   };
 }
