@@ -1042,6 +1042,13 @@ export function CanvasView(): JSX.Element {
       relSel: s.relSel,
       groupSel: s.groupSel,
       summarySel: s.summarySel,
+      // MUST match the state `paint` builds, field for field. This one was
+      // missing here: selecting an image drew its ring (paint had it) while
+      // the resize handle could not be grabbed (the hit tests read this), so
+      // the picture said "grab me" and the hit test had never heard of the
+      // selection. A field present in one copy and absent from the other is a
+      // feature that looks present and is not.
+      imageSel: s.imageSel,
       ghostImage: ghostRef.current,
       marqueeSel: marqueeSelRef.current,
     };

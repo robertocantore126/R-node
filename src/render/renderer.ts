@@ -1240,9 +1240,19 @@ export class Renderer {
       const p = placed.get(id);
       const rect = p ? this.imageRectForPlaced(p) : null;
       if (!rect) continue;
-      const hx = rect.x + rect.w - hs / 2;
-      const hy = rect.y + rect.h - hs / 2;
-      if (worldX >= hx && worldX <= hx + hs && worldY >= hy && worldY <= hy + hs) return id;
+      // The whole BORDER resizes, not just the bottom-right square. A 12-unit
+      // corner is a hard target at any zoom, and the selected image already
+      // draws a ring all the way round — so the ring is what the pointer can
+      // grab, which is what it looked like it meant.
+      const band = hs / 2;
+      const outside =
+        worldX < rect.x - band || worldX > rect.x + rect.w + band ||
+        worldY < rect.y - band || worldY > rect.y + rect.h + band;
+      if (outside) continue;
+      const inInterior =
+        worldX > rect.x + band && worldX < rect.x + rect.w - band &&
+        worldY > rect.y + band && worldY < rect.y + rect.h - band;
+      if (!inInterior) return id;
     }
     return null;
   }
