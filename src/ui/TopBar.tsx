@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
-import { runExportPng, runExportSvg, runExportPdf } from "../editor/exportBridge";
+import { runExportPng, runExportSvg, runExportPdf, runExportHtml } from "../editor/exportBridge";
 import { referencedAssetIds } from "../persist/assets";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
@@ -120,6 +120,7 @@ export function TopBar(): JSX.Element {
                 </>
               )}
               <button onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
+              <button onClick={() => { runExportHtml(); setExportOpen(false); }}>Interactive viewer (.html) — read on screen</button>
               <button onClick={() => { runExportSvg(); setExportOpen(false); }}>SVG (vector, whole map)</button>
               <button onClick={() => { runExportPng(); setExportOpen(false); }}>PNG image</button>
               <button onClick={() => { runExportPdf(); setExportOpen(false); }}>PDF (experiment — Helvetica, no images/relations)</button>

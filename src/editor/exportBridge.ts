@@ -62,6 +62,17 @@ export function runExportSvg(): void {
   void svgHandler?.();
 }
 
+// Self-contained HTML: the map plus the renderer, for reading on screen.
+let htmlHandler: (() => Promise<void>) | null = null;
+
+export function setExportHtmlHandler(fn: (() => Promise<void>) | null): void {
+  htmlHandler = fn;
+}
+
+export function runExportHtml(): void {
+  void htmlHandler?.();
+}
+
 // PDF — an experiment, not a feature yet (src/dev/pdfProbe.ts). It is wired
 // into the menu only so the question "does a PDF of a real map scroll?" can be
 // answered on a real map instead of a synthetic one.

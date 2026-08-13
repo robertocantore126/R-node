@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { viewSize } from "../editor/view";
-import { setExportPngHandler, setExportSvgHandler, setExportPdfHandler } from "../editor/exportBridge";
+import { setExportPngHandler, setExportSvgHandler, setExportPdfHandler, setExportHtmlHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { THEMES } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
+import { sheetToHtmlViewer } from "../export/htmlViewer";
 import { sheetToPdf } from "../dev/pdfProbe";
 import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
 import { getAssetStore } from "../persist/assets";
@@ -343,6 +344,46 @@ export function CanvasView(): JSX.Element {
       }
     });
 
+    setExportHtmlHandler(async () => {
+      const s = store.getSnapshot();
+      store.beginExport("Building viewer…");
+      try {
+        const out = await sheetToHtmlViewer(store.sheet, {
+          title: store.doc.doc.title,
+          theme: s.theme,
+          background: THEMES[s.theme].background,
+          // `large` here, not `small`: this one is meant to be zoomed into, and
+          // the renderer picks its own decode level from the displayed size —
+          // giving it a 256px source would cap the sharpness it can reach.
+          imageDataUri: async (assetId) => {
+            const meta = await getAssetStore().meta(assetId);
+            const blob = await getAssetStore().get(assetId, "large");
+            if (!blob) return null;
+            const buf = new Uint8Array(await blob.arrayBuffer());
+            let bin = "";
+            for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+            return `data:${meta?.mime ?? "image/png"};base64,${btoa(bin)}`;
+          },
+        });
+        const blob = new Blob([out.html], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${store.doc.doc.title.replace(/[\/:*?"<>|]+/g, " ").trim() || "map"}.html`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const mb = (n: number): string => (n / 1048576).toFixed(1);
+        store.toast(
+          `Viewer — ${out.nodes} topics, ${out.images} images, ${mb(out.bytes)}MB` +
+            (out.imagesMissing > 0 ? ` — ${out.imagesMissing} unreadable` : "")
+        );
+      } catch (e) {
+        store.toast(`Viewer export failed — ${String(e)}`);
+      } finally {
+        store.endExport();
+      }
+    });
+
     setExportPdfHandler(async () => {
       const s = store.getSnapshot();
       const rs: RenderState = {
@@ -438,6 +479,7 @@ export function CanvasView(): JSX.Element {
       setExportPngHandler(null);
       setExportSvgHandler(null);
       setExportPdfHandler(null);
+      setExportHtmlHandler(null);
       clearExternalGhost(); // revoke a pending objectURL on unmount
     };
   }, [store, schedule]);
