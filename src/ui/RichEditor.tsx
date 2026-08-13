@@ -32,7 +32,7 @@ import { nodeRuns, plainToRuns } from "../core/text";
 import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, IMAGE_GAP, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, TEXT_INSET } from "../layout/measure";
 import { getAssetStore } from "../persist/assets";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
-import { htmlToRuns, sanitizeHtml } from "./pasteSanitizer";
+import { htmlToRuns, plainTextToRuns, sanitizeHtml } from "./pasteSanitizer";
 
 const editorTheme = {
   textBold: "rnode-text-bold",
@@ -321,16 +321,22 @@ function PasteSanitizerPlugin(): null {
         const payload = (event ?? {}) as unknown as { clipboardData?: DataTransfer | null };
         if (!payload.clipboardData) return false;
         const html = payload.clipboardData.getData("text/html");
-        if (!html) return false; // plain-text paste → Lexical default
+        const text = payload.clipboardData.getData("text/plain");
+        if (!html && !text) return false;
         event.preventDefault();
-        const cleaned = sanitizeHtml(html);
+        // Plain-text-only paste (terminal, .txt, chat window) used to fall
+        // back to Lexical's verbatim insertion: "- point" stayed a literal
+        // dash in the title forever. Route it through the same run pipeline
+        // so list markers become real list items — the canvas draws both
+        // paste flavors from the same runs.
+        const runs = html ? htmlToRuns(sanitizeHtml(html)) : plainTextToRuns(text);
         editor.update(() => {
           // ALWAYS route through our run pipeline (not Lexical's DOM import):
           // $insertNodes converts HeadingNode to paragraph at a collapsed
           // selection, while plain paragraphs/lists survive — and our runs
           // carry heading size as inline font-size, paragraph gaps and list
           // indent, so the canvas renders the exact pasted structure.
-          const paragraphs = runsToParagraphNodes(htmlToRuns(cleaned));
+          const paragraphs = runsToParagraphNodes(runs);
           const sel = $getSelection();
           if (sel) sel.insertNodes(paragraphs);
           else $getRoot().append(...paragraphs);

@@ -361,6 +361,85 @@ export function htmlToRuns(html: string): TextRun[] {
   return normalizeRuns(runs);
 }
 
+// ---------------------------------------------------------------------------
+// Plain text → TextRun[] (clipboard with no text/html: terminal, .txt, chat)
+// ---------------------------------------------------------------------------
+
+/**
+ * Plain-text clipboard content → TextRun[], so list markers become real list
+ * items. Runs ONLY for pastes that carry no HTML: previously those fell back
+ * to Lexical's verbatim insertion, so "- point" stayed a literal dash in the
+ * text forever and the renderer never drew a bullet (the marker is drawn from
+ * listIndent, so leaving it in would show both). The only structure this path
+ * understands is lines and indentation — no Markdown: **bold** stays the
+ * literal characters it arrived as.
+ *
+ * The run shape mirrors htmlToRuns' nested-list output exactly (listIndent on
+ * the item's first run, "\n" item separators, paraGap + "\n" between blocks)
+ * so the SAME buildList/bullet-drawing code renders both paste flavors.
+ */
+
+const LIST_MARKER_RE = /^(\s*)([-*•–]|\d+[.)])(\s+)(.*)$/;
+
+function listItemLevel(indent: string): number {
+  // Every 2 spaces, or every tab, is one level of nesting (clamped like the
+  // HTML path clamps its list depth to 8).
+  let levels = 0;
+  for (const ch of indent) levels += ch === "\t" ? 1 : 0.5;
+  return Math.floor(levels);
+}
+
+export function plainTextToRuns(text: string): TextRun[] {
+  const blocks: TextRun[][] = [];
+  let list: TextRun[] | null = null;
+
+  const closeList = (): void => {
+    if (list) {
+      // Item separator, mirroring walkList's trailing newline after each item.
+      list.push({ text: "\n" });
+      list = null;
+    }
+  };
+
+  for (const rawLine of text.split(/\r\n|\r|\n/)) {
+    const line = rawLine.trimEnd();
+    if (line.trim() === "") {
+      // Blank lines separate blocks — never an empty list item.
+      closeList();
+      continue;
+    }
+    const m = line.match(LIST_MARKER_RE);
+    if (m) {
+      const level = Math.min(8, listItemLevel(m[1]) + 1);
+      const content = m[4].trim();
+      if (!list) {
+        list = [];
+        blocks.push(list);
+      }
+      list.push({ text: content, listIndent: level });
+      list.push({ text: "\n" });
+      continue;
+    }
+    // A non-list line is its own paragraph block.
+    closeList();
+    blocks.push([{ text: line.trim() }]);
+  }
+  closeList();
+
+  // Join blocks with the same rule walkBlocks uses: first block bare, every
+  // following block separated by a "\n" run with paraGap on its first run.
+  const runs: TextRun[] = [];
+  let first = true;
+  for (const block of blocks) {
+    if (block.length === 0) continue;
+    if (!first && block[0].text !== "\n") block[0].paraGap = true;
+    if (!first) runs.push({ text: "\n" });
+    for (const r of block) runs.push(r);
+    first = false;
+  }
+  return normalizeRuns(runs);
+}
+
 function pushInto(out: TextRun[], text: string, ctx: Ctx): void {
   if (text.length === 0) return;
   const run: TextRun = { text };

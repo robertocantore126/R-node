@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { htmlToRuns, sanitizeHtml } from "../src/ui/pasteSanitizer";
+import { htmlToRuns, plainTextToRuns, sanitizeHtml } from "../src/ui/pasteSanitizer";
 import { runsToPlain } from "../src/core/text";
 
 describe("sanitizeHtml — Word / Google Docs emphasis via CSS", () => {
@@ -155,5 +155,61 @@ describe("htmlToRuns — clean HTML → TextRun[]", () => {
     const runs = htmlToRuns(html);
     const run = runs.find((r) => r.text.includes("bolded"));
     expect(run?.bold).toBe(true);
+  });
+});
+
+describe("plainTextToRuns — list markers from plain text", () => {
+  it("turns a flat list into runs with listIndent 1 and no marker left in the text", () => {
+    const runs = plainTextToRuns("- first point\n* second point\n• third point\n– fourth");
+    const items = runs.filter((r) => r.listIndent !== undefined);
+    expect(items.length).toBe(4);
+    for (const r of items) {
+      expect(r.listIndent).toBe(1);
+      expect(r.text).not.toMatch(/[-*•–]/);
+    }
+    expect(items.map((r) => r.text)).toEqual(["first point", "second point", "third point", "fourth"]);
+  });
+
+  it("maps two-space and tab indentation to listIndent 2 on the nested item", () => {
+    const runs = plainTextToRuns("- parent\n  - child\n\t- tabbed");
+    const items = runs.filter((r) => r.listIndent !== undefined);
+    expect(items.map((r) => [r.text, r.listIndent])).toEqual([
+      ["parent", 1],
+      ["child", 2],
+      ["tabbed", 2],
+    ]);
+  });
+
+  it("recognizes numbered markers (1. and 2))", () => {
+    const runs = plainTextToRuns("1. first\n2) second");
+    const items = runs.filter((r) => r.listIndent !== undefined);
+    expect(items.map((r) => [r.text, r.listIndent])).toEqual([
+      ["first", 1],
+      ["second", 1],
+    ]);
+  });
+
+  it("keeps a plain paragraph a paragraph when mixed with a list", () => {
+    const runs = plainTextToRuns("plain paragraph\n- item");
+    const para = runs.find((r) => r.text.includes("plain paragraph"))!;
+    expect(para.listIndent).toBeUndefined();
+    const item = runs.find((r) => r.text.includes("item"))!;
+    expect(item.listIndent).toBe(1);
+    // the list is a separate block: paraGap lands on its first run
+    expect(item.paraGap).toBe(true);
+  });
+
+  it("leaves **bold** as literal characters — no Markdown parsing", () => {
+    const runs = plainTextToRuns("**bold** stays");
+    expect(runs).toEqual([{ text: "**bold** stays" }]);
+    expect(runs[0].listIndent).toBeUndefined();
+  });
+
+  it("does not emit an empty list item for a blank line", () => {
+    const runs = plainTextToRuns("- one\n\n- two");
+    expect(runs.some((r) => r.text === "")).toBe(false);
+    const items = runs.filter((r) => r.listIndent !== undefined);
+    expect(items.map((r) => r.text)).toEqual(["one", "two"]);
+    expect(items.every((r) => r.listIndent === 1)).toBe(true);
   });
 });
