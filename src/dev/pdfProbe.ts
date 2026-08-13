@@ -156,7 +156,11 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
 
   // --- connectors -----------------------------------------------------------
   const byId = new Map(placed.map((p) => [p.node.id, p]));
-  cmds.push("1.7 w");
+  // Scaled like everything else. It was the one quantity in this file left in
+  // page units, so at scale 0.03 a connector stayed 1.7 units thick while a
+  // node box shrank to 1.2 — the line was thicker than the topic was tall, and
+  // the map came out as ribbons with boxes hanging off them.
+  cmds.push(`${f(Math.max(0.05, 1.7 * scale))} w`);
   for (const p of placed) {
     if (!p.node.parentId) continue;
     const parent = byId.get(p.node.parentId);
@@ -349,7 +353,12 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
     selfCheck = { ok: false, detail: `content stream does not decompress: ${String(e)} — the page will be blank` };
   }
 
-  const minFontPt = Math.min(...fontSizes, Infinity) * userUnit;
+  // The size a viewer that IGNORES UserUnit will draw — i.e. the pessimistic
+  // one, which is what the warning has to be based on. Multiplying by userUnit
+  // and calling the result the font size is how this report told the user "no
+  // warnings" about a PDF whose text was 0.37pt on screen: it stated an
+  // assumption about viewer support as if it were a measured fact.
+  const minFontPt = Math.min(...fontSizes, Infinity);
   const report = buildReport({
     format: "pdf",
     sheet,
@@ -357,7 +366,17 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
     bytes: blob.size,
     emitted: { nodes: placed.length, images, relationships: 0, boundaries: 0, summaries: 0 },
     honoured: ["fill", "textColor", "fontSize", "shape", "cornerRadius", "image", "imageWidth", "align", "width", "height"],
-    units: { operators: ops, streamBytes: stream.length, userUnit, scale: Math.round(scale * 1e4) / 1e4 },
+    units: {
+      operators: ops,
+      streamBytes: stream.length,
+      imageBytes: xobjects.reduce((sum, x) => sum + x.bytes.length, 0),
+      userUnit,
+      scale: Math.round(scale * 1e4) / 1e4,
+      pageW: Math.round(pageW),
+      pageH: Math.round(pageH),
+      minFontPt: Math.round(minFontPt * 1000) / 1000,
+      minFontPtIfUserUnitHonoured: Math.round(minFontPt * userUnit * 100) / 100,
+    },
     minEffectiveFontPt: Number.isFinite(minFontPt) ? minFontPt : undefined,
     selfCheck,
   });

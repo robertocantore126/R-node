@@ -111,10 +111,15 @@ export function buildReport(args: {
     else if (c.emitted < c.present) warnings.push(`${kind}: ${c.emitted} of ${c.present} emitted`);
   }
   // 4pt is roughly where a viewer at 100% stops rendering glyphs anyone can
-  // read; the export that prompted this sat at 0.43.
+  // read. This must be fed the PESSIMISTIC size — what a viewer draws with no
+  // help from any optional feature. Fed the optimistic one, this check reported
+  // "no warnings" for a PDF whose text arrived on screen at 0.37pt, because a
+  // /UserUnit multiplier that Chrome ignores had been folded into it. A gate
+  // that assumes its way past the failure is worse than no gate: it converts an
+  // open question into a false all-clear.
   if (args.minEffectiveFontPt !== undefined && args.minEffectiveFontPt < 4) {
     warnings.push(
-      `text down to ${args.minEffectiveFontPt.toFixed(2)}pt — unreadable at 100%, and viewers cap their zoom`
+      `text down to ${args.minEffectiveFontPt.toFixed(2)}pt — unreadable, and viewers cap their zoom`
     );
   }
   // Past ~10,000 nodes an SVG viewer builds a DOM tree it cannot pan smoothly.
