@@ -38,6 +38,19 @@ import {
 
 /** Acrobat and Chrome stop being reliable past 14,400 units on a side. */
 const MAX_PAGE_UNITS = 14_400;
+/**
+ * /UserUnit multiplies the page's user space, up to 75,000 (PDF 1.6+).
+ *
+ * Without it a 297,000-unit-tall map has to be scaled by 0.048 to fit 14,400,
+ * which put 12px text at 0.43pt — below the size at which viewers bother to
+ * draw glyphs, so the export was unreadable at any zoom. With it the drawing
+ * keeps its own coordinates and the PAGE grows instead.
+ *
+ * Acrobat honours it. Chrome's PDFium is the open question this probe now
+ * carries: if the file still comes out tiny, UserUnit was ignored and the
+ * answer is multiple pages, which every viewer handles.
+ */
+const MAX_USER_UNIT = 75_000;
 
 interface Placed { node: MindNode; x: number; y: number; w: number; h: number }
 
@@ -97,6 +110,8 @@ export interface PdfProbeResult {
   pageW: number;
   pageH: number;
   scale: number;
+  /** 1 = ordinary page. Above 1 the page relies on /UserUnit support. */
+  userUnit: number;
   ms: number;
 }
 
@@ -114,7 +129,14 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
   minX -= pad; minY -= pad; maxX += pad; maxY += pad;
   const worldW = maxX - minX;
   const worldH = maxY - minY;
-  const scale = Math.min(1, MAX_PAGE_UNITS / Math.max(worldW, worldH));
+  // The MediaBox still has to fit inside 14,400: UserUnit does NOT widen the
+  // coordinate range, it multiplies what one unit MEANS physically. So the
+  // drawing is scaled to fit as before, and UserUnit then says "each of these
+  // units is 18 units tall" — which is what makes the text readable on screen,
+  // since a viewer at 100% maps one unit to one pixel TIMES UserUnit.
+  const long = Math.max(worldW, worldH);
+  const scale = Math.min(1, MAX_PAGE_UNITS / long);
+  const userUnit = Math.min(MAX_USER_UNIT, Math.max(1, Math.ceil(long / MAX_PAGE_UNITS)));
   const pageW = worldW * scale;
   const pageH = worldH * scale;
 
@@ -173,8 +195,26 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
     const text = colors?.text ?? "#111111";
 
     if ((n.style.shape ?? "rounded") !== "none") {
-      cmds.push(`${rgb(fill)} rg`, `${f(X(p.x))} ${f(Y(p.y + p.h))} ${f(p.w * scale)} ${f(p.h * scale)} re f`);
-      ops += 2;
+      cmds.push(`${rgb(fill)} rg`);
+      const r = Math.min((n.style.cornerRadius ?? 8) * scale, (p.w * scale) / 2, (p.h * scale) / 2);
+      if (r > 0.2) {
+        // Rounded corners, four Bezier quarters. Square boxes were part of what
+        // made the nodes look wrong: the canvas rounds them, and at this size a
+        // sharp-cornered rectangle reads as a dash rather than a topic.
+        const x0 = X(p.x), y0 = Y(p.y + p.h), w = p.w * scale, h = p.h * scale;
+        const k = r * 0.5523;
+        cmds.push(
+          `${f(x0 + r)} ${f(y0)} m`,
+          `${f(x0 + w - r)} ${f(y0)} l ${f(x0 + w - r + k)} ${f(y0)} ${f(x0 + w)} ${f(y0 + r - k)} ${f(x0 + w)} ${f(y0 + r)} c`,
+          `${f(x0 + w)} ${f(y0 + h - r)} l ${f(x0 + w)} ${f(y0 + h - r + k)} ${f(x0 + w - r + k)} ${f(y0 + h)} ${f(x0 + w - r)} ${f(y0 + h)} c`,
+          `${f(x0 + r)} ${f(y0 + h)} l ${f(x0 + r - k)} ${f(y0 + h)} ${f(x0)} ${f(y0 + h - r + k)} ${f(x0)} ${f(y0 + h - r)} c`,
+          `${f(x0)} ${f(y0 + r)} l ${f(x0)} ${f(y0 + r - k)} ${f(x0 + r - k)} ${f(y0)} ${f(x0 + r)} ${f(y0)} c f`
+        );
+        ops += 6;
+      } else {
+        cmds.push(`${f(X(p.x))} ${f(Y(p.y + p.h))} ${f(p.w * scale)} ${f(p.h * scale)} re f`);
+        ops += 2;
+      }
     }
 
     let imgH = 0;
@@ -264,7 +304,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
   obj(
     3,
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${f(pageW)} ${f(pageH)}] ` +
-      `/Resources << /Font << /F1 5 0 R >> /XObject << ${xobjDict} >> >> /Contents 4 0 R >>`
+      `/Resources << /Font << /F1 5 0 R >> /XObject << ${xobjDict} >> >> /Contents 4 0 R` +
+      (userUnit > 1 ? ` /UserUnit ${userUnit}` : "") + " >>"
   );
   obj(4, `<< /Length ${stream.length} /Filter /FlateDecode >>`, stream);
   obj(5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
@@ -288,6 +329,6 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfProbeOptions): Promise<P
   return {
     blob, nodes: placed.length, images, ops,
     bytes: blob.size, streamBytes: stream.length,
-    pageW, pageH, scale, ms: Math.round(performance.now() - t0),
+    pageW, pageH, scale, userUnit, ms: Math.round(performance.now() - t0),
   };
 }
