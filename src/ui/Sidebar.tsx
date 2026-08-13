@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import type { RnodeDocument } from "../core/types";
+import logoUrl from "../assets/logo.png";
 
 export function Sidebar(): JSX.Element {
   const store = useStore();
@@ -22,7 +23,7 @@ export function Sidebar(): JSX.Element {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-dot" />
+        <img className="brand-logo" src={logoUrl} alt="R-node logo" />
         <span className="brand-name">R-node</span>
       </div>
 
@@ -30,21 +31,11 @@ export function Sidebar(): JSX.Element {
         <input
           ref={searchRef}
           placeholder="Search documents…  (Ctrl+F)"
+          data-help="Search documents"
+          data-help-more="Filters the document list by title (Ctrl+F)."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-      </div>
-
-      <div className="sidebar-actions">
-        <button className="btn primary" onClick={() => store.newDocument()}>
-          + New document
-        </button>
-        <button className="btn" onClick={() => void store.loadFile()} title="Open a .rnode.json file">
-          Open file…
-        </button>
-        <button className="btn" onClick={() => store.switchToDoc(store.duplicateSample())} title="Create a doc from the roadmap template">
-          From template
-        </button>
       </div>
 
       <div className="sidebar-list">
@@ -64,9 +55,6 @@ export function Sidebar(): JSX.Element {
         </div>
       )}
 
-      <div className="sidebar-footer">
-        <span>Enter: sibling · Tab: child · Shift+Tab: promote · Space: collapse</span>
-      </div>
     </aside>
   );
 }
@@ -92,10 +80,18 @@ function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { 
   }
 
   return (
-    <div className={`doc-row${active ? " active" : ""}`} onClick={() => store.switchToDoc(doc.documentId)} onDoubleClick={onStartRename}>
+    <div
+      className={`doc-row${active ? " active" : ""}`}
+      data-help={`Document: ${doc.title}`}
+      data-help-more={archived ? "Archived — click to open, double-click to rename." : "Click to open this document, double-click to rename."}
+      onClick={() => store.switchToDoc(doc.documentId)}
+      onDoubleClick={onStartRename}
+    >
       <span className="doc-title">{doc.title}</span>
       <span className="doc-row-actions">
         <button
+          data-help="Duplicate document"
+          data-help-more="Creates a copy of this document."
           title="Duplicate"
           onClick={(e) => { e.stopPropagation(); store.duplicateDocument(doc.documentId); }}
         >
@@ -103,6 +99,8 @@ function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { 
         </button>
         {archived ? (
           <button
+            data-help="Restore document"
+            data-help-more="Un-archives this document."
             title="Restore"
             onClick={(e) => { e.stopPropagation(); store.toggleArchive(doc.documentId); }}
           >
@@ -110,6 +108,8 @@ function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { 
           </button>
         ) : (
           <button
+            data-help="Archive document"
+            data-help-more="Moves the document to the Archived section. Not deleted."
             title="Archive"
             onClick={(e) => { e.stopPropagation(); store.toggleArchive(doc.documentId); }}
           >
@@ -117,6 +117,8 @@ function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { 
           </button>
         )}
         <button
+          data-help="Delete permanently"
+          data-help-more="Removes the document from the app storage. Not undoable."
           title="Delete permanently"
           onClick={(e) => { e.stopPropagation(); store.deleteDocument(doc.documentId); }}
         >

@@ -9,6 +9,8 @@ import { CanvasView } from "./ui/CanvasView";
 import { Outliner } from "./ui/Outliner";
 import { Inspector } from "./ui/Inspector";
 import { Palette } from "./ui/Palette";
+import { HelpOverlay } from "./ui/HelpOverlay";
+import { hideHelp, setShiftHeld, trackHover } from "./ui/help";
 
 export function App(): JSX.Element {
   const store = useStore();
@@ -17,6 +19,42 @@ export function App(): JSX.Element {
   useEffect(() => {
     document.documentElement.dataset.theme = state.theme;
   }, [state.theme]);
+
+  // Inspection mode: Shift held reveals what is under the cursor. Shift is
+  // otherwise free (all existing shortcuts combine it with other keys), so a
+  // plain Shift press is safe to claim. Tooltips follow the cursor via the
+  // document mouseover; canvas objects are hit-tested in CanvasView.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== "Shift") return;
+      // Typing capitals in a field must not pop the tooltip over it — the
+      // inspection reveal is for hovering, not for holding Shift while typing.
+      const tag = (e.target as HTMLElement | null)?.tagName ?? "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      setShiftHeld(true);
+    };
+    const onKeyUp = (e: KeyboardEvent): void => {
+      if (e.key === "Shift") setShiftHeld(false);
+    };
+    const onMouseOver = (e: MouseEvent): void => {
+      const el = (e.target as HTMLElement | null)?.closest?.("[data-help]") as HTMLElement | null ?? null;
+      trackHover(el);
+    };
+    const onBlur = (): void => {
+      setShiftHeld(false);
+      hideHelp();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    document.addEventListener("mouseover", onMouseOver);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      document.removeEventListener("mouseover", onMouseOver);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -43,24 +81,27 @@ export function App(): JSX.Element {
     return () => window.removeEventListener("keydown", onKey);
   }, [store]);
 
-  const zen = state.zen;
-
   return (
-    <div className="app">
-      {!zen && <Sidebar />}
+    // .app is a two-column grid (sidebar + main). With the sidebar unmounted
+    // the single remaining child would land in the first 264px slot and crush
+    // the whole UI into it — the canvas went zero-width (blank) and the
+    // inspector overflowed on the left. Switching the grid to one column keeps
+    // main spanning the full window.
+    <div className={`app${state.showSidebar ? "" : " app-no-sidebar"}`}>
+      {state.showSidebar && <Sidebar />}
 
       <div className="main">
-        {!zen && <TopBar />}
+        <TopBar />
 
         <div className="workspace">
           <div className="canvas-area">
             <CanvasView />
-            {!zen && state.showOutliner && <Outliner />}
+            {state.showOutliner && <Outliner />}
           </div>
-          {!zen && state.showInspector && <Inspector />}
+          {state.showInspector && <Inspector />}
         </div>
 
-        {!zen && <StatusBar />}
+        <StatusBar />
       </div>
 
       <Palette />
@@ -70,6 +111,8 @@ export function App(): JSX.Element {
           {state.message}
         </div>
       )}
+
+      <HelpOverlay />
     </div>
   );
 }
@@ -79,11 +122,11 @@ function StatusBar(): JSX.Element {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   return (
     <footer className="statusbar">
-      <span>{Math.round(state.camera.scale * 100)}%</span>
+      <span data-help="Current zoom" data-help-more="Zoom level of the map view. Ctrl+scroll to zoom, Ctrl+1 to fit the map.">{Math.round(state.camera.scale * 100)}%</span>
       <span className="sep">·</span>
-      <span>{state.selection.length > 0 ? `${state.selection.length} selected` : `${store.doc.visibleNodeCount} topics`}</span>
+      <span data-help="Topic count" data-help-more="How many topics the current map contains.">{state.selection.length > 0 ? `${state.selection.length} selected` : `${store.doc.visibleNodeCount} topics`}</span>
       <span className="sep">·</span>
-      <span className={state.sync}>{state.sync === "saved" ? "Saved" : "Unsaved changes"}</span>
+      <span className={state.sync} data-help="Save status" data-help-more="Saved: everything up to your last Save is on disk. Unsaved changes: nothing has been written since.">{state.sync === "saved" ? "Saved" : "Unsaved changes"}</span>
       {state.op && (
         <>
           <span className="sep">·</span>

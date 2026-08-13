@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
-import { runExportPng, runExportSvg, runExportPdf, runExportHtml } from "../editor/exportBridge";
+import { runExportHtml } from "../editor/exportBridge";
 import { viewSize } from "../editor/view";
 
 interface PaletteItem {
@@ -37,14 +37,12 @@ export function Palette(): JSX.Element | null {
       { label: "Export with images (.rnode.zip)", hint: "", run: () => void store.exportRnodeZip("complete") },
       { label: "Export with images, compact (.rnode.zip)", hint: "", run: () => void store.exportRnodeZip("compact") },
       { label: "Export as Markdown", hint: "", run: () => store.exportMarkdown() },
-      { label: "Export as PNG", hint: "", run: () => runExportPng() },
       { label: "Export interactive viewer (.html)", hint: "", run: () => runExportHtml() },
-      { label: "Export as SVG (vector)", hint: "", run: () => runExportSvg() },
-      { label: "Export as PDF (experiment)", hint: "", run: () => runExportPdf() },
+      // SVG / PNG / PDF are not real exports yet (see the Export menu) — off the GUI until they are.
       { label: "Collect orphaned images (GC)", hint: "not undoable", run: () => void store.gcOrphans() },
       { label: "Toggle outline panel", hint: "", run: () => store.toggleOutliner() },
       { label: "Toggle inspector", hint: "", run: () => store.toggleInspector() },
-      { label: "Zen / focus mode", hint: "Ctrl+Shift+F", run: () => store.toggleZen() },
+      { label: "Toggle documents panel", hint: "", run: () => store.toggleSidebar() },
       { label: "Fit map to view", hint: "Ctrl+1", run: () => store.fitView(viewSize.w, viewSize.h) },
       { label: "Undo", hint: "Ctrl+Z", run: () => store.undo() },
       { label: "Redo", hint: "Ctrl+Shift+Z", run: () => store.redo() },

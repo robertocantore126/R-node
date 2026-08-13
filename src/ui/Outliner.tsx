@@ -13,9 +13,6 @@ export function Outliner(): JSX.Element {
     <div className="outliner">
       <div className="outliner-header">
         <span>Outline</span>
-        <button className="btn small" onClick={() => store.toast("Import from Markdown lands in Phase 4")}>
-          Import
-        </button>
       </div>
       <div className="outliner-body">
         <OutlinerRow node={root} depth={0} />
