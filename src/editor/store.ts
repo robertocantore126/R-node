@@ -2705,7 +2705,6 @@ export class EditorStore {
       root.position.y + m.h / 2,
       Math.max(fit.scale, 0.4)
     );
-    trace.applied("focusRoot", { fitScale: fit.scale, x: this.state.camera.x, y: this.state.camera.y, scale: this.state.camera.scale, vw: viewSize.w, vh: viewSize.h });
   }
 
   centerOnNode(id: string): void {
