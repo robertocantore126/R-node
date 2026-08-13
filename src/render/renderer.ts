@@ -47,6 +47,12 @@ export interface RenderState {
    */
   marqueeSel?: Set<string> | null;
   showHidden?: boolean; // export: include collapsed subtrees
+  /**
+   * Store revision — the invalidation key for the placement cache. Omit it and
+   * nothing is cached, which is the honest default for a state assembled by
+   * hand (tests, exports): a wrong cache hit is a wrong picture.
+   */
+  rev?: number;
 }
 
 interface Placed {
@@ -136,7 +142,52 @@ export class Renderer {
   // Placement + culling
   // -------------------------------------------------------------------------
 
+  /**
+   * Placements for the current turn.
+   *
+   * placedNodes measures every node in the sheet and allocates an object for
+   * each — 8.7ms and 8,000 objects on a large map — and it reads as if it were
+   * free. One hover fired it three times (hitTestResize, hitTestImageResize,
+   * hitTest) for 35ms per mouse move, against a 9.8ms frame; one click fired it
+   * seven times. Worse, nodeWorldRect and imageWorldRect run it to find ONE
+   * node, so any loop over them multiplies the whole sheet by the loop — which
+   * is precisely the bug that made selecting many topics unusable.
+   *
+   * Caching it turns the second and later calls of a turn into a Map lookup, so
+   * those call sites become honest without a single one of them changing.
+   */
+  private placedCache: {
+    key: string;
+    value: Placed[];
+    resolveImage: (id: string) => { w: number; h: number } | null;
+  } | null = null;
+
+  private placementKey(state: RenderState): string | null {
+    if (state.rev === undefined) return null; // caller opted out
+    // Visibility depends on the camera, so it belongs in the key alongside the
+    // revision: a pan changes which nodes are visible without changing any box.
+    return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}`;
+  }
+
   private placedNodes(state: RenderState): Placed[] {
+    const key = this.placementKey(state);
+    if (key !== null && this.placedCache?.key === key) {
+      // resolveImage is per-sheet state that callers read AFTER placing (every
+      // image rect comes from it), so a cache hit has to restore it — but from
+      // the entry, not by rebuilding: it walks every attachment, and rebuilding
+      // it here would put an O(attachments) pass back on the path this cache
+      // exists to empty.
+      this.resolveImage = this.placedCache.resolveImage;
+      return this.placedCache.value;
+    }
+    const out = this.computePlacement(state);
+    if (key !== null && this.resolveImage) {
+      this.placedCache = { key, value: out, resolveImage: this.resolveImage };
+    }
+    return out;
+  }
+
+  private computePlacement(state: RenderState): Placed[] {
     const { sheet, camera } = state;
     const vw = state.viewW / camera.scale;
     const vh = state.viewH / camera.scale;

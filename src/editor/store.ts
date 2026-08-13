@@ -285,7 +285,26 @@ export class EditorStore {
     };
   }
 
+  /**
+   * Bumped on every notification, i.e. on every change the user could see.
+   *
+   * The renderer needs a signal for "the geometry may have moved" and cannot
+   * derive one: nodes are MUTATED IN PLACE (applyLayout writes positions into
+   * the same objects, applyDraftRuns assigns onto the same node), so neither
+   * the sheet's identity nor a node's identity changes when its box does. Any
+   * cache keyed on those would serve stale positions forever.
+   *
+   * Everything that moves a box ends in notify(), because otherwise nothing
+   * would repaint — which is exactly what makes this a sound invalidation key.
+   */
+  private rev = 0;
+
+  get revision(): number {
+    return this.rev;
+  }
+
   private notify(): void {
+    this.rev++;
     const d = this.model.doc;
     this.state = {
       ...this.state,

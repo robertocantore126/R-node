@@ -121,3 +121,67 @@ describe("text cache (T21-D)", () => {
     expect(ENTRY_BYTES).toBe(16 * 1024 * 1024);
   });
 });
+
+describe("placement cache", () => {
+  /**
+   * placedNodes measures every node in the sheet, so it is cached for the turn.
+   * The whole risk lives in the invalidation: node objects are MUTATED IN
+   * PLACE, so neither the sheet's identity nor a node's identity changes when
+   * a box moves. The key is the store revision, and these tests pin the two
+   * halves of that contract — it reuses within a revision, and it never reuses
+   * across one.
+   */
+  function setup() {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const renderer = new Renderer(makeFakeCanvas(ctx));
+    const root = makeNode("root");
+    root.parentId = null;
+    root.childrenIds = ["a"];
+    const a = makeNode("a");
+    const sheet = {
+      sheetId: "s",
+      title: "t",
+      structure: { structureType: "mindmap", orientation: "horizontal", spacing: 180, branchSpacing: 14, padding: 18, compactMode: false, autoBalance: true, freePositioningBranches: false, allowManualPositioning: true, connectorStyle: "curved" },
+      rootNodeId: "root",
+      nodes: { root, a },
+      relationships: [], boundaries: [], summaries: [], callouts: [], labels: [], zones: [], attachments: [], comments: [], presentation: {},
+    } as never;
+    const state = (rev: number | undefined, camX = 0) => ({
+      sheet, camera: { x: camX, y: 0, scale: 1 }, selection: new Set<string>(), editingId: null,
+      hoverId: null, drop: null, themeName: "light", viewW: 800, viewH: 600, rev,
+    }) as never;
+    const place = (s: never) => (renderer as unknown as { placedNodes: (s: never) => { node: MindNode; x: number }[] }).placedNodes(s);
+    return { place, state, a };
+  }
+
+  it("reuses the placement within one revision", () => {
+    const { place, state } = setup();
+    const first = place(state(1));
+    expect(place(state(1))).toBe(first); // same array, not merely equal
+  });
+
+  it("never reuses it across a revision, however the node changed", () => {
+    const { place, state, a } = setup();
+    place(state(1));
+    // A move the old way: same sheet object, same node object, new coordinates.
+    // Anything keyed on identity would hand back the previous position here.
+    a.position = { x: 999, y: 42, manual: true };
+    const after = place(state(2));
+    expect(after.find((p) => p.node.id === "a")?.x).toBe(999);
+  });
+
+  it("recomputes when the camera moves, since visibility is part of the answer", () => {
+    const { place, state } = setup();
+    const first = place(state(1));
+    expect(place(state(1, 5000))).not.toBe(first);
+  });
+
+  it("caches nothing when the caller omits the revision", () => {
+    // The opt-out for states assembled by hand (tests, exports): no revision
+    // means no way to know when it went stale, so it must not be trusted.
+    const { place, state } = setup();
+    const first = place(state(undefined));
+    expect(place(state(undefined))).not.toBe(first);
+  });
+});

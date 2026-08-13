@@ -185,6 +185,7 @@ export function CanvasView(): JSX.Element {
     const s = store.getSnapshot();
     const rs: RenderState = {
       sheet: store.sheet,
+      rev: store.revision, // shares the placement with the hit tests of this turn
       camera: s.camera,
       selection: new Set(s.selection),
       editingId: s.editingId,
@@ -254,6 +255,7 @@ export function CanvasView(): JSX.Element {
       const s = store.getSnapshot();
       const rs: RenderState = {
         sheet: store.sheet,
+        rev: store.revision,
         camera: s.camera,
         selection: new Set(),
         editingId: null,
@@ -280,6 +282,7 @@ export function CanvasView(): JSX.Element {
       const s = store.getSnapshot();
       const rs: RenderState = {
         sheet: store.sheet,
+        rev: store.revision,
         camera: s.camera,
         selection: new Set(),
         editingId: null,
@@ -845,6 +848,10 @@ export function CanvasView(): JSX.Element {
     const s = store.getSnapshot();
     return {
       sheet: store.sheet,
+      // Enables the renderer's placement cache. Every geometry change ends in
+      // a notify(), which bumps this — so a stale placement cannot outlive the
+      // change that invalidates it.
+      rev: store.revision,
       camera: s.camera,
       selection: new Set(s.selection),
       editingId: s.editingId,
