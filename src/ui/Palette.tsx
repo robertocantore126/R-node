@@ -8,6 +8,8 @@ interface PaletteItem {
   label: string;
   hint?: string;
   run: () => void;
+  /** Keep the palette open after running (commands that await a follow-up pick). */
+  keepOpen?: boolean;
 }
 
 export function Palette(): JSX.Element | null {
@@ -16,6 +18,7 @@ export function Palette(): JSX.Element | null {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const colorInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (state.showPalette) {
@@ -48,6 +51,16 @@ export function Palette(): JSX.Element | null {
       { label: "Create child topic", hint: "Tab", run: () => store.createChild() },
       { label: "Create sibling topic", hint: "Enter", run: () => store.createSibling() },
       { label: "Promote topic", hint: "Shift+Tab", run: () => store.promote() },
+      {
+        label: "Recolour branch (subtree)…",
+        hint: "this topic and all its descendants",
+        keepOpen: true,
+        run: () => {
+          // Open the hidden colour picker; the palette stays open (keepOpen)
+          // until the pick lands, then the onChange below closes it.
+          if (state.selection.length > 0) colorInputRef.current?.click();
+        },
+      },
       { label: "Search documents…", hint: "Ctrl+F", run: () => window.dispatchEvent(new CustomEvent("r-node:focus-search")) },
       ...state.docs.filter((d) => !d.archived).map<PaletteItem>((d) => ({ label: `Open: ${d.title}`, hint: "document", run: () => store.switchToDoc(d.documentId) })),
     ];
@@ -78,7 +91,7 @@ export function Palette(): JSX.Element | null {
             else if (e.key === "ArrowUp") setIndex((i) => Math.max(i - 1, 0));
             else if (e.key === "Enter" && items[clamped]) {
               items[clamped].run();
-              store.togglePalette();
+              if (!items[clamped].keepOpen) store.togglePalette();
             }
           }}
         />
@@ -88,7 +101,7 @@ export function Palette(): JSX.Element | null {
               key={item.label + i}
               className={`palette-item${i === clamped ? " selected" : ""}`}
               onMouseEnter={() => setIndex(i)}
-              onClick={() => { item.run(); store.togglePalette(); }}
+              onClick={() => { item.run(); if (!item.keepOpen) store.togglePalette(); }}
             >
               <span>{item.label}</span>
               {item.hint && <span className="palette-hint">{item.hint}</span>}
@@ -97,6 +110,23 @@ export function Palette(): JSX.Element | null {
           {items.length === 0 && <div className="palette-empty">No matches</div>}
         </div>
         <div className="palette-footer">↑↓ navigate · Enter run · Esc close</div>
+        {/*
+          Hidden colour picker for "Recolour branch…": the command click()s it
+          and keeps the palette open, this onChange applies the choice and
+          closes. Invisible but mounted — display:none inputs refuse .click().
+        */}
+        <input
+          ref={colorInputRef}
+          type="color"
+          tabIndex={-1}
+          aria-hidden="true"
+          style={{ position: "fixed", left: -9999, top: -9999, width: 0, height: 0, opacity: 0 }}
+          onChange={(e) => {
+            const id = state.selection[state.selection.length - 1];
+            if (id) store.setBranchColor(id, e.target.value);
+            store.togglePalette();
+          }}
+        />
       </div>
     </div>
   );

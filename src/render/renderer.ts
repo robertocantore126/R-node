@@ -419,11 +419,7 @@ export class Renderer {
   }
 
   private nodeFill(theme: RenderTheme, p: Placed, state: RenderState): string {
-    const n = p.node;
-    if (n.style.fill) return n.style.fill;
-    if (n.type === "central") return theme.rootFill;
-    const color = this.branchColor(theme, n, state.sheet);
-    return n.type === "subtopic" ? theme.branchSoft[this.branchIndex(n, state.sheet)] : color;
+    return this.resolveFill(theme, p.node, state.sheet);
   }
 
   /**
@@ -436,14 +432,42 @@ export class Renderer {
     const n = state.sheet.nodes[id];
     if (!n) return null;
     const theme = THEMES[state.themeName];
-    const fill =
-      n.style.fill ??
-      (n.type === "central"
-        ? theme.rootFill
-        : n.type === "subtopic"
-          ? theme.branchSoft[this.branchIndex(n, state.sheet)]
-          : this.branchColor(theme, n, state.sheet));
-    return { fill, text: n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text) };
+    return { fill: this.resolveFill(theme, n, state.sheet), text: n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text) };
+  }
+
+  /**
+   * The one place that decides a node's fill. The canvas, the editing overlay
+   * and both exports all resolve through here (nodeFill / nodeColors), so a
+   * topic cannot wear one colour on the map and another the moment it is
+   * double-clicked or exported — that happened while the logic was split
+   * across two methods that had drifted apart.
+   *
+   * Depth, not type, picks the default: the root, the main topics, their
+   * children and everything deeper each have their own level. An explicit
+   * style.fill always wins; it is the user's own choice.
+   */
+  private resolveFill(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
+    if (n.style.fill) return n.style.fill;
+    const depth = this.depthOf(n, sheet);
+    if (depth === 0) return theme.rootFill;
+    if (depth === 1) return theme.branch[this.branchIndex(n, sheet)];
+    if (depth === 2) return theme.branchSoft[this.branchIndex(n, sheet)];
+    return theme.deepFill;
+  }
+
+  /**
+   * How many hops from the root. The cap makes a cycle or a missing parent
+   * terminate: 64 is far deeper than any real map, and an unresolved walk (a
+   * floating node, a broken parentId) reads as depth 3+.
+   */
+  private depthOf(n: MindNode, sheet: Sheet): number {
+    let depth = 0;
+    let cur: string | null = n.id;
+    while (cur && cur !== sheet.rootNodeId && depth < 64) {
+      cur = sheet.nodes[cur]?.parentId ?? null;
+      depth++;
+    }
+    return cur === sheet.rootNodeId ? depth : 3;
   }
 
   /**

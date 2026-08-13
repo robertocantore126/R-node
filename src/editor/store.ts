@@ -1463,13 +1463,17 @@ export class EditorStore {
       if (!child) continue;
       if (!child.style.fill) child.style.fill = this.defaultBranchFill(index);
       const softFill = this.defaultBranchSoftFill(childId);
-      const stack = [childId];
+      const stack: { id: string; depth: number }[] = [{ id: childId, depth: 1 }];
       while (stack.length > 0) {
-        const currentId = stack.pop()!;
+        const { id: currentId, depth } = stack.pop()!;
         const current = sheet.nodes[currentId];
         if (!current) continue;
-        if (currentId !== childId && !current.style.fill) current.style.fill = softFill;
-        stack.push(...current.childrenIds);
+        // Depth 2 is the last level that wears the branch's soft tint. Deeper
+        // nodes get no stamped fill, so the renderer's deepFill decides their
+        // colour — stamping every depth froze the soft shade forever and made
+        // the depth rule in the renderer unreachable.
+        if (depth === 2 && !current.style.fill) current.style.fill = softFill;
+        stack.push(...current.childrenIds.map((cid) => ({ id: cid, depth: depth + 1 })));
       }
     }
   }
@@ -1513,7 +1517,12 @@ export class EditorStore {
     }
     if (type === "subtopic") {
       const branchRootId = this.branchRootId(parentId);
-      return { fill: this.defaultBranchSoftFill(branchRootId) };
+      // Only the first level under a main topic wears the soft tint; deeper
+      // topics keep no fill so the renderer's depth rule picks deepFill.
+      if (parentId && this.model.depth(parentId) === 1) {
+        return { fill: this.defaultBranchSoftFill(branchRootId) };
+      }
+      return undefined;
     }
     return undefined;
   }
@@ -1964,6 +1973,24 @@ export class EditorStore {
     const node = this.model.node(id);
     if (!node) return;
     this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
+  }
+
+  /**
+   * Paint this topic and every descendant with `color`. All ops go out as ONE
+   * batch, so a single Ctrl+Z undoes the whole recolour — a per-node loop
+   * would leave the history with one entry per node and undo one topic at a
+   * time. Each op carries its own prev style so undo restores exactly what
+   * was there.
+   */
+  setBranchColor(id: string, color: string): void {
+    if (!this.model.node(id)) return;
+    const ops: Op[] = [];
+    for (const sid of this.model.subtreeIds(id)) {
+      const n = this.model.node(sid);
+      if (!n) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: sid, style: { ...n.style, fill: color }, prev: n.style }));
+    }
+    this.execOps(ops);
   }
 
   // -------------------------------------------------------------------------
