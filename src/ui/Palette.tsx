@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
-import { runExportPng, runExportSvg } from "../editor/exportBridge";
+import { runExportPng, runExportSvg, runExportPdf } from "../editor/exportBridge";
 import { viewSize } from "../editor/view";
 
 interface PaletteItem {
@@ -36,6 +36,7 @@ export function Palette(): JSX.Element | null {
       { label: "Export as Markdown", hint: "", run: () => store.exportMarkdown() },
       { label: "Export as PNG", hint: "", run: () => runExportPng() },
       { label: "Export as SVG (vector)", hint: "", run: () => runExportSvg() },
+      { label: "Export as PDF (experiment)", hint: "", run: () => runExportPdf() },
       { label: "Collect orphaned images (GC)", hint: "not undoable", run: () => void store.gcOrphans() },
       { label: "Toggle outline panel", hint: "", run: () => store.toggleOutliner() },
       { label: "Toggle inspector", hint: "", run: () => store.toggleInspector() },

@@ -62,6 +62,19 @@ export function runExportSvg(): void {
   void svgHandler?.();
 }
 
+// PDF — an experiment, not a feature yet (src/dev/pdfProbe.ts). It is wired
+// into the menu only so the question "does a PDF of a real map scroll?" can be
+// answered on a real map instead of a synthetic one.
+let pdfHandler: (() => Promise<void>) | null = null;
+
+export function setExportPdfHandler(fn: (() => Promise<void>) | null): void {
+  pdfHandler = fn;
+}
+
+export function runExportPdf(): void {
+  void pdfHandler?.();
+}
+
 /** Per-entry zip overhead (local header + central-directory entry + slack). */
 const ZIP_ENTRY_OVERHEAD = 96;
 /** Zip structure beyond the entries (end-of-central-directory, slack). */

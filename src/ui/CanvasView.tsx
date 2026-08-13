@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { viewSize } from "../editor/view";
-import { setExportPngHandler, setExportSvgHandler } from "../editor/exportBridge";
+import { setExportPngHandler, setExportSvgHandler, setExportPdfHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { THEMES } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
+import { sheetToPdf } from "../dev/pdfProbe";
+import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
@@ -341,6 +343,56 @@ export function CanvasView(): JSX.Element {
       }
     });
 
+    setExportPdfHandler(async () => {
+      const s = store.getSnapshot();
+      const rs: RenderState = {
+        sheet: store.sheet,
+        rev: store.revision,
+        camera: s.camera,
+        selection: new Set(),
+        editingId: null,
+        hoverId: null,
+        drop: null,
+        themeName: s.theme,
+        viewW: sizeRef.current.w,
+        viewH: sizeRef.current.h,
+      };
+      store.beginExport("Building PDF…");
+      try {
+        const out = await sheetToPdf(store.sheet, {
+          measurer: createCanvasTextMeasurer(),
+          colorOf: (id) => renderer.nodeColors(rs, id),
+          linkColorOf: (id) => renderer.branchColorOf(rs, id),
+          // JPEG only: those bytes go into the file untouched (DCTDecode).
+          // A PNG would need its IDAT unpacked and re-encoded, which is more
+          // than an experiment should carry.
+          jpegBytes: async (assetId) => {
+            const store2 = getAssetStore();
+            const meta = await store2.meta(assetId);
+            if (!meta || meta.mime !== "image/jpeg") return null;
+            const blob = await store2.get(assetId, "small");
+            if (!blob) return null;
+            const dims = computeLevelDims(meta.w, meta.h, LEVEL_LONG_SIDE.small);
+            return { bytes: new Uint8Array(await blob.arrayBuffer()), w: dims.w, h: dims.h };
+          },
+        });
+        const url = URL.createObjectURL(out.blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${store.doc.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "map"}.pdf`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        store.toast(
+          `PDF — ${out.nodes} topics, ${out.images} images, ${out.ops.toLocaleString()} ops, ` +
+            `${(out.bytes / 1048576).toFixed(1)}MB, page ${Math.round(out.pageW)}×${Math.round(out.pageH)}`
+        );
+      } catch (e) {
+        store.toast(`PDF export failed — ${String(e)}`);
+      } finally {
+        store.endExport();
+      }
+    });
+
     const unsub = store.subscribe(schedule);
     const uninstallTrace = installTrace();
 
@@ -385,6 +437,7 @@ export function CanvasView(): JSX.Element {
       uninstallTrace();
       setExportPngHandler(null);
       setExportSvgHandler(null);
+      setExportPdfHandler(null);
       clearExternalGhost(); // revoke a pending objectURL on unmount
     };
   }, [store, schedule]);
