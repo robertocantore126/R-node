@@ -396,9 +396,23 @@ function PasteSanitizerPlugin(): null {
           // carry heading size as inline font-size, paragraph gaps and list
           // indent, so the canvas renders the exact pasted structure.
           const paragraphs = runsToParagraphNodes(htmlToRuns(cleaned));
+          const root = $getRoot();
           const sel = $getSelection();
-          if (sel) sel.insertNodes(paragraphs);
-          else $getRoot().append(...paragraphs);
+          // One block goes in at the caret, as pasting a phrase should.
+          //
+          // Several blocks are APPENDED instead, because insertNodes drops
+          // element nodes it cannot merge into the current block: pasting a
+          // paragraph, a heading and a bullet list produced the paragraph and
+          // the heading and silently lost the list. Landing structured content
+          // at the end is a small surprise; losing half of it is not.
+          if (paragraphs.length === 1 && sel) {
+            sel.insertNodes(paragraphs);
+          } else if (root.getTextContent().trim() === "") {
+            root.clear();
+            root.append(...paragraphs);
+          } else {
+            root.append(...paragraphs);
+          }
         });
         return true;
       },
