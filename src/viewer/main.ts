@@ -32,10 +32,29 @@ interface ViewerDoc {
   images: Record<string, string>;
 }
 
+/** Either the document, or `{__gz}` carrying it gzipped and base64'd. */
+type Payload = ViewerDoc | { __gz: string };
+
 declare global {
   interface Window {
-    __RNODE_DOC?: ViewerDoc;
+    __RNODE_DOC?: Payload;
   }
+}
+
+/**
+ * The document, inflating it when the exporter chose to compress.
+ *
+ * Only the document is ever gzipped — the images inside it are JPEG and would
+ * only grow — and the exporter falls back to plain JSON wherever
+ * CompressionStream is unavailable, so this has to handle both shapes.
+ */
+async function readPayload(p: Payload): Promise<ViewerDoc> {
+  if (!("__gz" in p)) return p;
+  const bin = atob(p.__gz);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return JSON.parse(await new Response(stream).text()) as ViewerDoc;
 }
 
 /**
@@ -77,13 +96,13 @@ function boundsOf(sheet: Sheet): { minX: number; minY: number; maxX: number; max
   return { minX, minY, maxX, maxY };
 }
 
-function start(): void {
+async function start(): Promise<void> {
   const loaded = window.__RNODE_DOC;
   const root = document.getElementById("app");
   if (!loaded || !root) return;
   // Bound after the guard: the closures below outlive this scope, and TS will
   // not carry a narrowing on a mutable global into them.
-  const doc: ViewerDoc = loaded;
+  const doc: ViewerDoc = await readPayload(loaded);
   document.title = doc.title;
 
   const canvas = document.createElement("canvas");
@@ -218,4 +237,4 @@ function start(): void {
   home();
 }
 
-start();
+void start();

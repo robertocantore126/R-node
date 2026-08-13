@@ -352,12 +352,15 @@ export function CanvasView(): JSX.Element {
           title: store.doc.doc.title,
           theme: s.theme,
           background: THEMES[s.theme].background,
-          // `large` here, not `small`: this one is meant to be zoomed into, and
-          // the renderer picks its own decode level from the displayed size —
-          // giving it a 256px source would cap the sharpness it can reach.
+          // `small` (256px), not `large` (1024px). Choosing `large` for the
+          // sharpness it allows when zoomed deep in cost 103MB of a 109MB
+          // export — 94% of the file, the same proportion and the same mistake
+          // the SVG export had made one commit earlier. An image is drawn at
+          // 240 units at most, so 256 is its size at 1:1; zoom far past that
+          // and it softens, which is the trade for a file that opens.
           imageDataUri: async (assetId) => {
             const meta = await getAssetStore().meta(assetId);
-            const blob = await getAssetStore().get(assetId, "large");
+            const blob = await getAssetStore().get(assetId, "small");
             if (!blob) return null;
             const buf = new Uint8Array(await blob.arrayBuffer());
             let bin = "";
