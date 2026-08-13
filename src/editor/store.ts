@@ -23,6 +23,7 @@ import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriSt
 import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode, type ZipPhase } from "./exportBridge";
 import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
+import { viewSize } from "./view";
 
 declare global {
   interface Window {
@@ -439,6 +440,7 @@ export class EditorStore {
     // Loading a document must respect positions explicitly placed by the
     // user. Forced layout is reserved for the explicit "Auto layout" command.
     this.scheduleLayout(false);
+    this.focusRoot();
     this.notify();
   }
 
@@ -2685,6 +2687,27 @@ export class EditorStore {
     this.notify();
   }
 
+  /**
+   * Start the view on the root node: the camera is centered on the root's
+   * center and zoomed so the whole map fits, but never so far out that the
+   * root becomes a dot (floor matches fitView's 0.4). Called when the app
+   * boots, when a document is opened/imported, and when a new one is created
+   * — the root is where the user expects to begin, not wherever the previous
+   * document left the camera.
+   */
+  private focusRoot(): void {
+    const root = this.model.rootNode;
+    const m = measureNode(root, this.measurer);
+    const fit = fitBounds(this.state.camera, viewSize.w, viewSize.h, this.mapBounds());
+    this.state.camera = centerOn(
+      this.state.camera,
+      root.position.x + m.w / 2,
+      root.position.y + m.h / 2,
+      Math.max(fit.scale, 0.4)
+    );
+    trace.applied("focusRoot", { fitScale: fit.scale, x: this.state.camera.x, y: this.state.camera.y, scale: this.state.camera.scale, vw: viewSize.w, vh: viewSize.h });
+  }
+
   centerOnNode(id: string): void {
     const node = this.model.node(id);
     if (!node) return;
@@ -2971,6 +2994,7 @@ export class EditorStore {
     this.state.search = "";
     this.state.searchResults = [];
     this.state.sync = "saved"; // the loaded doc is its persisted version
+    this.focusRoot();
     this.notify();
     this.scheduleLayout(false);
   }

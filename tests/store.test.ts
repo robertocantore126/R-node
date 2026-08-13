@@ -1,7 +1,9 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
 import { EditorStore, docFileBaseName, portableFileKey } from "../src/editor/store";
+import { DocumentModel } from "../src/core/doc";
 import { makeOp, type Op } from "../src/core/ops";
+import { createCanvasTextMeasurer, measureNode } from "../src/layout/measure";
 import { getAssetStore, IndexedDbAssetStore } from "../src/persist/assets";
 import type { StorageAdapter } from "../src/persist/storage";
 
@@ -1074,5 +1076,79 @@ describe("orphan GC (T21-A)", () => {
     expect(store.sheet.attachments).toHaveLength(1);
     expect(await assetStore.list()).toEqual([id]);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("focusRoot — the view starts on the root node", () => {
+  const measurer = createCanvasTextMeasurer();
+  const rootCenter = (store: EditorStore): { x: number; y: number } => {
+    const root = store.doc.rootNode;
+    const m = measureNode(root, measurer);
+    return { x: root.position.x + m.w / 2, y: root.position.y + m.h / 2 };
+  };
+
+  it("centers the camera on the root when a new document is created", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.newDocument();
+    const cam = store.getSnapshot().camera;
+    const c = rootCenter(store);
+    expect(cam.x).toBeCloseTo(c.x, 5);
+    expect(cam.y).toBeCloseTo(c.y, 5);
+    // Fitted but never too far out, never zoomed past the fit cap.
+    expect(cam.scale).toBeGreaterThanOrEqual(0.4);
+    expect(cam.scale).toBeLessThanOrEqual(1.25);
+  });
+
+  it("centers on the root when the app boots with a saved document", async () => {
+    const base = new EditorStore(memoryAdapter);
+    const doc = structuredClone(base.doc.doc);
+    const rootId = doc.sheets[0].rootNodeId;
+    doc.sheets[0].nodes[rootId].position = { x: 300, y: 200, manual: true };
+    const stored: StorageAdapter = {
+      label: "test",
+      async load() {
+        return [doc];
+      },
+      async save() {
+        /* no-op */
+      },
+    };
+    const store = new EditorStore(stored);
+    await store.init();
+    const cam = store.getSnapshot().camera;
+    const c = rootCenter(store);
+    expect(cam.x).toBeCloseTo(c.x, 5);
+    expect(cam.y).toBeCloseTo(c.y, 5);
+    expect(cam.x).toBeCloseTo(300 + measureNode(store.doc.rootNode, measurer).w / 2, 5);
+  });
+
+  it("centers on the root of an imported/opened document wherever it sits", () => {
+    const store = new EditorStore(memoryAdapter);
+    const doc = DocumentModel.blank("Far map");
+    doc.sheets[0].nodes[doc.sheets[0].rootNodeId].position = { x: -500, y: 700, manual: true };
+    store.importDocumentFromJson(JSON.stringify(doc));
+    const cam = store.getSnapshot().camera;
+    const c = rootCenter(store);
+    expect(cam.x).toBeCloseTo(c.x, 5);
+    expect(cam.y).toBeCloseTo(c.y, 5);
+    expect(cam.x).toBeCloseTo(-500 + measureNode(store.doc.rootNode, measurer).w / 2, 5);
+  });
+
+  it("re-centers on the new root when switching between open documents", () => {
+    const store = new EditorStore(memoryAdapter);
+    const a = DocumentModel.blank("A");
+    const b = DocumentModel.blank("B");
+    b.sheets[0].nodes[b.sheets[0].rootNodeId].position = { x: 800, y: 600, manual: true };
+    store.importDocumentFromJson(JSON.stringify(a));
+    store.importDocumentFromJson(JSON.stringify(b));
+    // Active doc is B — camera on B's root.
+    let cam = store.getSnapshot().camera;
+    expect(cam.x).toBeCloseTo(800 + measureNode(store.doc.rootNode, measurer).w / 2, 5);
+    expect(cam.y).toBeCloseTo(600 + measureNode(store.doc.rootNode, measurer).h / 2, 5);
+    // Switch back to A — camera follows the root.
+    store.switchToDoc(a.documentId);
+    cam = store.getSnapshot().camera;
+    expect(cam.x).toBeCloseTo(measureNode(store.doc.rootNode, measurer).w / 2, 5);
+    expect(cam.y).toBeCloseTo(measureNode(store.doc.rootNode, measurer).h / 2, 5);
   });
 });
