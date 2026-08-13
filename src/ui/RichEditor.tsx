@@ -233,11 +233,20 @@ function KeysPlugin({ store }: { store: EditorStore }): null {
         void store.saveNow();
         return;
       }
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        // Commit. Enter alone now breaks the line, so the keyboard needs a way
+        // out that is not "click somewhere else".
         e.preventDefault();
         e.stopPropagation();
         store.commitEdit();
         return;
+      }
+      // Enter inserts a line break, like any text field. It used to commit,
+      // which made a multi-line topic reachable only through Shift+Enter —
+      // the opposite of what the key does everywhere else.
+      if (e.key === "Enter") {
+        e.stopPropagation();
+        return; // Lexical inserts the break
       }
       if (e.key === "Escape") {
         e.preventDefault();
@@ -311,6 +320,23 @@ function DraftSyncPlugin({ store, node }: { store: EditorStore; node: MindNode }
 
 function PasteSanitizerPlugin(): null {
   const [editor] = useLexicalComposerContext();
+  /**
+   * Set by Ctrl+Shift+V, read by the paste handler on the event it triggers.
+   *
+   * The keystroke cannot do the work itself: the clipboard is only readable
+   * from inside a paste event. So the shortcut records the INTENT and the
+   * paste that follows honours it by taking text/plain and ignoring the HTML
+   * it was given.
+   */
+  const plainNext = useRef(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "v") plainNext.current = true;
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
 
   useEffect(() => {
     return editor.registerCommand(
@@ -320,6 +346,26 @@ function PasteSanitizerPlugin(): null {
         // clipboard defensively.
         const payload = (event ?? {}) as unknown as { clipboardData?: DataTransfer | null };
         if (!payload.clipboardData) return false;
+        const wantsPlain = plainNext.current;
+        plainNext.current = false;
+        if (wantsPlain) {
+          // Ctrl+Shift+V: the text, and nothing it was wearing. Bold, colours,
+          // headings and list structure are all dropped — paragraph breaks are
+          // kept, because those are the text, not its formatting.
+          const text = payload.clipboardData.getData("text/plain");
+          if (!text) return false;
+          event.preventDefault();
+          editor.update(() => {
+            const lines = text.split(/\r?\n/);
+            const paragraphs = runsToParagraphNodes(
+              lines.map((line, i) => ({ text: (i > 0 ? "\n" : "") + line, paraGap: i > 0 }))
+            );
+            const sel = $getSelection();
+            if (sel) sel.insertNodes(paragraphs);
+            else $getRoot().append(...paragraphs);
+          });
+          return true;
+        }
         const html = payload.clipboardData.getData("text/html");
         if (!html) return false; // plain-text paste → Lexical default
         event.preventDefault();
