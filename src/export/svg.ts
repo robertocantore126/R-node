@@ -274,13 +274,19 @@ export interface SvgExportResult {
   imagesMissing: number;
   width: number;
   height: number;
+  /** Total size, and how much of it is embedded image data. Reported because
+   *  on a picture-heavy map the images ARE the file: an export measured at
+   *  110MB turned out to be 103MB of base64. */
+  bytes: number;
+  imageBytes: number;
 }
 
 export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<SvgExportResult> {
   const pad = opts.pad ?? 40;
   const placed = placeAll(sheet, opts.measurer);
   if (placed.length === 0) {
-    return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>`, nodes: 0, images: 0, imagesMissing: 0, width: 1, height: 1 };
+    const empty = `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>`;
+    return { svg: empty, nodes: 0, images: 0, imagesMissing: 0, width: 1, height: 1, bytes: empty.length, imageBytes: 0 };
   }
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -297,10 +303,15 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   // Every distinct asset is fetched once, however many nodes point at it.
   const resolveImage = imageResolver(sheet);
   const uris = new Map<string, string | null>();
+  let imageBytes = 0;
   if (opts.imageDataUri) {
     const ids = new Set<string>();
     for (const p of placed) if (p.node.style.image) ids.add(p.node.style.image);
-    for (const id of ids) uris.set(id, await opts.imageDataUri(id));
+    for (const id of ids) {
+      const uri = await opts.imageDataUri(id);
+      uris.set(id, uri);
+      if (uri) imageBytes += uri.length;
+    }
   }
 
   const byId = new Map(placed.map((p) => [p.node.id, p]));
@@ -359,5 +370,6 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   }
   parts.push("</svg>");
 
-  return { svg: parts.join(""), nodes: placed.length, images, imagesMissing, width, height };
+  const svg = parts.join("");
+  return { svg, nodes: placed.length, images, imagesMissing, width, height, bytes: svg.length, imageBytes };
 }

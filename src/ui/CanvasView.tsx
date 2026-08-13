@@ -299,12 +299,17 @@ export function CanvasView(): JSX.Element {
           colorOf: (id) => renderer.nodeColors(rs, id),
           linkColorOf: (id) => renderer.branchColorOf(rs, id),
           background: THEMES[s.theme].background,
-          // The `large` level, not the original: a map of full-resolution
-          // photos inlined as base64 would be a file nobody can open. 1024px
-          // is what the renderer itself never exceeds on screen.
+          // The `small` level (256px), not `large` (1024px).
+          //
+          // An image is drawn at MAX_IMAGE_W = 240 units at most, so 256px is
+          // the size it is actually shown at and 1024 was a sixteen-fold
+          // oversample in pixels. Measured on a real export: 300 pictures at
+          // `large` produced a 110MB file of which 103MB — 94% — was base64.
+          // Zoom far in and an image goes soft; that is the honest trade for a
+          // file that opens.
           imageDataUri: async (assetId) => {
             const meta = await getAssetStore().meta(assetId);
-            const blob = await getAssetStore().get(assetId, "large");
+            const blob = await getAssetStore().get(assetId, "small");
             if (!blob) return null;
             const buf = new Uint8Array(await blob.arrayBuffer());
             let bin = "";
@@ -321,10 +326,13 @@ export function CanvasView(): JSX.Element {
         a.download = `${store.doc.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "map"}.svg`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+        // The size is in the toast because on a picture-heavy map the images
+        // ARE the file, and that is invisible until someone tries to open it.
+        const mb = (n: number): string => (n / 1048576).toFixed(1);
+        const imgPart = out.images > 0 ? `, ${out.images} images (${mb(out.imageBytes)}MB of ${mb(out.bytes)}MB)` : "";
         store.toast(
-          out.imagesMissing > 0
-            ? `Exported SVG — ${out.nodes} topics, ${out.images} images (${out.imagesMissing} unreadable)`
-            : `Exported SVG — ${out.nodes} topics, ${out.images} images`
+          `Exported SVG — ${out.nodes} topics${imgPart}` +
+            (out.imagesMissing > 0 ? ` — ${out.imagesMissing} unreadable` : "")
         );
       } catch (e) {
         store.toast(`SVG export failed — ${String(e)}`);
