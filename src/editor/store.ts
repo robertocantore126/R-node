@@ -125,6 +125,7 @@ export interface EditorState {
   showPalette: boolean;
   showOutliner: boolean;
   showInspector: boolean;
+  showSidebar: boolean;
   search: string;
   searchResults: string[];
   searchIndex: number;
@@ -138,7 +139,6 @@ export interface EditorState {
   theme: "light";
   structureType: string;
   mode: "select" | "pan";
-  zen: boolean;
   relFrom: string | null;
   /** Selected overlay object: a relationship, group or summary (not a node). */
   relSel: string | null;
@@ -264,6 +264,7 @@ export class EditorStore {
       showPalette: false,
       showOutliner: false,
       showInspector: true,
+      showSidebar: true,
       search: "",
       searchResults: [],
       searchIndex: 0,
@@ -276,7 +277,6 @@ export class EditorStore {
       theme: "light",
       structureType: d.sheets[0].structure.structureType,
       mode: "select",
-      zen: false,
       relFrom: null,
       relSel: null,
       groupSel: null,
@@ -2857,8 +2857,8 @@ export class EditorStore {
     this.notify();
   }
 
-  toggleZen(): void {
-    this.state.zen = !this.state.zen;
+  toggleSidebar(): void {
+    this.state.showSidebar = !this.state.showSidebar;
     this.notify();
   }
 

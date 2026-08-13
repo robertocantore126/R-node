@@ -75,6 +75,13 @@ textarea:focus {
   height: 100vh;
 }
 
+/* Sidebar hidden: the grid must collapse to a single column, otherwise the
+   sole remaining child (.main) auto-places into the first 264px slot and the
+   whole UI gets crushed into the sidebar's width (canvas goes zero-width). */
+.app-no-sidebar {
+  grid-template-columns: 1fr;
+}
+
 .main {
   display: flex;
   flex-direction: column;
@@ -118,11 +125,11 @@ textarea:focus {
   letter-spacing: -0.01em;
 }
 
-.brand-dot {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: conic-gradient(from 0deg, var(--accent), #db2777, #16a34a, var(--accent));
+.brand-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: contain;
 }
 
 .sidebar-search {
@@ -131,16 +138,6 @@ textarea:focus {
 
 .sidebar-search input {
   width: 100%;
-}
-
-.sidebar-actions {
-  display: flex;
-  gap: 8px;
-  padding: 0 12px 12px;
-}
-
-.sidebar-actions .btn {
-  flex: 1;
 }
 
 .sidebar-list {
@@ -216,14 +213,6 @@ textarea:focus {
   font-size: 13px;
 }
 
-.sidebar-footer {
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-
 /* ---------- Buttons ---------- */
 
 .btn {
@@ -277,6 +266,35 @@ textarea:focus {
 
 /* ---------- Top bar ---------- */
 
+/* Xmind-style top bar: the buttons are borderless (icon-flat) so the chrome
+   recedes and the canvas dominates. The fill only comes back on hover, on the
+   active state of toggles, and on Save (the one primary action). */
+.topbar .btn {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+}
+
+.topbar .btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.topbar .btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.topbar .btn.primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
+
+.topbar .btn.icon.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -287,11 +305,13 @@ textarea:focus {
 }
 
 .doc-title-input {
+  flex: 1 1 auto;
+  min-width: 80px;
+  max-width: 420px;
   font-weight: 600;
   font-size: 15px;
   border: 1px solid transparent;
   background: transparent;
-  width: 220px;
 }
 
 .doc-title-input:hover,
@@ -304,6 +324,11 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* Outline toggle pushed to the far right, mirroring the sidebar hamburger. */
+.topbar-outline {
+  margin-left: auto;
 }
 
 .save-status {
@@ -359,11 +384,6 @@ textarea:focus {
   background: var(--surface-2);
 }
 
-.menu-sep {
-  height: 1px;
-  background: var(--border);
-  margin: 5px 4px;
-}
 
 /* ---------- Status bar ---------- */
 
@@ -972,4 +992,31 @@ textarea:focus {
 @keyframes toast-in {
   from { opacity: 0; transform: translate(-50%, 8px); }
   to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---- Inspection ("what is this?") overlay — Shift held ---- */
+.help-overlay {
+  position: fixed;
+  z-index: 300;
+  max-width: 300px;
+  background: var(--surface, #1e1f24);
+  border: 1px solid var(--border, #33343a);
+  border-radius: 8px;
+  padding: 8px 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text, #e8e8ea);
+}
+.help-overlay-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  margin-bottom: 2px;
+}
+.help-overlay-body {
+  color: var(--muted, #9a9ba3);
+}
+.help-overlay-cursor {
+  max-width: 260px;
 }

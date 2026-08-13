@@ -10,6 +10,7 @@ import { sheetToPdf } from "../dev/pdfProbe";
 import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
+import { isShiftHeld, showCanvasHelp } from "./help";
 import { imageResolver, measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
@@ -122,7 +123,7 @@ export function CanvasView(): JSX.Element {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
-  const sizeRef = useRef({ w: viewSize.w, h: viewSize.h });
+  const sizeRef = useRef({ w: viewSize.w, h: viewSize.h, left: 0, top: 0 });
   const dragRef = useRef<DragState>({
     dragging: null,
     moved: false,
@@ -225,19 +226,21 @@ export function CanvasView(): JSX.Element {
       const old = sizeRef.current;
       const nw = rect.width;
       const nh = rect.height;
-      // Keep the map visually anchored when the canvas area resizes
-      // (Inspector/panel toggle, window resize). Without this the map jumps
-      // sideways by half the size delta: the camera stays centered on the
-      // canvas center, so when the panel opens and the canvas narrows the
-      // whole map shifts — the "GUI moves the canvas view" bug. The first
-      // observation is skipped (sizeRef still holds the 1200x800 default).
+      // Keep the map visually anchored to the WINDOW when the canvas area
+      // resizes (Inspector/panel toggle, sidebar toggle, window resize). The
+      // canvas can grow or shrink on EITHER side — right panel on the right,
+      // sidebar on the left — so the displacement of the canvas CENTER is
+      // what must be compensated, not the width delta alone. The old width-
+      // only compensation panned the wrong way when the sidebar toggled
+      // (the map jumped by the full sidebar width). The first observation is
+      // skipped (sizeRef still holds the 1200x800 default).
       if (!firstResize && old.w > 0 && old.h > 0 && nw > 0 && nh > 0) {
-        const dW = nw - old.w;
-        const dH = nh - old.h;
-        if (dW !== 0 || dH !== 0) store.panBy(-dW / 2, -dH / 2);
+        const dCx = rect.left - old.left + (nw - old.w) / 2;
+        const dCy = rect.top - old.top + (nh - old.h) / 2;
+        if (dCx !== 0 || dCy !== 0) store.panBy(-dCx, -dCy);
       }
       firstResize = false;
-      sizeRef.current = { w: nw, h: nh };
+      sizeRef.current = { w: nw, h: nh, left: rect.left, top: rect.top };
       viewSize.w = nw;
       viewSize.h = nh;
       renderer.resize(canvas, nw, nh);
@@ -502,6 +505,69 @@ export function CanvasView(): JSX.Element {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
+  // Shift-inspection on the canvas: hit-test what is under the cursor and
+  // show the "what is this?" tooltip (phase 1 — overlay only, no actions).
+  const showCanvasInspection = (e: RPointerEvent, x: number, y: number): void => {
+    const s = store.getSnapshot();
+    const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+    const rs = currentRenderState();
+    const renderer = rendererRef.current!;
+    const hit = renderer.hitTest(rs, world.x, world.y);
+    const n = hit ? store.doc.node(hit) : undefined;
+    if (n) {
+      const kids = n.childrenIds.length;
+      const att = n.style.image ? store.sheet.attachments.find((a) => a.id === n.style.image) : undefined;
+      const parts = [`type ${n.type}`, `${kids} child${kids === 1 ? "" : "ren"}`];
+      if (att) parts.push(`image ${att.w}×${att.h}`);
+      if (n.collapsed) parts.push("collapsed");
+      showCanvasHelp({
+        title: n.title || "(empty topic)",
+        body: parts.join(" · "),
+        x: e.clientX,
+        y: e.clientY,
+        anchor: "cursor",
+      });
+      return;
+    }
+    const relId = renderer.hitTestRelationship(rs, world.x, world.y);
+    if (relId) {
+      const rel = store.sheet.relationships.find((r) => r.id === relId);
+      showCanvasHelp({
+        title: "Relationship",
+        body: rel?.label ? `label: ${rel.label}` : `${rel?.fromId.slice(0, 6)}… → ${rel?.toId.slice(0, 6)}…`,
+        x: e.clientX,
+        y: e.clientY,
+        anchor: "cursor",
+      });
+      return;
+    }
+    const grpId = renderer.hitTestGroup(rs, world.x, world.y);
+    if (grpId) {
+      const g = store.sheet.boundaries.find((gr) => gr.id === grpId);
+      showCanvasHelp({
+        title: "Group",
+        body: g?.label ?? `${g?.memberIds.length ?? 0} members`,
+        x: e.clientX,
+        y: e.clientY,
+        anchor: "cursor",
+      });
+      return;
+    }
+    const sumId = renderer.hitTestSummary(rs, world.x, world.y);
+    if (sumId) {
+      const sm = store.sheet.summaries.find((sr) => sr.id === sumId);
+      showCanvasHelp({
+        title: "Summary",
+        body: sm?.label ?? `${sm?.memberIds.length ?? 0} topics`, 
+        x: e.clientX,
+        y: e.clientY,
+        anchor: "cursor",
+      });
+      return;
+    }
+    showCanvasHelp(null);
+  };
+
   const onPointerDown = (e: RPointerEvent): void => {
     interactedRef.current = true;
     // Best-effort: capture keeps move/up events coming if the pointer leaves
@@ -653,6 +719,13 @@ export function CanvasView(): JSX.Element {
     const dy = y - drag.lastY;
     drag.lastX = x;
     drag.lastY = y;
+
+    // Shift-inspection: while Shift is held, hovering the canvas shows what
+    // is under the cursor. Skipped during active gestures (drag/resize/pan/
+    // marquee) so the tooltip never fights a real interaction.
+    if (isShiftHeld() && !drag.dragging && !drag.resizing && !drag.imgResizing && !drag.marqueeActive) {
+      showCanvasInspection(e, x, y);
+    }
 
     if (drag.imgResizing) {
       const s = store.getSnapshot();

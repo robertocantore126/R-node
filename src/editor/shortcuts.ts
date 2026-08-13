@@ -41,7 +41,6 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
   "Mod+-": "zoom-out",
   "Mod+0": "zoom-reset",
   "Mod+p": "present",
-  "Mod+Shift+f": "zen",
   "Mod+1": "fit-view",
 };
 
@@ -196,9 +195,6 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       return true;
     case "present":
       store.toast("Presentation mode lands in Phase 4");
-      return true;
-    case "zen":
-      store.toggleZen();
       return true;
     case "fit-view":
       store.fitView(vw, vh);

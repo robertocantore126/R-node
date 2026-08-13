@@ -222,38 +222,40 @@ function SheetControls(): JSX.Element {
 
   return (
     <div className="inspector-section">
-      <div className="inspector-label">Sheet</div>
+      <div className="inspector-label" data-help="Sheet" data-help-more="The current map's settings: its name and the layout algorithm used to arrange topics.">Sheet</div>
       <input
         className="inspector-title"
+        data-help="Sheet title"
+        data-help-more="The name of this map (a document can hold several maps)."
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         onBlur={() => { if (title !== sheet.title) store.setSheetTitle(title); }}
       />
       <div className="field">
-        <span>Structure</span>
+        <span data-help="Structure" data-help-more="The layout algorithm: mindmap (radial), logic, tree, org, timeline, fishbone, matrix, treetable or freeform (manual).">Structure</span>
         <select value={sheet.structure.structureType} onChange={(e) => store.setStructure({ structureType: e.target.value as typeof STRUCTURES[number] })}>
           {STRUCTURES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
       <div className="field">
-        <span>Orientation</span>
+        <span data-help="Orientation" data-help-more="Whether the map grows horizontally or vertically. Not available for mindmap/freeform.">Orientation</span>
         <select value={sheet.structure.orientation} onChange={(e) => store.setStructure({ orientation: e.target.value as "horizontal" | "vertical" })} disabled={sheet.structure.structureType === "mindmap" || sheet.structure.structureType === "freeform"}>
           <option value="horizontal">Horizontal</option>
           <option value="vertical">Vertical</option>
         </select>
       </div>
       <div className="field">
-        <span>Level spacing</span>
+        <span data-help="Level spacing" data-help-more="Horizontal distance between a topic and its children (80–400).">Level spacing</span>
         <input type="range" min={80} max={400} step={10} value={sheet.structure.spacing} onChange={(e) => store.setStructure({ spacing: Number(e.target.value) })} />
         <span className="muted">{sheet.structure.spacing}</span>
       </div>
       <div className="field">
-        <span>Branch spacing</span>
+        <span data-help="Branch spacing" data-help-more="Vertical distance between sibling branches (4–80).">Branch spacing</span>
         <input type="range" min={4} max={80} step={2} value={sheet.structure.branchSpacing} onChange={(e) => store.setStructure({ branchSpacing: Number(e.target.value) })} />
         <span className="muted">{sheet.structure.branchSpacing}</span>
       </div>
-      <button className="btn small" onClick={() => store.autoLayoutAll()}>⟳ Auto layout</button>
-      <div className="muted count">Visible topics: {store.doc.visibleNodeCount}</div>
+      <button className="btn small" data-help="Auto layout" data-help-more="Re-runs the layout algorithm on the whole map, discarding manual positions." onClick={() => store.autoLayoutAll()}>⟳ Auto layout</button>
+      <div className="muted count" data-help="Visible topics" data-help-more="How many topics the map contains (hidden/collapsed subtrees excluded).">Visible topics: {store.doc.visibleNodeCount}</div>
     </div>
   );
 }
