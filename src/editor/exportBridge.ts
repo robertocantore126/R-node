@@ -50,6 +50,18 @@ export function runExportPng(): void {
   pngHandler?.();
 }
 
+// SVG export. Same seam as the PNG one: the exporter needs the RENDERER for
+// branch colours and the canvas measurer, both of which live in the view.
+let svgHandler: (() => Promise<void>) | null = null;
+
+export function setExportSvgHandler(fn: (() => Promise<void>) | null): void {
+  svgHandler = fn;
+}
+
+export function runExportSvg(): void {
+  void svgHandler?.();
+}
+
 /** Per-entry zip overhead (local header + central-directory entry + slack). */
 const ZIP_ENTRY_OVERHEAD = 96;
 /** Zip structure beyond the entries (end-of-central-directory, slack). */

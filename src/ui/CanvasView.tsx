@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { viewSize } from "../editor/view";
-import { setExportPngHandler } from "../editor/exportBridge";
+import { setExportPngHandler, setExportSvgHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
+import { THEMES } from "../render/theme";
+import { sheetToSvg } from "../export/svg";
+import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
@@ -273,6 +276,60 @@ export function CanvasView(): JSX.Element {
       store.toast("Exported as PNG");
     });
 
+    setExportSvgHandler(async () => {
+      const s = store.getSnapshot();
+      const rs: RenderState = {
+        sheet: store.sheet,
+        camera: s.camera,
+        selection: new Set(),
+        editingId: null,
+        hoverId: null,
+        drop: null,
+        themeName: s.theme,
+        viewW: sizeRef.current.w,
+        viewH: sizeRef.current.h,
+      };
+      store.beginExport("Building SVG…");
+      try {
+        const out = await sheetToSvg(store.sheet, {
+          measurer: createCanvasTextMeasurer(),
+          colorOf: (id) => renderer.nodeColors(rs, id),
+          linkColorOf: (id) => renderer.branchColorOf(rs, id),
+          background: THEMES[s.theme].background,
+          // The `large` level, not the original: a map of full-resolution
+          // photos inlined as base64 would be a file nobody can open. 1024px
+          // is what the renderer itself never exceeds on screen.
+          imageDataUri: async (assetId) => {
+            const meta = await getAssetStore().meta(assetId);
+            const blob = await getAssetStore().get(assetId, "large");
+            if (!blob) return null;
+            const buf = new Uint8Array(await blob.arrayBuffer());
+            let bin = "";
+            for (let i = 0; i < buf.length; i += 0x8000) {
+              bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+            }
+            return `data:${meta?.mime ?? "image/png"};base64,${btoa(bin)}`;
+          },
+        });
+        const blob = new Blob([out.svg], { type: "image/svg+xml" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${store.doc.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "map"}.svg`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        store.toast(
+          out.imagesMissing > 0
+            ? `Exported SVG — ${out.nodes} topics, ${out.images} images (${out.imagesMissing} unreadable)`
+            : `Exported SVG — ${out.nodes} topics, ${out.images} images`
+        );
+      } catch (e) {
+        store.toast(`SVG export failed — ${String(e)}`);
+      } finally {
+        store.endExport();
+      }
+    });
+
     const unsub = store.subscribe(schedule);
     const uninstallTrace = installTrace();
 
@@ -316,6 +373,7 @@ export function CanvasView(): JSX.Element {
       wheelTarget.removeEventListener("wheel", onWheel as EventListener);
       uninstallTrace();
       setExportPngHandler(null);
+      setExportSvgHandler(null);
       clearExternalGhost(); // revoke a pending objectURL on unmount
     };
   }, [store, schedule]);

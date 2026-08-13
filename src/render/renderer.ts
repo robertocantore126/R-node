@@ -395,6 +395,17 @@ export class Renderer {
     return { fill, text: n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text) };
   }
 
+  /**
+   * The colour a node's incoming connector is drawn with. Public for the SVG
+   * export, which must not re-derive branch palettes: they live here, and a
+   * second copy would disagree the first time a theme changes.
+   */
+  branchColorOf(state: RenderState, id: string): string {
+    const n = state.sheet.nodes[id];
+    const theme = THEMES[state.themeName];
+    return n ? this.branchColor(theme, n, state.sheet) : theme.connector;
+  }
+
   private branchColor(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     const branchRootId = this.branchRoot(n, sheet);
     const branchRoot = sheet.nodes[branchRootId];

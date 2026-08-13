@@ -324,6 +324,22 @@ export class EditorStore {
     return this.opAbort.signal;
   }
 
+  /**
+   * Show the busy bar for work driven from the VIEW (the SVG export lives
+   * there, because it needs the renderer's palettes and measurer).
+   * Indeterminate: the export is one synchronous pass plus the image reads, so
+   * there is no honest fraction to show — a bar that invented one would be
+   * worse than a bar that admits it does not know.
+   */
+  beginExport(label: string): void {
+    this.beginLongOp(label, false);
+    this.setOpProgress(label, null);
+  }
+
+  endExport(): void {
+    this.endLongOp();
+  }
+
   private setOpProgress(label: string, progress: number | null): void {
     if (!this.state.op) return;
     this.state.op = { ...this.state.op, label, progress };

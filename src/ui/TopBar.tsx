@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
-import { runExportPng } from "../editor/exportBridge";
+import { runExportPng, runExportSvg } from "../editor/exportBridge";
 import { referencedAssetIds } from "../persist/assets";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
@@ -120,9 +120,10 @@ export function TopBar(): JSX.Element {
                 </>
               )}
               <button onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
+              <button onClick={() => { runExportSvg(); setExportOpen(false); }}>SVG (vector, whole map)</button>
               <button onClick={() => { runExportPng(); setExportOpen(false); }}>PNG image</button>
               <div className="menu-sep" />
-              <button onClick={() => { store.toast("SVG / PDF / DOCX export land in Phase 4"); setExportOpen(false); }}>SVG · PDF · DOCX (soon)</button>
+              <button onClick={() => { store.toast("PDF / DOCX export land in Phase 4"); setExportOpen(false); }}>PDF · DOCX (soon)</button>
             </div>
           )}
         </div>

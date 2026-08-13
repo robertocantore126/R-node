@@ -1,0 +1,363 @@
+/**
+ * SVG export — the whole map as one vector document.
+ *
+ * Why vector, and why the whole thing. A 3,000-node map measures roughly
+ * 4,400 × 250,000 world units: an aspect ratio of 1 to 57. Squeezing that into
+ * a raster of any sane size puts 14px text at half a pixel, and a mind map is
+ * not a picture anyway — it is a tree, read by navigating. SVG makes the
+ * resolution question disappear: the file carries coordinates, the viewer
+ * decides the zoom, and the text stays text (searchable, selectable, and a few
+ * bytes instead of a few thousand pixels).
+ *
+ * This is a THIRD implementation of text layout after the canvas and the
+ * editing overlay, which is exactly the risk the parity work was about. It is
+ * mitigated by construction: the line boxes, baselines, bullets and paragraph
+ * gaps all come from `wrapRunLines`, the same function the other two use. This
+ * file only turns them into `<text>` elements — it decides nothing about where
+ * a line breaks or how tall it is.
+ *
+ * Pure and framework-free, like the layout modules: sheet in, string out.
+ * Everything environment-specific arrives through the options — measurement,
+ * colours, image bytes — so it runs in Node under a heuristic measurer and in
+ * the browser under the canvas one.
+ */
+import type { MindNode, Sheet, TextRun } from "../core/types";
+import { nodeRuns } from "../core/text";
+import {
+  FONT_STACK,
+  IMAGE_GAP,
+  LINE_HEIGHT_FACTOR,
+  MAX_IMAGE_W,
+  TEXT_INSET,
+  imageResolver,
+  measureNode,
+  wrapRunLines,
+  type TextMeasurer,
+} from "../layout/measure";
+
+export interface SvgExportOptions {
+  measurer: TextMeasurer;
+  /**
+   * Fill and text colour per node, resolved by the RENDERER. Branch palettes
+   * live there; recomputing them here would be a second source of truth that
+   * drifts the first time a theme changes.
+   */
+  colorOf: (nodeId: string) => { fill: string; text: string } | null;
+  /** Connector colour for a child node (its branch colour). */
+  linkColorOf: (nodeId: string) => string;
+  /** Page background. Pass null for a transparent document. */
+  background: string | null;
+  /**
+   * `data:` URI for an image asset, or null when it cannot be read. Async
+   * because the bytes live in the asset store; every image is fetched exactly
+   * once even when several nodes share it.
+   */
+  imageDataUri?: (assetId: string) => Promise<string | null>;
+  /** Margin around the drawing, in world units. */
+  pad?: number;
+}
+
+interface Placed {
+  node: MindNode;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const esc = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** Trim to 3 decimals and drop the trailing zeros — a 60% smaller file on big maps. */
+const n3 = (v: number): string => {
+  const r = Math.round(v * 1000) / 1000;
+  return Object.is(r, -0) ? "0" : String(r);
+};
+
+/**
+ * Placement, mirroring the renderer's: the position is the node's own, the
+ * extent comes from the shared measurer. Collapsed subtrees are omitted — the
+ * export shows what the map shows.
+ */
+function placeAll(sheet: Sheet, measurer: TextMeasurer): Placed[] {
+  const resolveImage = imageResolver(sheet);
+  const out: Placed[] = [];
+  const seen = new Set<string>();
+  const queue = [sheet.rootNodeId];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const node = sheet.nodes[id];
+    if (!node || seen.has(id)) continue;
+    seen.add(id);
+    const m = measureNode(node, measurer, resolveImage);
+    out.push({ node, x: node.position.x, y: node.position.y, w: m.w, h: m.h });
+    if (!node.collapsed) queue.push(...node.childrenIds);
+  }
+  for (const node of Object.values(sheet.nodes)) {
+    if (seen.has(node.id) || node.parentId) continue;
+    seen.add(node.id);
+    const m = measureNode(node, measurer, resolveImage);
+    out.push({ node, x: node.position.x, y: node.position.y, w: m.w, h: m.h });
+  }
+  return out;
+}
+
+/** The node outline, in the same geometry the canvas paints. */
+function shapeOf(p: Placed, fill: string): string {
+  const { x, y, w, h } = p;
+  const s = p.node.style;
+  const shape = s.shape ?? "rounded";
+  const f = ` fill="${esc(fill)}"`;
+  switch (shape) {
+    case "none":
+      return "";
+    case "circle":
+      return `<ellipse cx="${n3(x + w / 2)}" cy="${n3(y + h / 2)}" rx="${n3(w / 2)}" ry="${n3(h / 2)}"${f}/>`;
+    case "diamond":
+      return `<polygon points="${n3(x + w / 2)},${n3(y)} ${n3(x + w)},${n3(y + h / 2)} ${n3(x + w / 2)},${n3(y + h)} ${n3(x)},${n3(y + h / 2)}"${f}/>`;
+    case "hexagon": {
+      const c = Math.min(w / 4, h / 2);
+      return `<polygon points="${n3(x + c)},${n3(y)} ${n3(x + w - c)},${n3(y)} ${n3(x + w)},${n3(y + h / 2)} ${n3(x + w - c)},${n3(y + h)} ${n3(x + c)},${n3(y + h)} ${n3(x)},${n3(y + h / 2)}"${f}/>`;
+    }
+    case "rect":
+      return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}"${f}/>`;
+    default: {
+      const r = s.cornerRadius ?? 8;
+      return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}" rx="${n3(r)}"${f}/>`;
+    }
+  }
+}
+
+/**
+ * The connector, with the renderer's exact control points — a curve that
+ * merely looks similar would show up as every line meeting its box at a
+ * slightly wrong angle.
+ */
+function connector(parent: Placed, child: Placed, sheet: Sheet, color: string): string {
+  const st = sheet.structure;
+  const childLeft = child.x + child.w / 2 < parent.x + parent.w / 2;
+  let sx: number, sy: number, ex: number, ey: number;
+  if (
+    child.y > parent.y + parent.h - 1 &&
+    st.structureType !== "mindmap" &&
+    !(st.structureType === "logic" && st.orientation !== "vertical")
+  ) {
+    sx = parent.x + parent.w / 2;
+    sy = parent.y + parent.h;
+    ex = child.x + child.w / 2;
+    ey = child.y;
+  } else {
+    sx = childLeft ? parent.x : parent.x + parent.w;
+    sy = parent.y + parent.h / 2;
+    ex = childLeft ? child.x + child.w : child.x;
+    ey = child.y + child.h / 2;
+  }
+  const dx = Math.abs(ex - sx);
+  const cp1x = sx + (childLeft ? -dx * 0.45 : dx * 0.45);
+  const cp2x = ex + (childLeft ? dx * 0.45 : -dx * 0.45);
+  return `<path d="M${n3(sx)},${n3(sy)}C${n3(cp1x)},${n3(sy)} ${n3(cp2x)},${n3(ey)} ${n3(ex)},${n3(ey)}" fill="none" stroke="${esc(color)}" stroke-width="1.7"/>`;
+}
+
+/**
+ * The title, as one `<text>` per segment placed on its own baseline.
+ *
+ * This loop is a transcription of the renderer's: same maxW, same gap-then-
+ * baseline order, same left-vs-centre rule, same rule that a list item is
+ * always left aligned. Deviating anywhere here reintroduces exactly the
+ * divergence the parity harness was built to close.
+ */
+function title(p: Placed, color: string, imgH: number, measurer: TextMeasurer): string {
+  const n = p.node;
+  const size = n.style.fontSize ?? 14;
+  const pad = n.style.padding ?? 10;
+  const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
+  const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, measurer, n.style);
+  if (lines.length === 0) return "";
+
+  let totalH = 0;
+  for (const line of lines) totalH += (line.height ?? size * LINE_HEIGHT_FACTOR) + (line.gapPx ?? 0);
+
+  const startY =
+    imgH > 0
+      ? p.y + pad + imgH + IMAGE_GAP + Math.max(0, (p.h - pad * 2 - imgH - IMAGE_GAP - totalH) / 2)
+      : p.y + p.h / 2 - totalH / 2;
+  const startX = p.x + pad;
+
+  const baseWeight = n.style.fontWeight ?? 400;
+  const nodeItalic = n.style.italic ?? false;
+  const strike = n.style.strikethrough ?? false;
+  const nodeUnderline = n.style.underline ?? false;
+
+  const attrs = (run: TextRun): { size: number; weight: number; italic: boolean } => {
+    const bold = (run.bold ?? false) || baseWeight >= 700;
+    return {
+      size: run.fontSize ?? size,
+      weight: bold ? 700 : baseWeight,
+      italic: (run.italic ?? false) || nodeItalic,
+    };
+  };
+  /** The style attributes that decide whether two runs can share a tspan. */
+  const styleKey = (run: TextRun): string => {
+    const a = attrs(run);
+    return `${a.size}|${a.weight}|${a.italic ? 1 : 0}|${run.color ?? color}|${(run.underline ?? false) || nodeUnderline ? 1 : 0}`;
+  };
+  const spanAttrs = (run: TextRun): string => {
+    const a = attrs(run);
+    const deco = [(run.underline ?? false) || nodeUnderline ? "underline" : "", strike ? "line-through" : ""]
+      .filter(Boolean)
+      .join(" ");
+    return (
+      ` font-size="${n3(a.size)}"` +
+      (a.weight !== 400 ? ` font-weight="${a.weight}"` : "") +
+      (a.italic ? ` font-style="italic"` : "") +
+      ` fill="${esc(run.color ?? color)}"` +
+      (deco ? ` text-decoration="${deco}"` : "")
+    );
+  };
+
+  /**
+   * One `<text>` per line, with a `<tspan>` per style change — NOT one element
+   * per token with an x we computed.
+   *
+   * `wrapRunLines` returns a segment per token (spaces included), so the
+   * per-token version had to place each word at a measured advance. That
+   * bakes OUR font metrics into the file, and the file is rendered by someone
+   * else's font engine: any disagreement shows up as widening gaps between
+   * words, accumulating along the line. Letting the SVG renderer space a line
+   * it is drawing anyway removes the whole class of error — our only claim is
+   * where the line STARTS.
+   *
+   * xml:space="preserve" is required: the spaces are their own segments, and
+   * SVG collapses whitespace without it.
+   */
+  const lineText = (segs: { text: string; run: TextRun }[], x: number, y: number): string => {
+    if (segs.length === 0) return "";
+    const parts: string[] = [];
+    let i = 0;
+    while (i < segs.length) {
+      const key = styleKey(segs[i].run);
+      let text = "";
+      const run = segs[i].run;
+      while (i < segs.length && styleKey(segs[i].run) === key) text += segs[i++].text;
+      if (text) parts.push(`<tspan${spanAttrs(run)}>${esc(text)}</tspan>`);
+    }
+    return `<text x="${n3(x)}" y="${n3(y)}" xml:space="preserve">${parts.join("")}</text>`;
+  };
+
+  const out: string[] = [];
+  let yCursor = startY;
+  for (const line of lines) {
+    const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
+    yCursor += line.gapPx ?? 0;
+    const baselineY = yCursor + (line.baseline ?? lh * 0.8);
+    const indent = line.indent ?? 0;
+    if (line.bullet) {
+      out.push(lineText([{ text: line.bullet.char, run: line.bullet.run }], startX + line.bullet.x, baselineY));
+    }
+    const isList = indent > 0 || !!line.bullet;
+    const x = startX + (n.style.align === "left" || isList ? indent : (maxW - line.width) / 2);
+    // Trailing whitespace is excluded from line.width (as CSS does when
+    // centering), so emitting it would push a centred line off by that much.
+    const segs = [...line.segments];
+    while (segs.length > 0 && segs[segs.length - 1].text.trim() === "") segs.pop();
+    out.push(lineText(segs, x, baselineY));
+    yCursor += lh;
+  }
+  return out.join("");
+}
+
+export interface SvgExportResult {
+  svg: string;
+  nodes: number;
+  images: number;
+  /** Images referenced but not readable — reported, never silently dropped. */
+  imagesMissing: number;
+  width: number;
+  height: number;
+}
+
+export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<SvgExportResult> {
+  const pad = opts.pad ?? 40;
+  const placed = placeAll(sheet, opts.measurer);
+  if (placed.length === 0) {
+    return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>`, nodes: 0, images: 0, imagesMissing: 0, width: 1, height: 1 };
+  }
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of placed) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x + p.w > maxX) maxX = p.x + p.w;
+    if (p.y + p.h > maxY) maxY = p.y + p.h;
+  }
+  minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+  const width = maxX - minX;
+  const height = maxY - minY;
+
+  // Every distinct asset is fetched once, however many nodes point at it.
+  const resolveImage = imageResolver(sheet);
+  const uris = new Map<string, string | null>();
+  if (opts.imageDataUri) {
+    const ids = new Set<string>();
+    for (const p of placed) if (p.node.style.image) ids.add(p.node.style.image);
+    for (const id of ids) uris.set(id, await opts.imageDataUri(id));
+  }
+
+  const byId = new Map(placed.map((p) => [p.node.id, p]));
+  const parts: string[] = [];
+  parts.push(
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+      `width="${n3(width)}" height="${n3(height)}" viewBox="${n3(minX)} ${n3(minY)} ${n3(width)} ${n3(height)}" ` +
+      `font-family="${esc(FONT_STACK)}" text-rendering="optimizeLegibility">`
+  );
+  if (opts.background) {
+    parts.push(`<rect x="${n3(minX)}" y="${n3(minY)}" width="${n3(width)}" height="${n3(height)}" fill="${esc(opts.background)}"/>`);
+  }
+
+  // Connectors first, so every box paints over the line that reaches it.
+  parts.push("<g>");
+  for (const p of placed) {
+    if (!p.node.parentId) continue;
+    const parent = byId.get(p.node.parentId);
+    if (parent) parts.push(connector(parent, p, sheet, opts.linkColorOf(p.node.id)));
+  }
+  parts.push("</g>");
+
+  let images = 0;
+  let imagesMissing = 0;
+  for (const p of placed) {
+    const n = p.node;
+    const colors = opts.colorOf(n.id);
+    const fill = colors?.fill ?? "#ffffff";
+    const text = colors?.text ?? "#1a1a1a";
+    parts.push(`<g>`);
+    const shape = shapeOf(p, fill);
+    if (shape) parts.push(shape);
+
+    let imgH = 0;
+    if (n.style.image) {
+      const att = resolveImage(n.style.image);
+      const uri = uris.get(n.style.image) ?? null;
+      if (att && att.w > 0) {
+        const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+        imgH = (imgW * att.h) / att.w;
+        const ix = p.x + (p.w - imgW) / 2;
+        const iy = p.y + (n.style.padding ?? 10);
+        if (uri) {
+          parts.push(`<image x="${n3(ix)}" y="${n3(iy)}" width="${n3(imgW)}" height="${n3(imgH)}" href="${uri}" preserveAspectRatio="none"/>`);
+          images++;
+        } else {
+          // The box still occupies its space: dropping it would reflow nothing
+          // (the layout already accounted for it) but would leave a silent hole.
+          parts.push(`<rect x="${n3(ix)}" y="${n3(iy)}" width="${n3(imgW)}" height="${n3(imgH)}" fill="none" stroke="${esc(text)}" stroke-opacity="0.25" stroke-dasharray="4 3"/>`);
+          imagesMissing++;
+        }
+      }
+    }
+    parts.push(title(p, text, imgH, opts.measurer));
+    parts.push(`</g>`);
+  }
+  parts.push("</svg>");
+
+  return { svg: parts.join(""), nodes: placed.length, images, imagesMissing, width, height };
+}
