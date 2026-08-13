@@ -34,11 +34,30 @@ import { getAssetStore } from "../persist/assets";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
 import { htmlToRuns, sanitizeHtml } from "./pasteSanitizer";
 
+/**
+ * Lexical wants these NESTED under `text`. Flat keys (`textBold`) are silently
+ * ignored, and it falls back to its default `<strong>`/`<em>`/`<u>` elements
+ * wearing the browser's stylesheet instead of ours.
+ *
+ * That looked harmless and was not. `<strong>` means `font-weight: bolder`,
+ * which is RELATIVE: on a topic already at 600 or 700 — every main topic, and
+ * the root — it resolves to 900, and in a font with no 900 face nothing
+ * changes on screen. Pressing Ctrl+B appeared to do nothing while the canvas,
+ * which draws bold as an absolute 700, showed it. Hence "the hotkey registers
+ * but I only see it in the rendering".
+ *
+ * The classes below are absolute, so the overlay and the canvas now agree on
+ * the weight as well as the layout — a divergence the parity harness could not
+ * catch, because it compares line boxes and baselines, not font weights.
+ */
 const editorTheme = {
-  textBold: "rnode-text-bold",
-  textItalic: "rnode-text-italic",
-  textUnderline: "rnode-text-underline",
-  textStrikethrough: "rnode-text-strike",
+  text: {
+    bold: "rnode-text-bold",
+    italic: "rnode-text-italic",
+    underline: "rnode-text-underline",
+    strikethrough: "rnode-text-strike",
+    underlineStrikethrough: "rnode-text-underline rnode-text-strike",
+  },
 };
 
 export function RichEditor({
