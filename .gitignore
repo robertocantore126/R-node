@@ -8,5 +8,5 @@ src-tauri/gen/
 # Generated code snapshots for AI-assisted review. They go stale the moment
 # anything is committed, and a stale snapshot read as documentation is worse
 # than no snapshot: regenerate on demand instead of tracking them.
-repomix-output.xml
+repomix-output.*
 docs/layout-bundle.html
