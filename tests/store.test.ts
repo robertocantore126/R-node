@@ -47,7 +47,7 @@ describe("docFileBaseName", () => {
 });
 
 describe("new topic defaults", () => {
-  it("gives every newly created topic a useful editable title", () => {
+  it("creates topics with NO title, so nothing has to be deleted before typing", () => {
     const store = new EditorStore(memoryAdapter);
     const root = store.doc.node(store.sheet.rootNodeId)!;
     const rootKidsBefore = root.childrenIds.length;
@@ -57,7 +57,10 @@ describe("new topic defaults", () => {
     expect(root.childrenIds.length).toBe(rootKidsBefore + 1);
     const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
     expect(main.type).toBe("main");
-    expect(main.title).toMatch(/^Main Topic \d+$/);
+    // Empty, not "Main Topic 1": the hint a user sees is drawn by the renderer
+    // over an empty topic and never enters the document, so there is nothing
+    // to select and delete before writing.
+    expect(main.title).toBe("");
 
     // Tab keeps the source selected: with the main topic selected, the next
     // child is a subtopic of it — created under the same parent, no nesting.
@@ -66,7 +69,7 @@ describe("new topic defaults", () => {
     expect(main.childrenIds.length).toBe(1);
     const child = store.doc.node(main.childrenIds[0])!;
     expect(child.type).toBe("subtopic");
-    expect(child.title).toBe("Subtopic 1");
+    expect(child.title).toBe("");
   });
 
   it("keeps a manually pinned main topic pinned when reordered among root children", () => {

@@ -1358,15 +1358,12 @@ export class EditorStore {
     const node = this.model.node(id);
     if (!node) return;
     const clean = trimRuns(runs);
-    if (isEmptyRuns(clean)) {
-      // empty new topic -> delete it; a topic with children keeps its title
-      if (node.childrenIds.length === 0) this.deleteNodes([id]);
-      else {
-        this.restoreOriginal(node, original);
-        this.notify();
-      }
-      return;
-    }
+    // An empty topic STAYS, and empty is a value it can hold.
+    //
+    // Clearing the text used to delete the topic, which made retyping a title
+    // destroy the thing being retyped — position, styling, children's parent —
+    // and left no way to leave a topic deliberately blank. Emptiness is now a
+    // state the renderer draws a hint over; Delete is what removes topics.
     const plain = runsToPlain(clean);
     if (plain !== original.title || !runsEqual(clean, original.titleRuns)) {
       this.execOps([
@@ -1435,8 +1432,11 @@ export class EditorStore {
       const node = this.model.node(id);
       if (!node) return;
       this.restoreOriginal(node, original);
-      if (node.title === "" && node.childrenIds.length === 0) this.deleteNodes([id]);
-      else this.notify();
+      // Escaping out of a topic no longer removes it. That rule existed to
+      // tidy up a topic created by accident, but now that a new topic is born
+      // empty by design it would delete every one of them the moment the
+      // editor was dismissed.
+      this.notify();
     }
   }
 
@@ -1444,15 +1444,17 @@ export class EditorStore {
   // Structure commands (Enter / Tab / Shift+Tab ...)
   // -------------------------------------------------------------------------
 
-  private defaultTopicTitle(type: NodeType, parentId: string | null): string {
-    if (type === "central") return "Central Topic";
-    if (type === "floating") return "New Idea";
-    const label = type === "main" ? "Main Topic" : "Subtopic";
-    const parent = parentId ? this.model.node(parentId) : undefined;
-    const siblingCount = parent?.childrenIds.reduce((count, id) => {
-      return count + (this.model.node(id)?.type === type ? 1 : 0);
-    }, 0) ?? Object.values(this.sheet.nodes).filter((n) => n.type === type).length;
-    return `${label} ${siblingCount + 1}`;
+  /**
+   * Empty. A new topic carries no text at all.
+   *
+   * It used to be born holding "Subtopic 1", which is real content: it saved,
+   * it exported, it had to be selected and deleted before writing anything,
+   * every single time. What the user needs there is a HINT, and a hint belongs
+   * to the view — the renderer draws one over an empty topic and it vanishes
+   * at the first keystroke without ever entering the document.
+   */
+  private defaultTopicTitle(): string {
+    return "";
   }
 
   private normalizeBranchColors(sheet: Sheet): void {
@@ -1532,7 +1534,7 @@ export class EditorStore {
     const id = uid("n");
     const position = this.createNodePosition(type === "main" ? parent : node);
     const style = this.createNodeStyle(type, parent.id, index);
-    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: parent.id, index, title: this.defaultTopicTitle(type, parent.id), position, style })]);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: parent.id, index, title: this.defaultTopicTitle(), position, style })]);
     // The layout must settle BEFORE the editor opens, or the overlay would
     // mount on the provisional position and the topic would appear to jump.
     this.settleLayoutNow();
@@ -1545,7 +1547,7 @@ export class EditorStore {
     const id = uid("n");
     const position = this.createNodePosition(node);
     const style = this.createNodeStyle(type, node.id, node.childrenIds.length);
-    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(type, node.id), position, style })]);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(), position, style })]);
     // Tab spawns the child without entering edit mode: the selection stays on
     // the source node, so repeated Tab keeps adding siblings under the same
     // parent instead of nesting (or stealing the selection).
@@ -1561,7 +1563,7 @@ export class EditorStore {
     const idx = parent.childrenIds.indexOf(node.id);
     const style = this.createNodeStyle(type, parent.id, idx);
     const ops: Op[] = [
-      makeOp<Op & { type: "createNode" }>("createNode", { id: newId, nodeType: type, parentId: parent.id, index: idx, title: this.defaultTopicTitle(type, parent.id), style }),
+      makeOp<Op & { type: "createNode" }>("createNode", { id: newId, nodeType: type, parentId: parent.id, index: idx, title: this.defaultTopicTitle(), style }),
       makeOp<Op & { type: "moveNode" }>("moveNode", {
         id: node.id,
         fromParentId: parent.id,
@@ -1592,7 +1594,7 @@ export class EditorStore {
         nodeType: "floating",
         parentId: null,
         index: 0,
-        title: this.defaultTopicTitle("floating", null),
+        title: this.defaultTopicTitle(),
         position: { x, y, manual: true },
       }),
     ]);

@@ -712,8 +712,46 @@ export class Renderer {
     return (imgW * att.h) / att.w;
   }
 
+  /**
+   * What an empty topic shows instead of nothing.
+   *
+   * New topics used to be born holding the words "Subtopic 1", which every
+   * user then had to select and delete before writing anything. The title is
+   * now genuinely empty and this is drawn in its place: it is a hint, not
+   * content, so it never enters the document, never exports, and disappears
+   * the moment a character is typed.
+   */
+  private placeholderFor(n: MindNode): string {
+    if (n.type === "central") return "Central Topic";
+    if (n.type === "main") return "Main Topic";
+    if (n.type === "floating") return "New Idea";
+    return "Subtopic";
+  }
+
+  /** The hint, drawn faint and centred. Not cached: an empty topic is rare and
+   *  becomes non-empty the moment anyone types. */
+  private drawPlaceholder(p: Placed, color: string): void {
+    const n = p.node;
+    const ctx = this.ctx;
+    const size = n.style.fontSize ?? 14;
+    ctx.save();
+    ctx.globalAlpha = 0.42;
+    ctx.fillStyle = color;
+    ctx.font = `${n.style.italic ? "italic " : ""}${n.style.fontWeight ?? 400} ${size}px ${n.style.fontFamily ?? FONT_STACK}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(this.placeholderFor(n), p.x + p.w / 2, p.y + p.h / 2 + 0.5);
+    ctx.restore();
+  }
+
   private drawText(_theme: RenderTheme, p: Placed, color: string, imgH = 0): void {
     const n = p.node;
+    // The caller already skips this node entirely while it is being edited,
+    // so an empty title here means an empty topic nobody is typing into.
+    if (n.title.trim() === "") {
+      this.drawPlaceholder(p, color);
+      return;
+    }
     const pad = n.style.padding ?? 10;
     const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
     // Resolution bucket: re-render the bitmap only when the zoom crosses a
