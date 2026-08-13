@@ -498,7 +498,12 @@ export class Renderer {
     // resize must stay reachable without reselecting the node).
     if (selected || state.imageSel === n.id) {
       const hs = 9;
-      const ir = this.imageWorldRect(state, n.id);
+      // imageRectForPlaced, NOT imageWorldRect: the placed node is already in
+      // hand. imageWorldRect re-places and re-measures the WHOLE sheet to find
+      // one node — 8.7ms on an 8,000-node map — and this runs per selected
+      // node per frame, so selecting fifty topics cost 434ms a frame. That is
+      // the "everything crawls once I select a lot" report.
+      const ir = this.imageRectForPlaced(p);
       if (ir) {
         const hx = ir.x + ir.w - hs / 2;
         const hy = ir.y + ir.h - hs / 2;
@@ -524,7 +529,7 @@ export class Renderer {
     // Image selection ring: the image is selected (not the node) — outline
     // around the image so Backspace/Delete knows what it will remove.
     if (state.imageSel === n.id) {
-      const ir = this.imageWorldRect(state, n.id);
+      const ir = this.imageRectForPlaced(p); // same reason as above
       if (ir) {
         const pad = 3;
         ctx.strokeStyle = theme.selection;
@@ -1174,9 +1179,15 @@ export class Renderer {
     const hs = 12;
     const ids = new Set(state.selection);
     if (state.imageSel) ids.add(state.imageSel);
+    // Place ONCE for the whole loop. Calling imageWorldRect per id re-placed
+    // and re-measured every node in the sheet each time, and this runs on
+    // pointermove: with a large selection the cost was the selection size
+    // times the map size, on every mouse move.
+    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
     for (const id of ids) {
       if (state.editingId === id) continue;
-      const rect = this.imageWorldRect(state, id);
+      const p = placed.get(id);
+      const rect = p ? this.imageRectForPlaced(p) : null;
       if (!rect) continue;
       const hx = rect.x + rect.w - hs / 2;
       const hy = rect.y + rect.h - hs / 2;
@@ -1223,9 +1234,12 @@ export class Renderer {
 
   hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {
     const hs = 12; // grab box slightly larger than the drawn 9px handle
+    // Placed once, for the same reason as hitTestImageResize above.
+    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
     for (const id of state.selection) {
       if (state.editingId === id) continue;
-      const rect = this.nodeWorldRect(state, id);
+      const p = placed.get(id);
+      const rect = p ? { x: p.x, y: p.y, w: p.w, h: p.h } : null;
       if (!rect) continue;
       const hy = rect.y + rect.h / 2 - hs / 2;
       for (const side of ["left", "right"] as const) {
