@@ -10,3 +10,6 @@ src-tauri/gen/
 # than no snapshot: regenerate on demand instead of tracking them.
 repomix-output.*
 docs/layout-bundle.html
+
+# Session traces written by the dev server (see vite.config.ts).
+.trace/

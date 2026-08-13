@@ -17,9 +17,10 @@
  * of prose from the user ever could. Applied gestures are traced too, so a
  * dead input is distinguishable from a handled one.
  *
- * Usage: press Ctrl+Shift+D at the moment the bug happens; a JSON bundle of
- * the last few hundred events downloads. Paste it to whoever (or whatever) is
- * fixing it. Also on `window.__rnodeTrace` for console use.
+ * Usage: in dev it writes itself to `.trace/latest.json` every few seconds, so
+ * whoever is investigating just reads that file — no one has to be asked for a
+ * capture. Ctrl+Shift+D at the moment the bug happens also writes a timestamped
+ * copy with a note, and resets the window. Also on `window.__rnodeTrace`.
  *
  * Disabled in production builds: every entry point returns immediately, so
  * the cost is a boolean test.
@@ -55,12 +56,23 @@ function now(): number {
 }
 
 /**
+ * Bumped on every recorded event, coalesced ones included.
+ *
+ * The auto-flush needs to know whether anything happened since the last write,
+ * and `buffer.length` cannot answer: coalescing raises the last entry's `n`
+ * without appending, so a whole gesture of wheel events leaves the length
+ * untouched. A counter is the only cheap signal that does not lie.
+ */
+let revision = 0;
+
+/**
  * Append, coalescing repeats. Without this a wheel gesture (dozens of events)
  * or a render loop would flush the whole buffer in a second and the capture
  * would hold nothing but the last instant — exactly the part you already know.
  */
 function push(ev: TraceEvent, mergeKey: string): void {
   if (!enabled) return;
+  revision++;
   const last = buffer[buffer.length - 1] as (TraceEvent & { _k?: string }) | undefined;
   if (last && last._k === mergeKey) {
     last.n += 1;
@@ -231,6 +243,31 @@ export const trace = {
     };
   },
 
+  /**
+   * Write the trace to `.trace/latest.json` through the dev server.
+   *
+   * Replaces the hand-off that used to sit in the middle of every diagnosis:
+   * press the hotkey, save the download, tell someone the path. Resolves false
+   * when there is no sink — a production build, or the dev server gone — and
+   * the caller falls back to a download.
+   *
+   * `keep` also writes a timestamped copy: keypress captures carry a note and
+   * must survive the next automatic flush.
+   */
+  async flush(note?: string, keep = false): Promise<boolean> {
+    if (!enabled || typeof fetch === "undefined") return false;
+    try {
+      const res = await fetch("/__trace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(keep ? { "X-Trace-Keep": "1" } : {}) },
+        body: JSON.stringify(this.capture(note), null, 2),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  },
+
   download(note?: string, extra?: Detail): void {
     if (typeof document === "undefined") return;
     const blob = new Blob([JSON.stringify(this.capture(note, extra), null, 2)], { type: "application/json" });
@@ -262,14 +299,40 @@ export function installTrace(): () => void {
     if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "d") {
       e.preventDefault();
       const note = window.prompt("What did you expect to happen? (optional)") ?? undefined;
-      trace.download(note);
-      // Reset after capturing, never before: the bug has already happened by
-      // the time anyone reaches for this, so clearing first would discard the
-      // very evidence being asked for. Each capture is scoped to what came
-      // after the previous one.
-      trace.clear();
+      void trace.flush(note, true).then((written) => {
+        // Only fall back to a download when there is no sink to write to.
+        if (!written) trace.download(note);
+        // Reset after capturing, never before: the bug has already happened by
+        // the time anyone reaches for this, so clearing first would discard the
+        // very evidence being asked for. Each capture is scoped to what came
+        // after the previous one.
+        trace.clear();
+      });
     }
   };
+
+  /**
+   * Rolling auto-flush, so `.trace/latest.json` is simply always current and
+   * nobody has to be asked for it.
+   *
+   * Only when something was recorded, and never two at once: an idle app must
+   * not rewrite the same file forever, and a busy one must not queue writes
+   * behind each other. Three seconds is slow enough to cost nothing next to a
+   * 16ms frame and quick enough that the file is fresh by the time anyone
+   * looks. The buffer is NOT cleared — this is a window on the last events,
+   * while the hotkey is a scoped capture.
+   */
+  let lastWritten = -1;
+  let inFlight = false;
+  const timer = setInterval(() => {
+    if (inFlight || revision === lastWritten) return;
+    inFlight = true;
+    const at = revision;
+    void trace.flush().then((ok) => {
+      inFlight = false;
+      if (ok) lastWritten = at;
+    });
+  }, 3000);
   const onError = (e: ErrorEvent): void => trace.error(e.message, e.error?.stack);
   const onRejection = (e: PromiseRejectionEvent): void => trace.error(String(e.reason), (e.reason as Error)?.stack);
 
@@ -277,9 +340,10 @@ export function installTrace(): () => void {
   window.addEventListener("error", onError);
   window.addEventListener("unhandledrejection", onRejection);
   // eslint-disable-next-line no-console
-  console.info("[trace] recording — Ctrl+Shift+D to capture, window.__rnodeTrace in the console");
+  console.info("[trace] recording → .trace/latest.json — Ctrl+Shift+D for a noted capture, window.__rnodeTrace in the console");
 
   return () => {
+    clearInterval(timer);
     window.removeEventListener("keydown", onKey, true);
     window.removeEventListener("error", onError);
     window.removeEventListener("unhandledrejection", onRejection);
