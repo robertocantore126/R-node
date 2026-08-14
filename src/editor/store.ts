@@ -1722,7 +1722,7 @@ export class EditorStore {
       this.state.groupSel = null;
       this.state.summarySel = null;
       this.state.imageSel = null;
-    this.state.imageSlot = null;
+      this.state.imageSlot = null;
       this.notify();
     }
   }
@@ -2050,9 +2050,14 @@ export class EditorStore {
    * dropped on. Both reference changes are ONE undoable batch: undo restores
    * the image to its original slot. After the move the image on the TARGET
    * stays selected.
+   *
+   * Same node, different slot is a real move (top → left on one topic): only
+   * the same slot on the same node is a no-op. Before the side slots existed
+   * every same-node drop was necessarily a no-op, which is where the older
+   * `fromNodeId === toNodeId` guard came from.
    */
   assignImageToNode(fromNodeId: string, toNodeId: string, toPosition: ImageSlot = "top", fromSlot: ImageSlot = "top"): void {
-    if (fromNodeId === toNodeId) return;
+    if (fromNodeId === toNodeId && fromSlot === toPosition) return;
     const from = this.model.node(fromNodeId);
     const to = this.model.node(toNodeId);
     if (!from || !to) return;

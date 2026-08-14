@@ -15,6 +15,7 @@ import { imageResolver, measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
+import { nearestImageSide } from "./imageDrop";
 import type { ImageSlot, MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { installTrace, trace } from "../dev/trace";
@@ -101,23 +102,6 @@ interface DragState {
   marqueeStartX: number | null;
   marqueeStartY: number | null;
   marqueeActive: boolean;
-}
-
-/**
- * Which edge of a topic box the cursor is nearest to — the image slot a
- * drop on that node should target. "top" is the legacy behaviour, so a
- * drop anywhere near the middle of the box still lands where it always did.
- */
-function nearestImageSide(rect: { x: number; y: number; w: number; h: number }, wx: number, wy: number): ImageSlot {
-  const dLeft = Math.abs(wx - rect.x);
-  const dRight = Math.abs(wx - (rect.x + rect.w));
-  const dTop = Math.abs(wy - rect.y);
-  const dBottom = Math.abs(wy - (rect.y + rect.h));
-  const min = Math.min(dLeft, dRight, dTop, dBottom);
-  if (min === dLeft) return "left";
-  if (min === dRight) return "right";
-  if (min === dTop) return "top";
-  return "bottom";
 }
 
 /** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
