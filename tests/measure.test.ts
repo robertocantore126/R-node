@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ARROW_HALF_ANGLE, ARROW_LEN, BULLET_WIDTH_EM, IMAGE_GAP, imageResolver, MAX_IMAGE_W, measureNode, MIN_TOPIC_W, wrapRunLines, bezierEnterRect, bezierExitRect, bezierPoint, bezierSlice, HEURISTIC_MEASURER, type Bezier3 } from "../src/layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, BULLET_WIDTH_EM, IMAGE_GAP, imageResolver, MAX_IMAGE_W, measureNode, MIN_TOPIC_W, textInsets, wrapRunLines, bezierEnterRect, bezierExitRect, bezierPoint, bezierSlice, HEURISTIC_MEASURER, type Bezier3 } from "../src/layout/measure";
 import { DocumentModel } from "../src/core/doc";
 import { DEFAULT_STRUCTURE, type MindNode, type Sheet, type TextRun } from "../src/core/types";
 
@@ -347,5 +347,36 @@ describe("topic extent with side images (multi-slot)", () => {
     const top = measureNode(node({ title: "Hi", style: { image: "img1" } }), HEURISTIC_MEASURER, resolve);
     const left = measureNode(node({ title: "Hi", style: { imageLeft: "img1" } }), HEURISTIC_MEASURER, resolve);
     expect(top.w).not.toBe(left.w);
+  });
+});
+
+describe("textInsets — what an image slot reserves next to the text", () => {
+  const none = { top: null, bottom: null, left: null, right: null };
+
+  it("reserves nothing at all for an empty slot", () => {
+    // The bug this pins: the editing overlay added IMAGE_GAP on all four sides
+    // unconditionally. On a topic with only a top image that stole 2 x
+    // IMAGE_GAP of text width the canvas never gave up, so the paragraph
+    // re-wrapped the moment the node was double-clicked.
+    expect(textInsets(none)).toEqual({ top: 0, bottom: 0, left: 0, right: 0 });
+  });
+
+  it("reserves the image plus ONE gap on the side that holds it, and zero elsewhere", () => {
+    expect(textInsets({ ...none, top: { w: 160, h: 90 } })).toEqual({ top: 90 + IMAGE_GAP, bottom: 0, left: 0, right: 0 });
+    expect(textInsets({ ...none, left: { w: 64, h: 48 } })).toEqual({ top: 0, bottom: 0, left: 64 + IMAGE_GAP, right: 0 });
+  });
+
+  it("uses height for top/bottom and width for left/right", () => {
+    const all = textInsets({
+      top: { w: 100, h: 60 },
+      bottom: { w: 100, h: 30 },
+      left: { w: 40, h: 200 },
+      right: { w: 20, h: 200 },
+    });
+    expect(all).toEqual({ top: 60 + IMAGE_GAP, bottom: 30 + IMAGE_GAP, left: 40 + IMAGE_GAP, right: 20 + IMAGE_GAP });
+  });
+
+  it("treats a zero-sized image as no image", () => {
+    expect(textInsets({ ...none, left: { w: 0, h: 0 } }).left).toBe(0);
   });
 });

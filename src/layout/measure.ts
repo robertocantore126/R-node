@@ -555,6 +555,36 @@ export interface PositionedSlot {
   y: number;
 }
 
+export interface TextInsets {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+/**
+ * How far the text column sits from each edge of the box, padding excluded:
+ * an occupied slot reserves its own size PLUS one IMAGE_GAP, an empty slot
+ * reserves nothing at all (I9).
+ *
+ * The distinction is the whole point. Adding the gap unconditionally costs
+ * IMAGE_GAP on every side that holds no image — invisible on the canvas, which
+ * never reads these numbers, but it narrows the editing overlay's text column
+ * and re-wraps the text the instant a topic with an image is double-clicked.
+ *
+ * Consumed by measureTopic, positionedImageSlots, the RichEditor overlay and
+ * the parity harness: all four have to agree on where the text may go.
+ */
+export function textInsets(slots: SlotSizes): TextInsets {
+  const reserve = (v: number | undefined): number => (v && v > 0 ? v + IMAGE_GAP : 0);
+  return {
+    top: reserve(slots.top?.h),
+    bottom: reserve(slots.bottom?.h),
+    left: reserve(slots.left?.w),
+    right: reserve(slots.right?.w),
+  };
+}
+
 /**
  * The four image slots pinned to a box (I9): the side images sit just
  * inside the padding, the top/bottom images are centred in the middle
@@ -565,14 +595,13 @@ export function positionedImageSlots(
   box: { x: number; y: number; w: number; h: number },
   n: MindNode,
   resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
-): { slots: SlotSizes; sidePadW: number; midL: number; midW: number; items: PositionedSlot[] } {
+): { slots: SlotSizes; insets: TextInsets; sidePadW: number; midL: number; midW: number; items: PositionedSlot[] } {
   const slots = slotSizes(n, resolveImage);
-  const leftW = slots.left?.w ?? 0;
-  const rightW = slots.right?.w ?? 0;
-  const sidePadW = (leftW ? leftW + IMAGE_GAP : 0) + (rightW ? rightW + IMAGE_GAP : 0);
+  const insets = textInsets(slots);
+  const sidePadW = insets.left + insets.right;
   const pad = n.style.padding ?? 10;
-  const midL = box.x + pad + (leftW ? leftW + IMAGE_GAP : 0);
-  const midR = box.x + box.w - pad - (rightW ? rightW + IMAGE_GAP : 0);
+  const midL = box.x + pad + insets.left;
+  const midR = box.x + box.w - pad - insets.right;
   const midW = Math.max(0, midR - midL);
   const items: PositionedSlot[] = [];
   if (slots.top) items.push({ slot: "top", id: n.style.image!, size: slots.top, x: midL + (midW - slots.top.w) / 2, y: box.y + pad });
@@ -580,7 +609,7 @@ export function positionedImageSlots(
     items.push({ slot: "bottom", id: n.style.imageBottom!, size: slots.bottom, x: midL + (midW - slots.bottom.w) / 2, y: box.y + box.h - pad - slots.bottom.h });
   if (slots.left) items.push({ slot: "left", id: n.style.imageLeft!, size: slots.left, x: box.x + pad, y: box.y + (box.h - slots.left.h) / 2 });
   if (slots.right) items.push({ slot: "right", id: n.style.imageRight!, size: slots.right, x: box.x + box.w - pad - slots.right.w, y: box.y + (box.h - slots.right.h) / 2 });
-  return { slots, sidePadW, midL, midW, items };
+  return { slots, insets, sidePadW, midL, midW, items };
 }
 
 /**
@@ -666,13 +695,12 @@ function measureTopicUncached(
   const pad = style.padding ?? 10;
   const topH = slots.top?.h ?? 0;
   const botH = slots.bottom?.h ?? 0;
-  const leftW = slots.left?.w ?? 0;
-  const rightW = slots.right?.w ?? 0;
   const leftH = slots.left?.h ?? 0;
   const rightH = slots.right?.h ?? 0;
   // Side images eat into the width available to the text; the gap counts
   // only when an image is actually present on that side.
-  const sidePadW = (leftW ? leftW + IMAGE_GAP : 0) + (rightW ? rightW + IMAGE_GAP : 0);
+  const insets = textInsets(slots);
+  const sidePadW = insets.left + insets.right;
   // An explicit width fixes the box and re-wraps the text at it (Xmind-style
   // resize); the height always follows the wrapped content.
   const maxW = style.width ? Math.max(MIN_TOPIC_W, style.width) : MAX_TOPIC_W;

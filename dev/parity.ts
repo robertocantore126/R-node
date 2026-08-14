@@ -31,7 +31,9 @@ import {
   TEXT_INSET,
   createCanvasTextMeasurer,
   measureTopic,
+  textInsets,
   wrapRunLines,
+  type SlotSizes,
 } from "../src/layout/measure";
 import type { Style, TextRun } from "../src/core/types";
 
@@ -49,6 +51,12 @@ interface Case {
   runs: TextRun[];
   style?: Partial<Style>;
   boxW?: number;
+  /**
+   * Image slots the topic carries, as their DISPLAY sizes. Only the space they
+   * reserve matters here, so no real attachment is needed — the bitmap itself
+   * is never part of text parity.
+   */
+  slots?: Partial<SlotSizes>;
 }
 
 const LOREM =
@@ -163,6 +171,34 @@ const CASES: Case[] = [
     what: "align:left + bullets — hanging indent is only visible when left aligned",
     runs: [{ text: LOREM, listIndent: 1 }, { text: "\n" }],
     style: { align: "left" },
+  },
+  // --- topics carrying images -------------------------------------------
+  // Until these existed the corpus was text-only, so nothing measured the
+  // overlay's text column once a slot reserved space next to it — the one
+  // case where the two sides compute the region from different formulas.
+  {
+    name: "image-top-only",
+    what: "top image, empty sides — the Ctrl+V case: empty slots must reserve NOTHING",
+    runs: [{ text: LOREM }],
+    slots: { top: { w: 160, h: 90 } },
+  },
+  {
+    name: "image-left",
+    what: "left image — the text column starts after it plus one gap",
+    runs: [{ text: LOREM }],
+    slots: { left: { w: 64, h: 48 } },
+  },
+  {
+    name: "image-left-right",
+    what: "both side images — the text is squeezed between two reservations",
+    runs: [{ text: LOREM }],
+    slots: { left: { w: 48, h: 40 }, right: { w: 48, h: 40 } },
+  },
+  {
+    name: "image-all-four",
+    what: "every slot occupied — the narrowest text column the layout allows",
+    runs: [{ text: LOREM }],
+    slots: { top: { w: 100, h: 60 }, bottom: { w: 100, h: 60 }, left: { w: 40, h: 40 }, right: { w: 40, h: 40 } },
   },
 ];
 
@@ -490,7 +526,17 @@ function runCase(c: Case, host: HTMLElement): CaseResult {
   const style: Style = { fontSize: 14, padding: 10, align: "center", ...c.style } as Style;
   const boxW = c.boxW ?? 280;
   const pad = style.padding ?? 10;
-  const wrapW = boxW - pad * 2 - TEXT_INSET;
+  // What each image slot reserves next to the text — from the same helper the
+  // layout and the overlay use, so a change to that formula moves both sides
+  // of this comparison and shows up here as a divergence.
+  const slots: SlotSizes = {
+    top: c.slots?.top ?? null,
+    bottom: c.slots?.bottom ?? null,
+    left: c.slots?.left ?? null,
+    right: c.slots?.right ?? null,
+  };
+  const insets = textInsets(slots);
+  const wrapW = boxW - pad * 2 - TEXT_INSET - insets.left - insets.right;
 
   // --- DOM exactly as RichEditor builds it (minus the transform: scale) ---
   const inner = document.createElement("div");
@@ -511,8 +557,13 @@ function runCase(c: Case, host: HTMLElement): CaseResult {
   Object.assign(editable.style, {
     paddingTop: `${pad + 2}px`,
     paddingBottom: `${pad + 2}px`,
-    paddingLeft: `${pad - 2}px`,
-    paddingRight: `${pad + TEXT_INSET - 2}px`,
+    // The side reservations ride on the padding here, while RichEditor applies
+    // them as absolute left/right offsets: the two are equivalent for the
+    // content width, and absolute offsets would need a definite parent height
+    // the harness has no reason to fake. What is under test is the width the
+    // text gets — that is what re-wraps a paragraph.
+    paddingLeft: `${pad - 2 + insets.left}px`,
+    paddingRight: `${pad + TEXT_INSET - 2 + insets.right}px`,
     overflow: "visible",
   });
   for (const el of runsToDom(c.runs)) editable.appendChild(el);

@@ -29,7 +29,7 @@ import { useStore } from "../editor/context";
 import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, positionedImageSlots, TEXT_INSET } from "../layout/measure";
+import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, imageResolver, LINE_HEIGHT_FACTOR, positionedImageSlots, TEXT_INSET } from "../layout/measure";
 import { getAssetStore } from "../persist/assets";
 import { trace } from "../dev/trace";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
@@ -135,10 +135,12 @@ export function RichEditor({
     imageResolver(store.sheet)
   );
   const hasImage = pos.items.length > 0;
-  const topH = pos.slots.top?.h ?? 0;
-  const botH = pos.slots.bottom?.h ?? 0;
-  const leftW = pos.slots.left?.w ?? 0;
-  const rightW = pos.slots.right?.w ?? 0;
+  // Straight from the shared helper — NOT recomputed here. Adding IMAGE_GAP on
+  // every side (the previous shape of these four lines) reserved a gap on
+  // slots that hold no image, so a topic with only a top image opened its
+  // editor with a text column 2 × IMAGE_GAP narrower than the canvas draws:
+  // the text re-wrapped on the double click. Covered by dev/parity.html.
+  const insets = pos.insets;
 
   return (
     <div className="topic-rich-editor" style={{ left: style.left, top: style.top }}>
@@ -162,10 +164,10 @@ export function RichEditor({
                         // image, above the bottom one, between the side ones
                         // — same placement the canvas gives it.
                         position: "absolute",
-                        top: topH + IMAGE_GAP,
-                        left: leftW + IMAGE_GAP,
-                        right: rightW + IMAGE_GAP,
-                        bottom: botH + IMAGE_GAP,
+                        top: insets.top,
+                        left: insets.left,
+                        right: insets.right,
+                        bottom: insets.bottom,
                       }
                     : editablePad
                 }
