@@ -643,6 +643,22 @@ relationships } }`) e che `paste` già istanzia rimappando gli id. L'utente può
 disegnare una forma a mano, copiarla e incollarla nella libreria; un LLM a cui
 si chiede una forma emette lo stesso identico oggetto.
 
+### Cosa può contenere una forma (deciso)
+
+`saveShape` normalizza il payload prima di salvarlo. Quattro regole, ognuna con
+la ragione che l'ha prodotta:
+
+| Regola | Perché |
+|---|---|
+| **Via i colori, resta la forma.** Si tengono `shape`, bordo, dimensioni, font; si cancellano `fill`, `stroke`, `textColor` e il `color` di **ogni run** di `titleRuns` e di ogni relazione | Un colore salvato prima o poi atterra su un tema dove non si legge, e resta lì per sempre. Stessa conclusione di T22 sui code topic. La forma eredita la palette di ramo della mappa che la ospita |
+| **Geometria rigida.** `position.manual = true` su tutti i nodi | Un triangolo resta un triangolo: `mindmap.ts` tratta i nodi manuali come ancore e sposta gli *altri* rami attorno |
+| **Immagini rifiutate** al salvataggio, con il topic nominato | I byte vivono in un `AssetStore` per documento con chiave SHA-256: il template porterebbe il riferimento senza i byte, e nella mappa di destinazione sarebbe un buco. Meglio rifiutare subito che al drop |
+| **Testi conservati** (`title` + `titleRuns`) | Un Albero della Vita arriva con i nomi scritti: è il motivo per cui lo salvi. Togliere i colori dai run non tocca il testo, quindi I5 regge |
+
+Conseguenze derivate, non decisioni separate: si scartano `task`, `labels` e
+`markers` (appartengono a una mappa, non a una forma), `collapsed` va a false,
+`notes` resta perché è contenuto.
+
 **File.** `src/editor/shapeLibrary.ts` (nuovo) · `src/ui/ShapeLibrary.tsx`
 (nuovo) · `src/App.tsx` · `src/styles.css` · `src/ui/CanvasView.tsx` ·
 `src/editor/store.ts` · i rispettivi test.

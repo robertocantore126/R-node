@@ -48,6 +48,43 @@ library — and an LLM asked for a shape emits that same thing.
 
 ## Steps
 
+### 0 — What a template may contain (decided; do not re-litigate)
+
+`saveShape` **normalises** the payload before storing it. These four rules are
+the owner's decisions, each with the reason that produced it.
+
+**Colours out, form in.** For every node, keep `shape`, `cornerRadius`,
+`borderWidth`, `borderStyle`, `width`, `height`, `padding`, `align`, `fontSize`,
+`fontWeight`, `fontFamily`, `italic`, `underline`, `strikethrough`. **Delete**
+`fill`, `stroke`, `textColor` — and `color` on **every `TextRun` of
+`titleRuns`**, which is the easy one to miss and would defeat the whole rule.
+Delete `color` on every relationship too. An inserted shape then inherits the
+map's branch palette like any native topic. Reason: a stored colour eventually
+lands on a theme where it cannot be read, and that is permanent — the same
+conclusion T22 reached for code topics.
+
+**Geometry rigid.** Force `position.manual = true` on every node, whatever the
+author had. A triangle stays a triangle: `mindmap.ts` treats manual nodes as
+fixed anchors and resolves collisions by moving the *other* branches
+(`mindmap.ts:295`).
+
+**Images refused.** If any node carries an image in any slot, `saveShape` fails
+with a message naming the offending topic. Use `nodeImageIds(node)` from
+`core/ops` — it already enumerates all four slots, do not write a second
+enumeration. Reason: image bytes live in a per-document `AssetStore` keyed by
+SHA-256; a template would carry the reference without the bytes and render as a
+hole in the target map. Refusing at save is honest, refusing at drop is late.
+
+**Text kept.** `title` and `titleRuns` survive verbatim — a saved Tree of Life
+arrives with its labels written, which is the point of saving it. Stripping the
+run colours does not change the text, so I5 (`title === runsToPlain(titleRuns)`)
+still holds; assert that in a test.
+
+Also normalise, as derived consequences rather than separate decisions: drop
+`task` (due dates belong to a map, not to a shape), drop `labels` and `markers`
+(one map's taxonomy), force `collapsed = false`, keep `notes` (it is content).
+If the owner disagrees on any of these three, they are one-line changes.
+
 ### 1 — The library store
 
 **File:** `src/editor/shapeLibrary.ts` (new)
@@ -144,9 +181,16 @@ insertShape(template: ShapeTemplate, anchorId: string): void
    fills and scrolls. Measure it, do not eyeball it — this is the bug the column
    already had once.
 4. Parity harness only if you touch a §3 file. You should not need to.
-5. At least one test that fails without your change. Suggested: `saveShape`
-   refuses a payload whose `parentId` does not resolve; `insertShape` produces
-   one history entry, not N.
+5. Tests that fail without your change. The normalisation of step 0 needs its
+   own, because every rule there is silent when it breaks:
+   - a saved template carries no `fill`, `stroke` or `textColor`, **and no
+     `color` on any `titleRuns` entry**;
+   - every node comes back with `position.manual === true`;
+   - a payload with an image in **any** of the four slots is refused, and the
+     message names the topic;
+   - `title === runsToPlain(titleRuns)` still holds after normalisation;
+   - `saveShape` refuses a payload whose `parentId` does not resolve;
+   - `insertShape` produces **one** history entry, not N.
 6. No files outside the lists above.
 
 ## Do not
