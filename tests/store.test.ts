@@ -571,6 +571,54 @@ describe("image selection, delete and move", () => {
     store.redo();
     expect(store.doc.node(main)!.style.image).toBe(IMG_ID);
   });
+
+  it("attachImage targets any slot; selectImage remembers it; delete removes only that slot", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a] = twoMainTopics(store);
+    store.attachImage(a, card, "left");
+    expect(store.doc.node(a)!.style.imageLeft).toBe(IMG_ID);
+    expect(store.doc.node(a)!.style.image).toBeUndefined();
+
+    store.selectImage(a, "left");
+    expect(store.getSnapshot().imageSel).toBe(a);
+    expect(store.getSnapshot().imageSlot).toBe("left");
+
+    store.deleteSelectedImage();
+    expect(store.doc.node(a)!.style.imageLeft).toBeUndefined();
+    expect(store.doc.node(a)).toBeDefined(); // the node survives
+  });
+
+  it("deleteSelectedImage removes only the SELECTED slot, leaving the others", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a] = twoMainTopics(store);
+    store.attachImage(a, card, "top");
+    store.attachImage(a, card, "bottom");
+    store.selectImage(a, "bottom");
+
+    store.deleteSelectedImage();
+    expect(store.doc.node(a)!.style.imageBottom).toBeUndefined();
+    expect(store.doc.node(a)!.style.image).toBe(IMG_ID); // top untouched
+  });
+
+  it("assignImageToNode moves a side image to the target's slot in ONE undoable batch", () => {
+    const store = new EditorStore(memoryAdapter);
+    const [a, b] = twoMainTopics(store);
+    store.attachImage(a, card, "left");
+
+    store.assignImageToNode(a, b, "bottom", "left");
+    expect(store.doc.node(a)!.style.imageLeft).toBeUndefined();
+    expect(store.doc.node(b)!.style.imageBottom).toBe(IMG_ID);
+    // The image on the target stays selected, on the slot it landed on.
+    expect(store.getSnapshot().imageSel).toBe(b);
+    expect(store.getSnapshot().imageSlot).toBe("bottom");
+
+    store.undo();
+    expect(store.doc.node(a)!.style.imageLeft).toBe(IMG_ID);
+    expect(store.doc.node(b)!.style.imageBottom).toBeUndefined();
+    store.redo();
+    expect(store.doc.node(a)!.style.imageLeft).toBeUndefined();
+    expect(store.doc.node(b)!.style.imageBottom).toBe(IMG_ID);
+  });
 });
 
 describe("canvas resize drag", () => {

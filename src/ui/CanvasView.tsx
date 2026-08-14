@@ -14,7 +14,8 @@ import { isShiftHeld, showCanvasHelp } from "./help";
 import { imageResolver, measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
-import type { MindNode, Sheet } from "../core/types";
+import { slotKey } from "../core/ops";
+import type { ImageSlot, MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { installTrace, trace } from "../dev/trace";
 import { fetchImageAsFile, firstImageFile, firstUriFromList } from "../editor/externalImage";
@@ -92,10 +93,31 @@ interface DragState {
   imgResizeStartWidth: number;
   /** Image move: dragging a selected image onto another node. */
   imgDragging: string | null;
+  /** The slot the grabbed image lives in (removed from on drop). */
+  imgSlot: ImageSlot;
+  /** The side the drop will target ("top" while not over a node). */
+  imgDropSlot: ImageSlot;
   /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
   marqueeStartX: number | null;
   marqueeStartY: number | null;
   marqueeActive: boolean;
+}
+
+/**
+ * Which edge of a topic box the cursor is nearest to — the image slot a
+ * drop on that node should target. "top" is the legacy behaviour, so a
+ * drop anywhere near the middle of the box still lands where it always did.
+ */
+function nearestImageSide(rect: { x: number; y: number; w: number; h: number }, wx: number, wy: number): ImageSlot {
+  const dLeft = Math.abs(wx - rect.x);
+  const dRight = Math.abs(wx - (rect.x + rect.w));
+  const dTop = Math.abs(wy - rect.y);
+  const dBottom = Math.abs(wy - (rect.y + rect.h));
+  const min = Math.min(dLeft, dRight, dTop, dBottom);
+  if (min === dLeft) return "left";
+  if (min === dRight) return "right";
+  if (min === dTop) return "top";
+  return "bottom";
 }
 
 /** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
@@ -143,6 +165,8 @@ export function CanvasView(): JSX.Element {
     imgResizeStartWorldX: 0,
     imgResizeStartWidth: 0,
     imgDragging: null,
+    imgSlot: "top",
+    imgDropSlot: "top",
     marqueeStartX: null,
     marqueeStartY: null,
     marqueeActive: false,
@@ -168,7 +192,7 @@ export function CanvasView(): JSX.Element {
   // to use — otherwise the fit fires right after a click and the camera
   // "jumps" under the cursor.
   const interactedRef = useRef(false);
-  const ghostRef = useRef<{ imageId: string; x: number; y: number; nodeId: string } | null>(null);
+  const ghostRef = useRef<{ imageId: string; x: number; y: number; nodeId: string; side?: ImageSlot } | null>(null);
   // Marquee preview: ids of the topics inside the drag box, live-updated on
   // every move so the canvas can paint the "will be selected" rings (the
   // box itself is a DOM div; the rings need canvas repaints).
@@ -179,6 +203,9 @@ export function CanvasView(): JSX.Element {
   // React re-render on every dragover).
   const extGhostRef = useRef<{ src: string; revoke: boolean } | null>(null);
   const extGhostElRef = useRef<HTMLImageElement | null>(null);
+  // Side of the target node the external drag is hovering (for the snapped
+  // ghost preview and the drop). null = not over a node.
+  const extDropSideRef = useRef<ImageSlot | null>(null);
   const [extGhostSrc, setExtGhostSrc] = useState<string | null>(null);
 
   const paint = useCallback(() => {
@@ -202,6 +229,7 @@ export function CanvasView(): JSX.Element {
       groupSel: s.groupSel,
       summarySel: s.summarySel,
       imageSel: s.imageSel,
+      imageSlot: s.imageSlot,
       ghostImage: ghostRef.current,
       marqueeSel: marqueeSelRef.current,
     };
@@ -647,14 +675,15 @@ export function CanvasView(): JSX.Element {
     // Image body hit (before the node body hit test): the image inside a
     // node is a selectable target of its own — a click selects it, a drag
     // moves it onto another node. Skipped while picking a relationship
-    // target, like the resize handles.
-    const imgHit = s.relFrom ? null : renderer.hitTestImage(rs, world.x, world.y);
+    // target, like the resize handles. The exact SLOT is remembered so the
+    // move removes the right one and the ring marks the right one.
+    const imgHit = s.relFrom ? null : renderer.hitTestImageSlot(rs, world.x, world.y);
     if (imgHit) {
-      const rect = renderer.imageWorldRect(rs, imgHit);
-      drag.grabOffsetX = rect ? world.x - rect.x : 0;
-      drag.grabOffsetY = rect ? world.y - rect.y : 0;
-      store.selectImage(imgHit);
-      drag.imgDragging = imgHit;
+      drag.grabOffsetX = world.x - imgHit.rect.x;
+      drag.grabOffsetY = world.y - imgHit.rect.y;
+      drag.imgSlot = imgHit.slot;
+      store.selectImage(imgHit.nodeId, imgHit.slot);
+      drag.imgDragging = imgHit.nodeId;
       drag.dragging = null;
       drag.marqueeStartX = null;
       return;
@@ -800,15 +829,25 @@ export function CanvasView(): JSX.Element {
       drag.moved = true;
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const rs = currentRenderState();
       const srcNode = store.doc.node(drag.imgDragging);
-      ghostRef.current = srcNode?.style.image
-        ? { imageId: srcNode.style.image, x: world.x, y: world.y, nodeId: drag.imgDragging }
-        : null;
-      const hit = rendererRef.current!.hitTest(currentRenderState(), world.x, world.y);
+      // The dragged bitmap is the one from the grabbed slot — with side
+      // images a node may hold several, and the ghost must follow the one
+      // being moved.
+      const srcImg = srcNode?.style[slotKey(drag.imgSlot)] ?? null;
+      const hit = rendererRef.current!.hitTest(rs, world.x, world.y);
       if (hit && hit !== drag.imgDragging) {
+        const r = rendererRef.current!.nodeWorldRect(rs, hit);
+        const side = r ? nearestImageSide(r, world.x, world.y) : "top";
+        drag.imgDropSlot = side;
         store.setDrop({ mode: "child", nodeId: hit });
+        // Over a target the ghost SNAPS onto that slot instead of following
+        // the cursor — the exact rect the image will occupy on drop.
+        ghostRef.current = srcImg ? { imageId: srcImg, x: world.x, y: world.y, nodeId: hit, side } : null;
       } else {
+        drag.imgDropSlot = "top";
         store.setDrop({ mode: "none", nodeId: drag.imgDragging });
+        ghostRef.current = srcImg ? { imageId: srcImg, x: world.x, y: world.y, nodeId: drag.imgDragging } : null;
       }
       return;
     }
@@ -909,7 +948,7 @@ export function CanvasView(): JSX.Element {
       if (drag.moved) {
         const drop = store.getSnapshot().drop;
         if (drop && drop.mode !== "none" && drop.nodeId !== drag.imgDragging) {
-          store.assignImageToNode(drag.imgDragging, drop.nodeId);
+          store.assignImageToNode(drag.imgDragging, drop.nodeId, drag.imgDropSlot, drag.imgSlot);
         }
       }
       store.setDrop(null);
@@ -1050,6 +1089,7 @@ export function CanvasView(): JSX.Element {
       // selection. A field present in one copy and absent from the other is a
       // feature that looks present and is not.
       imageSel: s.imageSel,
+      imageSlot: s.imageSlot,
       ghostImage: ghostRef.current,
       marqueeSel: marqueeSelRef.current,
     };
@@ -1063,6 +1103,7 @@ export function CanvasView(): JSX.Element {
     const g = extGhostRef.current;
     if (g?.revoke) URL.revokeObjectURL(g.src);
     extGhostRef.current = null;
+    extDropSideRef.current = null;
     setExtGhostSrc(null);
   }, []);
 
@@ -1154,16 +1195,41 @@ export function CanvasView(): JSX.Element {
           // image under the cursor (direct DOM update — dragover fires at
           // ~10Hz and React re-renders are wasted here).
           ensureExternalGhost(e.dataTransfer);
+          const { x, y } = localPoint(e as unknown as RPointerEvent);
+          const s = store.getSnapshot();
+          const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+          const rs = currentRenderState();
+          const hit = rendererRef.current?.hitTest(rs, world.x, world.y) ?? null;
+          store.setHover(hit);
+          // Over a node the ghost SNAPS onto the slot the cursor is nearest
+          // to — the exact rect the image will occupy on drop. Elsewhere it
+          // keeps following the cursor.
           const el = extGhostElRef.current;
+          const rect = canvasRef.current!.getBoundingClientRect();
+          let side: ImageSlot | null = null;
+          if (hit) {
+            const r = rendererRef.current?.nodeWorldRect(rs, hit);
+            if (r) side = nearestImageSide(r, world.x, world.y);
+          }
+          extDropSideRef.current = side;
           if (el && extGhostRef.current) {
-            const rect = canvasRef.current!.getBoundingClientRect();
+            if (side && hit) {
+              const sr = rendererRef.current?.imageSlotWorldRect(rs, hit, side);
+              if (sr) {
+                const p1 = worldToScreen(s.camera, sizeRef.current.w, sizeRef.current.h, sr.x, sr.y);
+                const p2 = worldToScreen(s.camera, sizeRef.current.w, sizeRef.current.h, sr.x + sr.w, sr.y + sr.h);
+                el.style.left = `${rect.left + p1.x}px`;
+                el.style.top = `${rect.top + p1.y}px`;
+                el.style.width = `${p2.x - p1.x}px`;
+                el.style.height = `${p2.y - p1.y}px`;
+                return;
+              }
+            }
             el.style.left = `${e.clientX - rect.left + 16}px`;
             el.style.top = `${e.clientY - rect.top + 12}px`;
+            el.style.width = "";
+            el.style.height = "";
           }
-          const { x, y } = localPoint(e as unknown as RPointerEvent);
-          const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
-          const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
-          store.setHover(hit);
         }}
         onDragLeave={(e) => {
           if (!dragRef.current?.dragging) store.setHover(null);
@@ -1182,6 +1248,7 @@ export function CanvasView(): JSX.Element {
           const { x, y } = localPoint(e as unknown as RPointerEvent);
           const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
           const target = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+          const side = extDropSideRef.current ?? "top";
           store.setHover(null);
           if (!target) {
             store.toast("Drop the image on a topic");
@@ -1200,7 +1267,7 @@ export function CanvasView(): JSX.Element {
               return;
             }
           }
-          const res = await store.attachImageFile(target, file);
+          const res = await store.attachImageFile(target, file, side);
           if (!res.ok) store.toast(res.reason ?? "Could not import image");
         }}
       />

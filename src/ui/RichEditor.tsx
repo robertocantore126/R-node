@@ -29,7 +29,7 @@ import { useStore } from "../editor/context";
 import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, IMAGE_GAP, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, TEXT_INSET } from "../layout/measure";
+import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, positionedImageSlots, TEXT_INSET } from "../layout/measure";
 import { getAssetStore } from "../persist/assets";
 import { trace } from "../dev/trace";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
@@ -123,16 +123,22 @@ export function RichEditor({
     paddingRight: pad + TEXT_INSET - 2,
   };
 
-  // A node image reserves its rect above the editable (T12-3): without it the
-  // box's text would sit where the image is and the box would jump at the
-  // double click. Geometry mirrors measureTopic/renderer: imgW from
-  // style.imageWidth (capped at MAX_IMAGE_W), imgH by aspect ratio, IMAGE_GAP
-  // below — all in world units (the inner is scaled as a whole).
-  const card = node.style.image ? store.sheet.attachments.find((a) => a.id === node.style.image) : undefined;
-  const hasImage = !!card && card.w > 0;
-  const imgW = hasImage ? node.style.imageWidth ?? Math.min(card!.w, MAX_IMAGE_W) : 0;
-  const imgH = hasImage ? (imgW * card!.h) / card!.w : 0;
-  const boxW = Math.max(1, ((style.width as number) ?? 60) / scale);
+  // The node's images reserve their rects around the editable (T12-3):
+  // without them the box's text would sit where the image is and the box
+  // would jump at the double click. Geometry comes from positionedImageSlots
+  // (I9) — the same call the canvas and the layout use — so the overlay
+  // cannot disagree with either about where a slot sits. All in world units
+  // (the inner is scaled as a whole).
+  const pos = positionedImageSlots(
+    { x: 0, y: 0, w: Math.max(1, ((style.width as number) ?? 60) / scale), h: Math.max(1, ((style.height as number) ?? 60) / scale) },
+    node,
+    imageResolver(store.sheet)
+  );
+  const hasImage = pos.items.length > 0;
+  const topH = pos.slots.top?.h ?? 0;
+  const botH = pos.slots.bottom?.h ?? 0;
+  const leftW = pos.slots.left?.w ?? 0;
+  const rightW = pos.slots.right?.w ?? 0;
 
   return (
     <div className="topic-rich-editor" style={{ left: style.left, top: style.top }}>
@@ -141,7 +147,9 @@ export function RichEditor({
             with the zoom (unreadable at 40%, huge at 300%). */}
         <Toolbar />
         <div className="topic-rich-inner" style={inner}>
-          {hasImage && <NodeImageBlock id={node.style.image!} imgW={imgW} imgH={imgH} left={(boxW - imgW) / 2} top={pad} />}
+          {pos.items.map((it) => (
+            <NodeImageBlock key={it.slot} id={it.id} imgW={it.size.w} imgH={it.size.h} left={it.x} top={it.y} />
+          ))}
           <RichTextPlugin
             contentEditable={
               <ContentEditable
@@ -150,13 +158,14 @@ export function RichEditor({
                   hasImage
                     ? {
                         ...editablePad,
-                        // The text lives below the image, in the remaining
-                        // region — same placement the canvas gives it.
+                        // The text lives in the middle column: below the top
+                        // image, above the bottom one, between the side ones
+                        // — same placement the canvas gives it.
                         position: "absolute",
-                        top: imgH + IMAGE_GAP,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
+                        top: topH + IMAGE_GAP,
+                        left: leftW + IMAGE_GAP,
+                        right: rightW + IMAGE_GAP,
+                        bottom: botH + IMAGE_GAP,
                       }
                     : editablePad
                 }

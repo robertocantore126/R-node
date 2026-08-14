@@ -10,6 +10,7 @@
  * The three levels arrive already generated — producing them needs a canvas
  * and is the job of T13. This module only preserves and serves them.
  */
+import { nodeImageIds } from "../core/ops";
 import type { Sheet } from "../core/types";
 
 /** "original" = intatto · "large" = 1024px · "small" = 256px, lato lungo */
@@ -425,7 +426,7 @@ export function getAssetStore(): AssetStore {
 export function referencedAssetIds(sheet: Sheet): Set<string> {
   const referenced = new Set<string>();
   for (const node of Object.values(sheet.nodes)) {
-    if (node.style.image) referenced.add(node.style.image);
+    for (const id of nodeImageIds(node)) referenced.add(id);
   }
   return referenced;
 }

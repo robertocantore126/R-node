@@ -21,6 +21,7 @@
  * Written to `.trace/export-latest.json` through the same dev-server sink as
  * the session tracer, so whoever is investigating reads it instead of asking.
  */
+import { nodeImageIds } from "../core/ops";
 import type { Sheet } from "../core/types";
 
 /** Style properties the RENDERER honours. An exporter that ignores one of
@@ -92,7 +93,8 @@ export function buildReport(args: {
     relationships: sheet.relationships.length,
     boundaries: sheet.boundaries.length,
     summaries: sheet.summaries.length,
-    images: new Set(Object.values(sheet.nodes).map((n) => n.style.image).filter(Boolean)).size,
+    // Distinct attachment ids across ALL four image slots of every node.
+    images: new Set(Object.values(sheet.nodes).flatMap((n) => nodeImageIds(n))).size,
   };
   const coverage: ExportReport["coverage"] = {};
   for (const k of new Set([...Object.keys(present), ...Object.keys(emitted)])) {

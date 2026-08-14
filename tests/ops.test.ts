@@ -391,3 +391,45 @@ describe("schema", () => {
     expect(restored.doc.schemaVersion).toBe("0.1.0");
   });
 });
+
+describe("setNodeImage positions (multi-slot)", () => {
+  it("writes and inverts the op on the requested slot", () => {
+    const { model, root } = freshDoc();
+    const history = new History();
+    exec(model, history, [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: root.id, imageId: "l1", prevImageId: null, position: "left" })]);
+    expect(model.node(root.id)!.style.imageLeft).toBe("l1");
+    expect(model.node(root.id)!.style.image).toBeUndefined();
+    undo(model, history);
+    expect(model.node(root.id)!.style.imageLeft).toBeUndefined();
+    redo(model, history);
+    expect(model.node(root.id)!.style.imageLeft).toBe("l1");
+  });
+
+  it("defaults to the top slot for ops written before positions existed", () => {
+    const { model, root } = freshDoc();
+    const history = new History();
+    exec(model, history, [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: root.id, imageId: "t1", prevImageId: null })]);
+    expect(model.node(root.id)!.style.image).toBe("t1");
+    expect(model.node(root.id)!.style.imageLeft).toBeUndefined();
+  });
+
+  it("all four slots can hold independent ids", () => {
+    const { model, root } = freshDoc();
+    const history = new History();
+    for (const [slot, id] of [
+      ["top", "t"],
+      ["bottom", "b"],
+      ["left", "l"],
+      ["right", "r"],
+    ] as const) {
+      exec(model, history, [
+        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: root.id, imageId: id, prevImageId: null, position: slot }),
+      ]);
+    }
+    const s = model.node(root.id)!.style;
+    expect(s.image).toBe("t");
+    expect(s.imageBottom).toBe("b");
+    expect(s.imageLeft).toBe("l");
+    expect(s.imageRight).toBe("r");
+  });
+});

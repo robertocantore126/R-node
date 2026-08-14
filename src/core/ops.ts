@@ -10,12 +10,27 @@
  * applyOp mutates the sheet in place. inverseOf returns the operation(s)
  * that exactly reverse it, which is what the History stack uses for undo.
  */
-import type { AttachmentInfo, Group, MindNode, Position, Relationship, Sheet, StructureConfig, Style, Summary, TaskInfo, TextRun } from "./types";
+import type { AttachmentInfo, Group, ImageSlot, MindNode, Position, Relationship, Sheet, StructureConfig, Style, Summary, TaskInfo, TextRun } from "./types";
 import { nowIso } from "./doc";
 
 // ---------------------------------------------------------------------------
 // Op definitions
 // ---------------------------------------------------------------------------
+
+/** Style field that holds the attachment id for a given image slot. */
+export function slotKey(slot: ImageSlot): "image" | "imageBottom" | "imageLeft" | "imageRight" {
+  return slot === "top" ? "image" : slot === "bottom" ? "imageBottom" : slot === "left" ? "imageLeft" : "imageRight";
+}
+
+/** All attachment ids currently referenced by a node's image slots. */
+export function nodeImageIds(n: MindNode): string[] {
+  const out: string[] = [];
+  for (const slot of ["top", "bottom", "left", "right"] as const) {
+    const id = n.style[slotKey(slot)];
+    if (id) out.push(id);
+  }
+  return out;
+}
 
 export type Op =
   | { opId: string; actorId: string; ts: string; type: "createNode"; id: string; nodeType: MindNode["type"]; parentId: string | null; index: number; title: string; titleRuns?: TextRun[]; style?: Style; task?: TaskInfo | null; position?: { x: number; y: number; manual: boolean } }
@@ -23,7 +38,7 @@ export type Op =
   | { opId: string; actorId: string; ts: string; type: "deleteNode"; id: string; parentId: string | null; index: number; subtree: MindNode[]; removedRelationships: Relationship[] }
   | { opId: string; actorId: string; ts: string; type: "setTitle"; id: string; title: string; prev: string; titleRuns?: TextRun[]; prevRuns?: TextRun[] }
   | { opId: string; actorId: string; ts: string; type: "setStyle"; id: string; style: Style; prev: Style }
-  | { opId: string; actorId: string; ts: string; type: "setNodeImage"; nodeId: string; imageId: string | null; prevImageId: string | null }
+  | { opId: string; actorId: string; ts: string; type: "setNodeImage"; nodeId: string; imageId: string | null; prevImageId: string | null; position?: ImageSlot }
   | { opId: string; actorId: string; ts: string; type: "setPosition"; id: string; x: number; y: number; manual: boolean; offsetX?: number; offsetY?: number; prev: Position }
   | { opId: string; actorId: string; ts: string; type: "setCollapsed"; id: string; collapsed: boolean; prev: boolean }
   | { opId: string; actorId: string; ts: string; type: "moveNode"; id: string; fromParentId: string | null; fromIndex: number; toParentId: string | null; toIndex: number }
@@ -135,10 +150,14 @@ export function applyOp(sheet: Sheet, op: Op): void {
     case "setNodeImage": {
       const node = nodes[op.nodeId];
       if (!node) break;
-      // The op carries ONLY the id — never image bytes (ADR-001 §12).
+      // The op carries ONLY the id — never image bytes (ADR-001 §12). The
+      // position defaults to "top" so ops written before the side slots
+      // existed (and saved documents containing them) still apply.
+      const slot = op.position ?? "top";
+      const key = slotKey(slot);
       const style = { ...node.style };
-      if (op.imageId) style.image = op.imageId;
-      else delete style.image;
+      if (op.imageId) style[key] = op.imageId;
+      else delete style[key];
       node.style = style;
       break;
     }
@@ -250,7 +269,7 @@ export function inverseOf(op: Op, meta?: OpMeta): Op[] {
     case "setStyle":
       return [makeOp<Op & { type: "setStyle" }>("setStyle", { id: op.id, style: op.prev, prev: op.style }, m)];
     case "setNodeImage":
-      return [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: op.nodeId, imageId: op.prevImageId, prevImageId: op.imageId }, m)];
+      return [makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: op.nodeId, imageId: op.prevImageId, prevImageId: op.imageId, position: op.position }, m)];
     case "setPosition":
       return [makeOp<Op & { type: "setPosition" }>("setPosition", {
         id: op.id,

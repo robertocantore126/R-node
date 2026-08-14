@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sheetToSvg } from "../src/export/svg";
-import { bezierEnterRect, bezierPoint, HEURISTIC_MEASURER, measureNode, type Bezier3 } from "../src/layout/measure";
+import { bezierEnterRect, bezierPoint, HEURISTIC_MEASURER, imageResolver, measureNode, positionedImageSlots, type Bezier3 } from "../src/layout/measure";
 import { applyLayout } from "../src/layout/mindmap";
 import { DocumentModel } from "../src/core/doc";
 import type { MindNode, Sheet, TextRun } from "../src/core/types";
@@ -141,6 +141,38 @@ describe("SVG export", () => {
     });
     expect(calls).toBe(1);
     expect(out.images).toBe(5);
+  });
+
+  it("emits every image slot, placed by the shared slot geometry (I9)", async () => {
+    const { sheet, add } = makeSheet();
+    sheet.attachments.push({ id: "side", mime: "image/png", w: 200, h: 100, bytes: 10 });
+    const n = add(sheet.rootNodeId, "box", [{ text: "box" }], {
+      imageBottom: "side",
+      imageLeft: "side",
+      imageRight: "side",
+    });
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+
+    const out = await sheetToSvg(sheet, {
+      ...OPTS,
+      imageDataUri: async () => "data:image/png;base64,AAAA",
+    });
+
+    // One distinct attachment, three slots drawn.
+    expect(out.images).toBe(3);
+    expect(out.svg.match(/<image /g)).toHaveLength(3);
+    // Coverage counts distinct assets as present and drawn slots as emitted.
+    expect(out.report.coverage.images).toEqual({ present: 1, emitted: 3 });
+
+    // Each <image> sits exactly where positionedImageSlots puts the slot —
+    // the same call the canvas renderer uses, so the two exports can't
+    // diverge.
+    const m = measureNode(n, HEURISTIC_MEASURER, imageResolver(sheet));
+    const pos = positionedImageSlots({ x: n.position.x, y: n.position.y, w: m.w, h: m.h }, n, imageResolver(sheet));
+    for (const it of pos.items) {
+      const num = (v: number): string => String(Math.round(v * 1000) / 1000);
+      expect(out.svg).toContain(`<image x="${num(it.x)}" y="${num(it.y)}" width="${num(it.size.w)}" height="${num(it.size.h)}"`);
+    }
   });
 
   it("emits relationships with an arrowhead that stops at the target's border, not its centre", async () => {

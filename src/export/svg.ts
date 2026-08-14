@@ -23,6 +23,7 @@
  */
 import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
+import { positionedImageSlots } from "../layout/measure";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import {
   ARROW_HALF_ANGLE,
@@ -30,7 +31,6 @@ import {
   FONT_STACK,
   IMAGE_GAP,
   LINE_HEIGHT_FACTOR,
-  MAX_IMAGE_W,
   TEXT_INSET,
   bezierEnterRect,
   bezierExitRect,
@@ -231,22 +231,30 @@ function relationship(rel: Relationship, byId: Map<string, Placed>, color: strin
  * always left aligned. Deviating anywhere here reintroduces exactly the
  * divergence the parity harness was built to close.
  */
-function title(p: Placed, color: string, imgH: number, measurer: TextMeasurer): string {
+function title(
+  p: Placed,
+  color: string,
+  pos: ReturnType<typeof positionedImageSlots>,
+  measurer: TextMeasurer,
+): string {
   const n = p.node;
   const size = n.style.fontSize ?? 14;
   const pad = n.style.padding ?? 10;
-  const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
+  // Same wrap width as the canvas drawText: side images shrink it.
+  const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET - pos.sidePadW);
   const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, measurer, n.style);
   if (lines.length === 0) return "";
 
   let totalH = 0;
   for (const line of lines) totalH += (line.height ?? size * LINE_HEIGHT_FACTOR) + (line.gapPx ?? 0);
 
-  const startY =
-    imgH > 0
-      ? p.y + pad + imgH + IMAGE_GAP + Math.max(0, (p.h - pad * 2 - imgH - IMAGE_GAP - totalH) / 2)
-      : p.y + p.h / 2 - totalH / 2;
-  const startX = p.x + pad;
+  // Same placement as the canvas drawText: the middle column, between the
+  // top/bottom images and the side ones.
+  const topBlock = (pos.slots.top?.h ?? 0) + (pos.slots.top ? IMAGE_GAP : 0);
+  const botBlock = pos.slots.bottom ? IMAGE_GAP + pos.slots.bottom.h : 0;
+  const midH = topBlock + totalH + botBlock;
+  const startY = p.y + pad + topBlock + Math.max(0, (p.h - pad * 2 - midH) / 2);
+  const startX = p.x + pad + (pos.slots.left ? pos.slots.left.w + IMAGE_GAP : 0);
 
   const baseWeight = n.style.fontWeight ?? 400;
   const nodeItalic = n.style.italic ?? false;
@@ -400,7 +408,9 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   let imageBytes = 0;
   if (opts.imageDataUri) {
     const ids = new Set<string>();
-    for (const p of placed) if (p.node.style.image) ids.add(p.node.style.image);
+    for (const p of placed) {
+      for (const it of positionedImageSlots(p, p.node, resolveImage).items) ids.add(it.id);
+    }
     for (const id of ids) {
       const uri = await opts.imageDataUri(id);
       uris.set(id, uri);
@@ -454,27 +464,20 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     const shape = shapeOf(p, fill);
     if (shape) parts.push(shape);
 
-    let imgH = 0;
-    if (n.style.image) {
-      const att = resolveImage(n.style.image);
-      const uri = uris.get(n.style.image) ?? null;
-      if (att && att.w > 0) {
-        const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
-        imgH = (imgW * att.h) / att.w;
-        const ix = p.x + (p.w - imgW) / 2;
-        const iy = p.y + (n.style.padding ?? 10);
-        if (uri) {
-          parts.push(`<image x="${n3(ix)}" y="${n3(iy)}" width="${n3(imgW)}" height="${n3(imgH)}" href="${uri}" preserveAspectRatio="none"/>`);
-          images++;
-        } else {
-          // The box still occupies its space: dropping it would reflow nothing
-          // (the layout already accounted for it) but would leave a silent hole.
-          parts.push(`<rect x="${n3(ix)}" y="${n3(iy)}" width="${n3(imgW)}" height="${n3(imgH)}" fill="none" stroke="${esc(text)}" stroke-opacity="0.25" stroke-dasharray="4 3"/>`);
-          imagesMissing++;
-        }
+    const pos = positionedImageSlots(p, n, resolveImage);
+    for (const it of pos.items) {
+      const uri = uris.get(it.id) ?? null;
+      if (uri) {
+        parts.push(`<image x="${n3(it.x)}" y="${n3(it.y)}" width="${n3(it.size.w)}" height="${n3(it.size.h)}" href="${uri}" preserveAspectRatio="none"/>`);
+        images++;
+      } else {
+        // The box still occupies its space: dropping it would reflow nothing
+        // (the layout already accounted for it) but would leave a silent hole.
+        parts.push(`<rect x="${n3(it.x)}" y="${n3(it.y)}" width="${n3(it.size.w)}" height="${n3(it.size.h)}" fill="none" stroke="${esc(text)}" stroke-opacity="0.25" stroke-dasharray="4 3"/>`);
+        imagesMissing++;
       }
     }
-    parts.push(title(p, text, imgH, opts.measurer));
+    parts.push(title(p, text, pos, opts.measurer));
     parts.push(`</g>`);
   }
   parts.push("</svg>");

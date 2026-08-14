@@ -15,7 +15,7 @@
  *  - the renderer injects a canvas-backed measurer (real `measureText`);
  *  - pure layout code and tests default to a deterministic heuristic.
  */
-import type { MindNode, Sheet, Style, TextRun } from "../core/types";
+import type { ImageSlot, MindNode, Sheet, Style, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
 
 // ---------------------------------------------------------------------------
@@ -508,6 +508,81 @@ export function imageResolver(sheet: Sheet): (id: string) => { w: number; h: num
   return (id: string) => byId.get(id) ?? null;
 }
 
+export interface SlotSize {
+  w: number;
+  h: number;
+}
+
+export type SlotSizes = {
+  top: SlotSize | null;
+  bottom: SlotSize | null;
+  left: SlotSize | null;
+  right: SlotSize | null;
+};
+
+/**
+ * Per-slot image display sizes (I9). imgW comes from the shared
+ * style.imageWidth, or the original's width capped at MAX_IMAGE_W; imgH
+ * keeps the aspect ratio. The renderer, the editing overlay and the SVG
+ * export all call this, so they cannot disagree with the layout on where
+ * an image sits inside a box.
+ */
+export function slotSizes(
+  n: MindNode,
+  resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
+): SlotSizes {
+  const size = (id: string | undefined): SlotSize | null => {
+    if (!id || !resolveImage) return null;
+    const att = resolveImage(id);
+    if (!att || att.w <= 0) return null;
+    const w = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    return { w, h: (w * att.h) / att.w };
+  };
+  return {
+    top: size(n.style.image),
+    bottom: size(n.style.imageBottom),
+    left: size(n.style.imageLeft),
+    right: size(n.style.imageRight),
+  };
+}
+
+export interface PositionedSlot {
+  slot: ImageSlot;
+  /** The attachment id sitting in this slot (for decoding the bitmap). */
+  id: string;
+  size: SlotSize;
+  x: number;
+  y: number;
+}
+
+/**
+ * The four image slots pinned to a box (I9): the side images sit just
+ * inside the padding, the top/bottom images are centred in the middle
+ * column that remains between them. Single source of truth for the layout
+ * measure, the canvas renderer, the editing overlay and the SVG export.
+ */
+export function positionedImageSlots(
+  box: { x: number; y: number; w: number; h: number },
+  n: MindNode,
+  resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
+): { slots: SlotSizes; sidePadW: number; midL: number; midW: number; items: PositionedSlot[] } {
+  const slots = slotSizes(n, resolveImage);
+  const leftW = slots.left?.w ?? 0;
+  const rightW = slots.right?.w ?? 0;
+  const sidePadW = (leftW ? leftW + IMAGE_GAP : 0) + (rightW ? rightW + IMAGE_GAP : 0);
+  const pad = n.style.padding ?? 10;
+  const midL = box.x + pad + (leftW ? leftW + IMAGE_GAP : 0);
+  const midR = box.x + box.w - pad - (rightW ? rightW + IMAGE_GAP : 0);
+  const midW = Math.max(0, midR - midL);
+  const items: PositionedSlot[] = [];
+  if (slots.top) items.push({ slot: "top", id: n.style.image!, size: slots.top, x: midL + (midW - slots.top.w) / 2, y: box.y + pad });
+  if (slots.bottom)
+    items.push({ slot: "bottom", id: n.style.imageBottom!, size: slots.bottom, x: midL + (midW - slots.bottom.w) / 2, y: box.y + box.h - pad - slots.bottom.h });
+  if (slots.left) items.push({ slot: "left", id: n.style.imageLeft!, size: slots.left, x: box.x + pad, y: box.y + (box.h - slots.left.h) / 2 });
+  if (slots.right) items.push({ slot: "right", id: n.style.imageRight!, size: slots.right, x: box.x + box.w - pad - slots.right.w, y: box.y + (box.h - slots.right.h) / 2 });
+  return { slots, sidePadW, midL, midW, items };
+}
+
 /**
  * Observable model:
  *   width(topic)  = width(text, wrapped) + paddingLeft + paddingRight + shapeAllowance
@@ -525,15 +600,18 @@ export function imageResolver(sheet: Sheet): (id: string) => { w: number; h: num
  * text looks, not how much room it needs, and including them would throw the
  * entry away for nothing.
  */
-function extentKey(n: MindNode, att: { w: number; h: number } | null): string {
+function extentKey(n: MindNode, slots: SlotSizes): string {
   const s = n.style;
   let runs = "";
   for (const r of nodeRuns(n.title, n.titleRuns)) {
     runs += `${r.text}${r.bold ? 1 : 0}${r.italic ? 1 : 0}${r.fontSize ?? ""}${r.listIndent ?? ""}${r.paraGap ? 1 : 0}`;
   }
-  // The image contributes only through its RESOLVED size: swapping in another
-  // picture with the same dimensions leaves the box identical.
-  return `${runs}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${att ? `${att.w}x${att.h}` : ""}`;
+  // The images contribute only through their RESOLVED sizes: swapping in
+  // another picture with the same dimensions leaves the box identical. All
+  // four slots take part — a node with a left image measures differently
+  // from one whose image moved to the top.
+  const sz = (p: SlotSize | null): string => (p ? `${p.w}x${p.h}` : "");
+  return `${runs}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}`;
 }
 
 /**
@@ -557,8 +635,8 @@ export function measureTopic(
   measurer: TextMeasurer = HEURISTIC_MEASURER,
   resolveImage?: (id: string) => { w: number; h: number } | null,
 ): Extent {
-  const att = n.style.image && resolveImage ? resolveImage(n.style.image) : null;
-  const key = extentKey(n, att);
+  const slots = slotSizes(n, resolveImage);
+  const key = extentKey(n, slots);
   let cache = extentCaches.get(measurer);
   if (!cache) {
     cache = new Map();
@@ -566,7 +644,7 @@ export function measureTopic(
   }
   const hit = cache.get(key);
   if (hit) return hit;
-  const out = measureTopicUncached(n, measurer, resolveImage);
+  const out = measureTopicUncached(n, measurer, resolveImage, slots);
   if (cache.size >= EXTENT_CACHE_MAX) {
     const oldest = cache.keys().next().value;
     if (oldest !== undefined) cache.delete(oldest);
@@ -579,42 +657,61 @@ function measureTopicUncached(
   n: MindNode,
   measurer: TextMeasurer = HEURISTIC_MEASURER,
   resolveImage?: (id: string) => { w: number; h: number } | null,
+  slots: SlotSizes = slotSizes(n, resolveImage),
 ): Extent {
   const style = n.style;
   if (style.width && style.height) return { w: style.width, h: style.height };
 
   const fontSize = style.fontSize ?? 14;
   const pad = style.padding ?? 10;
+  const topH = slots.top?.h ?? 0;
+  const botH = slots.bottom?.h ?? 0;
+  const leftW = slots.left?.w ?? 0;
+  const rightW = slots.right?.w ?? 0;
+  const leftH = slots.left?.h ?? 0;
+  const rightH = slots.right?.h ?? 0;
+  // Side images eat into the width available to the text; the gap counts
+  // only when an image is actually present on that side.
+  const sidePadW = (leftW ? leftW + IMAGE_GAP : 0) + (rightW ? rightW + IMAGE_GAP : 0);
   // An explicit width fixes the box and re-wraps the text at it (Xmind-style
   // resize); the height always follows the wrapped content.
   const maxW = style.width ? Math.max(MIN_TOPIC_W, style.width) : MAX_TOPIC_W;
-  const textW = Math.max(24, maxW - pad * 2 - TEXT_INSET);
+  const textW = Math.max(24, maxW - pad * 2 - TEXT_INSET - sidePadW);
   const runs = nodeRuns(n.title, n.titleRuns);
   const lines = wrapRunLines(runs, textW, measurer, style);
   // the list indent is part of the line's extent, not free space
   const maxLineW = lines.reduce((acc, l) => Math.max(acc, (l.indent ?? 0) + l.width), 0);
 
-  // Image above the text: width from style.imageWidth (or the original's,
-  // capped at MAX_IMAGE_W), height keeps the aspect ratio. Unresolvable ids
-  // (no card in sheet.attachments) measure as if the node had no image.
-  let imgW = 0;
-  let imgH = 0;
-  if (style.image && resolveImage) {
-    const att = resolveImage(style.image);
-    if (att && att.w > 0) {
-      imgW = style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
-      imgH = (imgW * att.h) / att.w;
-    }
-  }
   // An empty title still yields one strut line; "has text" means real content.
   const hasText = lines.some((l) => l.segments.length > 0);
   const textH = lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapPx ?? 0), 0);
 
-  let w = style.width ? Math.max(MIN_TOPIC_W, style.width) : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET));
-  if (imgW > 0) w = Math.max(w, imgW + pad * 2);
-  // With an image the box is imgH + (gap + text only if real text) + padding;
-  // without one, the previous formula is untouched (the strut line included).
-  let h = style.height ?? Math.max(28, imgH > 0 ? imgH + (hasText ? IMAGE_GAP + textH : 0) + pad * 2 + 4 : textH + pad * 2 + 4);
+  // Middle column: top image, text, bottom image. A gap separates an image
+  // from the text (or from the other image) but never appears when nothing
+  // is on that side — text-only nodes keep their exact old height.
+  let midH = topH + botH;
+  if (topH > 0 && (hasText || botH > 0)) midH += IMAGE_GAP; // top image → next block
+  if (hasText && botH > 0) midH += IMAGE_GAP; // text → bottom image
+  if (hasText) midH += textH;
+  // Side images sit beside the middle column; the box fits the taller one.
+  const sideH = Math.max(leftH, rightH);
+  const contentH = Math.max(midH, sideH);
+
+  // The width clamp caps the TEXT column only — side images legitimately
+  // push the box wider than MAX_TOPIC_W, exactly like the top image already
+  // could. With no side images sidePadW is 0 and this is the old formula.
+  let w = style.width
+    ? Math.max(MIN_TOPIC_W, style.width)
+    : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET)) + sidePadW;
+  // The middle column must fit the top/bottom images (the side columns are
+  // already part of sidePadW).
+  const maxTopBotW = Math.max(slots.top?.w ?? 0, slots.bottom?.w ?? 0);
+  if (maxTopBotW > 0) w = Math.max(w, maxTopBotW + pad * 2 + sidePadW);
+  // ... and it can never collapse below the minimum text width.
+  w = Math.max(w, sidePadW + (24 + TEXT_INSET) + pad * 2);
+  // With an image the box is content + padding; without one, the previous
+  // formula is untouched (the strut line included).
+  let h = style.height ?? Math.max(28, contentH > 0 ? contentH + pad * 2 + 4 : textH + pad * 2 + 4);
 
   const shape = style.shape ?? "rounded";
   if (shape === "circle") {

@@ -59,6 +59,9 @@ export type TopicShape =
 // Style
 // ---------------------------------------------------------------------------
 
+/** Which of the four edges of a topic box an image is attached to. */
+export type ImageSlot = "top" | "bottom" | "left" | "right";
+
 export interface Style {
   fill?: string;
   stroke?: string;
@@ -76,8 +79,15 @@ export interface Style {
   opacity?: number;
   shadow?: boolean;
   icon?: string;
-  image?: string; // attachment id
-  /** Display width of the image in world units; height follows the aspect ratio. */
+  /** Attachment id of the TOP image (kept as `image` for backwards
+   *  compatibility with every saved document, op and export that predates
+   *  the side slots). The other three slots live in imageBottom/Left/Right
+   *  and all four share `imageWidth` as their display size. */
+  image?: string;
+  imageBottom?: string;
+  imageLeft?: string;
+  imageRight?: string;
+  /** Display width of the image(s) in world units; height follows the aspect ratio. */
   imageWidth?: number;
   link?: string;
   padding?: number;

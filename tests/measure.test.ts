@@ -310,3 +310,42 @@ describe("relationship curve geometry (bezier truncation)", () => {
     expect(ARROW_HALF_ANGLE).toBeLessThan(Math.PI / 2);
   });
 });
+
+describe("topic extent with side images (multi-slot)", () => {
+  const resolve = () => ({ w: 200, h: 100 });
+  const plain = () => measureNode(node({ title: "Hi" }), HEURISTIC_MEASURER, resolve);
+
+  it("a left image widens the box by imgW + IMAGE_GAP, beside the text, and the box height fits max(text, image)", () => {
+    const e = measureNode(node({ title: "Hi", style: { imageLeft: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(e.w - plain().w).toBe(200 + IMAGE_GAP);
+    // Side column, not a stack: the height is max(textH, imgH), less than
+    // the same image above the text would need.
+    expect(e.h).toBeCloseTo(Math.max(14 * 1.25, 100) + 10 * 2 + 4, 5);
+  });
+
+  it("a right image mirrors the left one", () => {
+    const e = measureNode(node({ title: "Hi", style: { imageRight: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(e.w - plain().w).toBe(200 + IMAGE_GAP);
+  });
+
+  it("left + right images reserve both side columns", () => {
+    const e = measureNode(node({ title: "Hi", style: { imageLeft: "img1", imageRight: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(e.w - plain().w).toBe((200 + IMAGE_GAP) * 2);
+  });
+
+  it("a bottom image adds its height + IMAGE_GAP below the text", () => {
+    const e = measureNode(node({ title: "Hi", style: { imageBottom: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(e.h - plain().h).toBeCloseTo(100 + IMAGE_GAP, 5);
+  });
+
+  it("top + bottom images stack in the middle column, each separated by IMAGE_GAP", () => {
+    const e = measureNode(node({ title: "Hi", style: { image: "img1", imageBottom: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(e.h).toBeCloseTo(100 + IMAGE_GAP + 14 * 1.25 + IMAGE_GAP + 100 + 10 * 2 + 4, 5);
+  });
+
+  it("the extent cache distinguishes the slots: same id, different slot, different box", () => {
+    const top = measureNode(node({ title: "Hi", style: { image: "img1" } }), HEURISTIC_MEASURER, resolve);
+    const left = measureNode(node({ title: "Hi", style: { imageLeft: "img1" } }), HEURISTIC_MEASURER, resolve);
+    expect(top.w).not.toBe(left.w);
+  });
+});

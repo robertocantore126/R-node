@@ -6,9 +6,10 @@
  * HTML overlay (allowed by the architecture) — the renderer skips the title
  * of the node being edited so the overlay doesn't double-paint.
  */
-import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
+import type { Group, ImageSlot, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
+import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -34,12 +35,15 @@ export interface RenderState {
   summarySel?: string | null;
   /** Node whose image is selected (mutually exclusive with node selection). */
   imageSel?: string | null;
+  /** Which slot of `imageSel` was clicked (defaults to "top"). */
+  imageSlot?: ImageSlot | null;
   /**
    * Ghost preview of an image being dragged over the map (internal
    * reassignment): the image bitmap follows the cursor, semi-transparent,
-   * until the drop lands. x/y are world coords of the cursor.
+   * until the drop lands. x/y are world coords of the cursor; `side` snaps
+   * the ghost onto that slot of the target node instead of the cursor.
    */
-  ghostImage?: { imageId: string; x: number; y: number; nodeId: string } | null;
+  ghostImage?: { imageId: string; x: number; y: number; nodeId: string; side?: ImageSlot } | null;
   /**
    * Marquee drag preview: ids of the topics inside the drag box — they wear
    * the selection ring BEFORE the release commits them (the box itself is a
@@ -249,9 +253,9 @@ export class Renderer {
     this.textMisses = 0;
 
     const placed = this.placedNodes(state);
-    this.visibleImageNodes = new Set(
-      placed.filter((p) => p.visible && !!p.node.style.image).map((p) => p.node.id)
-    );
+    // A node counts as "has an image" when ANY of its four slots is set — a
+    // node with only side images must keep its decodes like the top one does.
+    this.visibleImageNodes = new Set(placed.filter((p) => p.visible && nodeImageIds(p.node).length > 0).map((p) => p.node.id));
     const byId = new Map(placed.map((p) => [p.node.id, p]));
 
     // Viewport in world units, with the same 40px margin placedNodes uses.
@@ -323,7 +327,7 @@ export class Renderer {
 
     // 6) ghost preview of an image being dragged (internal reassignment) —
     // on top of everything, centered on the cursor, before the drop lands.
-    if (state.ghostImage) this.drawGhostImage(theme, state.ghostImage);
+    if (state.ghostImage) this.drawGhostImage(theme, state, state.ghostImage);
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
@@ -345,7 +349,7 @@ export class Renderer {
         textHits: this.textHits,
         textMisses: this.textMisses,
         imgVisible: placed.filter(
-          (p) => p.visible && !!p.node.style.image && !!this.resolveImage?.(p.node.style.image)
+          (p) => p.visible && nodeImageIds(p.node).some((id) => !!this.resolveImage?.(id))
         ).length,
         imgCached: this.imageCache.size,
         imgBytes: this.imageBytes,
@@ -608,12 +612,12 @@ export class Renderer {
     // resize must stay reachable without reselecting the node).
     if (selected || state.imageSel === n.id) {
       const hs = 9;
-      // imageRectForPlaced, NOT imageWorldRect: the placed node is already in
+      // selectedImageRect, NOT imageWorldRect: the placed node is already in
       // hand. imageWorldRect re-places and re-measures the WHOLE sheet to find
       // one node — 8.7ms on an 8,000-node map — and this runs per selected
       // node per frame, so selecting fifty topics cost 434ms a frame. That is
       // the "everything crawls once I select a lot" report.
-      const ir = this.imageRectForPlaced(p);
+      const ir = this.selectedImageRect(state, p);
       if (ir) {
         const hx = ir.x + ir.w - hs / 2;
         const hy = ir.y + ir.h - hs / 2;
@@ -637,9 +641,9 @@ export class Renderer {
       ctx.strokeRect(p.x - pad, p.y - pad, p.w + pad * 2, p.h + pad * 2);
     }
     // Image selection ring: the image is selected (not the node) — outline
-    // around the image so Backspace/Delete knows what it will remove.
+    // around the SELECTED slot so Backspace/Delete knows what it will remove.
     if (state.imageSel === n.id) {
-      const ir = this.imageRectForPlaced(p); // same reason as above
+      const ir = this.selectedImageRect(state, p); // same reason as above
       if (ir) {
         const pad = 3;
         ctx.strokeStyle = theme.selection;
@@ -667,12 +671,11 @@ export class Renderer {
       ctx.fill();
     }
 
-    // image between shape and text (ADR-001 §12); skipped while editing —
+    // images between shape and text (ADR-001 §12); skipped while editing —
     // the HTML overlay owns it, no double-render (same rule as the text).
-    const imgH = this.imageH(p);
     if (!editing) {
       this.drawImage(p);
-      this.drawText(theme, p, textColor, imgH);
+      this.drawText(theme, p, textColor);
     }
 
     // collapsed badge (mirror to the left when the branch is left-side)
@@ -761,16 +764,6 @@ export class Renderer {
     ctx.closePath();
   }
 
-  /** Height of the node's image in world units (0 = none), matching measureTopic. */
-  private imageH(p: Placed): number {
-    const n = p.node;
-    if (!n.style.image || !this.resolveImage) return 0;
-    const att = this.resolveImage(n.style.image);
-    if (!att || att.w <= 0) return 0;
-    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
-    return (imgW * att.h) / att.w;
-  }
-
   /**
    * What an empty topic shows instead of nothing.
    *
@@ -803,7 +796,7 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawText(_theme: RenderTheme, p: Placed, color: string, imgH = 0): void {
+  private drawText(_theme: RenderTheme, p: Placed, color: string): void {
     const n = p.node;
     // The caller already skips this node entirely while it is being edited,
     // so an empty title here means an empty topic nobody is typing into.
@@ -812,7 +805,11 @@ export class Renderer {
       return;
     }
     const pad = n.style.padding ?? 10;
-    const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET);
+    // Side images reserve their columns; the wrap width shrinks by the same
+    // amount measureTopic uses, so the bitmap (keyed on this width) is
+    // invalidated exactly when a side image appears or disappears.
+    const slots = positionedImageSlots(p, n, this.resolveImage);
+    const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET - slots.sidePadW);
     // Resolution bucket: re-render the bitmap only when the zoom crosses a
     // power-of-two boundary; between boundaries pan/zoom just blits.
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
@@ -835,28 +832,32 @@ export class Renderer {
       this.evictTextToBudget();
     }
     const totalH = entry.h;
-    // With an image above, the text occupies the space below it and centers
-    // inside that area; otherwise it centers in the whole box (as before).
-    const startY =
-      imgH > 0
-        ? p.y + pad + imgH + IMAGE_GAP + Math.max(0, (p.h - pad * 2 - imgH - IMAGE_GAP - totalH) / 2)
-        : p.y + p.h / 2 - totalH / 2;
-    const startX = p.x + pad;
+    // The text lives in the middle column: below the top image, above the
+    // bottom one, between the side ones — each separated by IMAGE_GAP. With
+    // no images at all this reduces to the old vertical centering exactly
+    // (p.y + pad + (p.h − pad·2 − totalH)/2 = p.y + (p.h − totalH)/2).
+    const topBlock = (slots.slots.top?.h ?? 0) + (slots.slots.top ? IMAGE_GAP : 0);
+    const botBlock = slots.slots.bottom ? IMAGE_GAP + slots.slots.bottom.h : 0;
+    const midH = topBlock + totalH + botBlock;
+    const startY = p.y + pad + topBlock + Math.max(0, (p.h - pad * 2 - midH) / 2);
+    const startX = p.x + pad + (slots.slots.left ? slots.slots.left.w + IMAGE_GAP : 0);
     if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, startX, startY, entry.w, entry.h);
   }
 
   /**
-   * Draw the node's image into its reserved rect (cached bitmap), or start a
-   * decode. Sync by design: no await inside the paint path.
+   * Draw every image slot of the node into its reserved rect (cached
+   * bitmaps), or start the decodes. Sync by design: no await inside the
+   * paint path. The positions come from positionedImageSlots (I9) — the same
+   * geometry the layout and the editing overlay use, so nothing can drift.
    */
   private drawImage(p: Placed): void {
-    const n = p.node;
-    const imageId = n.style.image;
-    if (!imageId || !this.resolveImage) return;
-    const att = this.resolveImage(imageId);
-    if (!att || att.w <= 0) return;
-    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
-    const imgH = (imgW * att.h) / att.w;
+    const { items } = positionedImageSlots(p, p.node, this.resolveImage);
+    for (const it of items) this.paintSlot(p, it.id, it.size.w, it.size.h, it.x, it.y);
+  }
+
+  /** Decode (if needed) and blit one image slot at the given world rect. */
+  private paintSlot(p: Placed, imageId: string, imgW: number, imgH: number, x: number, y: number): void {
+    if (!this.resolveImage) return;
     // Decode at the size THIS image is painted at, not at the size it happens
     // to be stored at. Driving the choice from the global zoom alone put every
     // bitmap on the 1024px level above zoom 0.5 on a retina screen — 3MB each,
@@ -878,14 +879,12 @@ export class Renderer {
       // LRU refresh (Map insertion order = recency).
       this.imageCache.delete(key);
       this.imageCache.set(key, entry);
-      const x = p.x + (p.w - imgW) / 2;
-      const y = p.y + (n.style.padding ?? 10);
       this.ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
       return;
     }
     if (this.imageFailed.has(key)) return; // corrupt/unavailable: not per frame
     if (this.inflight.has(key) || this.inflightCount >= this.MAX_INFLIGHT) return;
-    this.startDecode(key, imageId, n.id, level, bucket);
+    this.startDecode(key, imageId, p.node.id, level, bucket);
   }
 
   private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel, bucket: number): Promise<void> {
@@ -924,11 +923,13 @@ export class Renderer {
   /**
    * Ghost of the image being dragged to another node: the already-cached
    * bitmap, semi-transparent, centered on the cursor with a dashed outline.
+   * When the drag hovers a target node, `ghost.side` snaps the preview onto
+   * that node's slot — the exact rect the image will occupy on drop.
    * Reuses the same bucket/level logic as drawImage so the preview is sharp
    * at the current zoom; if the bitmap isn't decoded yet, starts a decode
    * and draws nothing (a repaint brings it in when ready).
    */
-  private drawGhostImage(theme: RenderTheme, ghost: { imageId: string; x: number; y: number; nodeId: string }): void {
+  private drawGhostImage(theme: RenderTheme, state: RenderState, ghost: { imageId: string; x: number; y: number; nodeId: string; side?: ImageSlot }): void {
     const ctx = this.ctx;
     if (!this.resolveImage) return;
     const att = this.resolveImage(ghost.imageId);
@@ -946,8 +947,16 @@ export class Renderer {
       }
       return;
     }
-    const x = ghost.x - imgW / 2;
-    const y = ghost.y - imgH / 2;
+    // Snapped to a slot of the target node when the cursor is over one.
+    let x = ghost.x - imgW / 2;
+    let y = ghost.y - imgH / 2;
+    if (ghost.side && ghost.nodeId) {
+      const rect = this.imageSlotWorldRect(state, ghost.nodeId, ghost.side);
+      if (rect) {
+        x = rect.x;
+        y = rect.y;
+      }
+    }
     ctx.save();
     ctx.globalAlpha = 0.6;
     ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
@@ -1357,7 +1366,7 @@ export class Renderer {
     for (const id of ids) {
       if (state.editingId === id) continue;
       const p = placed.get(id);
-      const rect = p ? this.imageRectForPlaced(p) : null;
+      const rect = p ? this.selectedImageRect(state, p) : null;
       if (!rect) continue;
       // The whole BORDER resizes, not just the bottom-right square. A 12-unit
       // corner is a hard target at any zoom, and the selected image already
@@ -1385,28 +1394,52 @@ export class Renderer {
 
   /** World-space rect of the image of an already-placed node, or null. */
   private imageRectForPlaced(p: Placed): { x: number; y: number; w: number; h: number } | null {
-    const n = p.node;
-    const imageId = n.style.image;
-    if (!imageId || !this.resolveImage) return null;
-    const att = this.resolveImage(imageId);
-    if (!att || att.w <= 0) return null;
-    const imgW = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
-    const imgH = (imgW * att.h) / att.w;
-    return { x: p.x + (p.w - imgW) / 2, y: p.y + (n.style.padding ?? 10), w: imgW, h: imgH };
+    // First PRESENT slot: the drag offset, the resize handle and the ring all
+    // target whichever image exists. The EXACT slot for the ring and handle
+    // comes from selectedImageRect, which has `state`.
+    const it = positionedImageSlots(p, p.node, this.resolveImage).items[0];
+    return it ? { x: it.x, y: it.y, w: it.size.w, h: it.size.h } : null;
+  }
+
+  /** Rect of the SELECTED image slot (falling back to the first present). */
+  private selectedImageRect(state: RenderState, p: Placed): { x: number; y: number; w: number; h: number } | null {
+    const items = positionedImageSlots(p, p.node, this.resolveImage).items;
+    const slot = state.imageSlot ?? "top";
+    const it = items.find((i) => i.slot === slot) ?? items[0];
+    return it ? { x: it.x, y: it.y, w: it.size.w, h: it.size.h } : null;
+  }
+
+  /** World-space rect of one image slot of an already-placed node, or null. */
+  imageSlotWorldRect(state: RenderState, id: string, slot: ImageSlot): { x: number; y: number; w: number; h: number } | null {
+    const p = this.placedNodes(state).find((p) => p.node.id === id);
+    if (!p) return null;
+    const it = positionedImageSlots(p, p.node, this.resolveImage).items.find((i) => i.slot === slot);
+    return it ? { x: it.x, y: it.y, w: it.size.w, h: it.size.h } : null;
   }
 
   /**
-   * Hit test for the image INSIDE a node: the image is a selectable target
-   * of its own (select → Backspace deletes only it; drag moves it to another
-   * node). Checked before the node-body hit test so the image wins inside
-   * its own rect.
+   * Hit test for the images INSIDE a node: every slot is a selectable
+   * target of its own (select → Backspace deletes only that image; drag
+   * moves it to another node). Checked before the node-body hit test so the
+   * images win inside their own rects. Returns the node id of a hit slot.
    */
   hitTestImage(state: RenderState, worldX: number, worldY: number): string | null {
+    return this.hitTestImageSlot(state, worldX, worldY)?.nodeId ?? null;
+  }
+
+  /** Like hitTestImage, but also reports WHICH slot was hit and its rect. */
+  hitTestImageSlot(
+    state: RenderState,
+    worldX: number,
+    worldY: number,
+  ): { nodeId: string; slot: ImageSlot; rect: { x: number; y: number; w: number; h: number } } | null {
     const placed = this.placedNodes(state).filter((p) => p.visible);
     for (let i = placed.length - 1; i >= 0; i--) {
-      const r = this.imageRectForPlaced(placed[i]);
-      if (r && worldX >= r.x && worldX <= r.x + r.w && worldY >= r.y && worldY <= r.y + r.h) {
-        return placed[i].node.id;
+      const items = positionedImageSlots(placed[i], placed[i].node, this.resolveImage).items;
+      for (const it of items) {
+        if (worldX >= it.x && worldX <= it.x + it.size.w && worldY >= it.y && worldY <= it.y + it.size.h) {
+          return { nodeId: placed[i].node.id, slot: it.slot, rect: { x: it.x, y: it.y, w: it.size.w, h: it.size.h } };
+        }
       }
     }
     return null;

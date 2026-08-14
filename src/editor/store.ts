@@ -10,9 +10,9 @@
  */
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
-import { applyWithInverse, makeOp, type Op } from "../core/ops";
+import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type AttachmentInfo, type Group, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
@@ -147,6 +147,8 @@ export interface EditorState {
   /** The node whose IMAGE is selected (image selection is exclusive: the
    *  node itself is not in `selection` then). Null = no image selected. */
   imageSel: string | null;
+  /** Which slot of the selected image was clicked ("top" by default). */
+  imageSlot: ImageSlot | null;
   /** Heavy operation in flight (a save with images, which builds the
    *  .rnode.zip). The status bar shows a progress bar with a cancel button;
    *  null = nothing heavy running. progress is 0..1, null = indeterminate. */
@@ -282,6 +284,7 @@ export class EditorStore {
       groupSel: null,
       summarySel: null,
       imageSel: null,
+      imageSlot: null,
       op: null,
     };
   }
@@ -1176,6 +1179,7 @@ export class EditorStore {
     this.state.groupSel = null;
     this.state.summarySel = null;
     this.state.imageSel = null;
+    this.state.imageSlot = null;
     if (opts?.center) this.centerOnNode(id);
     this.notify();
   }
@@ -1197,6 +1201,7 @@ export class EditorStore {
     this.state.groupSel = null;
     this.state.summarySel = null;
     this.state.imageSel = null;
+    this.state.imageSlot = null;
     this.notify();
   }
 
@@ -1216,11 +1221,14 @@ export class EditorStore {
     this.state.groupSel = null;
     this.state.summarySel = null;
     this.state.imageSel = null;
+    this.state.imageSlot = null;
     this.notify();
   }
 
-  /** Select the IMAGE of a node (exclusive: clears every other selection). */
-  selectImage(nodeId: string): void {
+  /** Select the IMAGE of a node, remembering WHICH slot was clicked so
+   *  Backspace/Delete removes exactly that one (exclusive: clears every
+   *  other selection). */
+  selectImage(nodeId: string, slot: ImageSlot = "top"): void {
     this.commitDraftOnLeave();
     this.state.selection = [];
     this.state.editingId = null;
@@ -1229,6 +1237,7 @@ export class EditorStore {
     this.state.groupSel = null;
     this.state.summarySel = null;
     this.state.imageSel = nodeId;
+    this.state.imageSlot = slot;
     this.notify();
   }
 
@@ -1250,6 +1259,7 @@ export class EditorStore {
     this.state.editingId = id;
     this.state.pendingInsert = null;
     this.state.imageSel = null;
+    this.state.imageSlot = null;
     this.editOriginal = { title: node.title, titleRuns: node.titleRuns };
     // Seed the draft with the current title so layout keeps measuring the
     // node at its current size until the editor reports its first change.
@@ -1712,6 +1722,7 @@ export class EditorStore {
       this.state.groupSel = null;
       this.state.summarySel = null;
       this.state.imageSel = null;
+    this.state.imageSlot = null;
       this.notify();
     }
   }
@@ -1997,60 +2008,71 @@ export class EditorStore {
   // Node image (T12-4) — the op carries only the id, never the bytes
   // -------------------------------------------------------------------------
 
-  /** Attach (or remove, with imageId = null) an image reference on a node. */
-  setNodeImage(nodeId: string, imageId: string | null): void {
+  /**
+   * Attach (or remove, with imageId = null) an image reference on a node's
+   * slot. `position` picks which of the four edges ("top" = the original
+   * behaviour, kept as the default for every pre-existing caller). The op
+   * carries the position, so undo/redo touch the same slot.
+   */
+  setNodeImage(nodeId: string, imageId: string | null, position: ImageSlot = "top"): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const prevImageId = node.style.image ?? null;
+    const prevImageId = node.style[slotKey(position)] ?? null;
     if (prevImageId === imageId) return;
     this.execOps([
-      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId, imageId, prevImageId }),
+      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId, imageId, prevImageId, position }),
     ]);
   }
 
   /**
    * Delete the SELECTED image (Backspace/Delete with the image selected):
-   * removes only the reference from the node, never the node itself. The
-   * attachment card stays (it may be shared; collectOrphans is the GC).
+   * removes only that slot's reference from the node, never the node itself.
+   * The attachment card stays (it may be shared; collectOrphans is the GC).
    */
   deleteSelectedImage(): void {
     const nodeId = this.state.imageSel;
     if (!nodeId) return;
     const node = this.model.node(nodeId);
+    const slot = this.state.imageSlot ?? "top";
     this.state.imageSel = null;
-    if (!node?.style.image) {
+    this.state.imageSlot = null;
+    if (!node?.style[slotKey(slot)]) {
       this.notify();
       return;
     }
-    this.setNodeImage(nodeId, null);
+    this.setNodeImage(nodeId, null, slot);
     this.notify();
   }
 
   /**
-   * Move a node's image reference to another node (image drag & drop). Both
-   * reference changes are ONE undoable batch: undo restores the image to its
-   * original node. After the move the image on the TARGET stays selected.
+   * Move a node's image reference to another node's slot (image drag & drop).
+   * `fromSlot` is the slot the user grabbed, `toPosition` the side they
+   * dropped on. Both reference changes are ONE undoable batch: undo restores
+   * the image to its original slot. After the move the image on the TARGET
+   * stays selected.
    */
-  assignImageToNode(fromNodeId: string, toNodeId: string): void {
+  assignImageToNode(fromNodeId: string, toNodeId: string, toPosition: ImageSlot = "top", fromSlot: ImageSlot = "top"): void {
     if (fromNodeId === toNodeId) return;
     const from = this.model.node(fromNodeId);
     const to = this.model.node(toNodeId);
     if (!from || !to) return;
-    const imageId = from.style.image;
+    const fromKey = slotKey(fromSlot);
+    const toKey = slotKey(toPosition);
+    const imageId = from.style[fromKey] ?? null;
     if (!imageId) return;
     const ops: Op[] = [];
-    const prevFrom = from.style.image ?? null;
-    const prevTo = to.style.image ?? null;
+    const prevFrom = from.style[fromKey] ?? null;
+    const prevTo = to.style[toKey] ?? null;
     if (prevFrom !== prevTo) {
       ops.push(
-        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: fromNodeId, imageId: null, prevImageId: prevFrom })
+        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: fromNodeId, imageId: null, prevImageId: prevFrom, position: fromSlot })
       );
       ops.push(
-        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: toNodeId, imageId, prevImageId: prevTo })
+        makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: toNodeId, imageId, prevImageId: prevTo, position: toPosition })
       );
       this.execOps(ops);
     }
-    this.selectImage(toNodeId);
+    this.selectImage(toNodeId, toPosition);
   }
 
   /**
@@ -2059,11 +2081,11 @@ export class EditorStore {
    * reference it from the node in a single undoable op. The card is NOT
    * removed by undo: it may be shared, and collectOrphans is the GC.
    */
-  attachImage(nodeId: string, card: AttachmentInfo): void {
+  attachImage(nodeId: string, card: AttachmentInfo, position: ImageSlot = "top"): void {
     if (!this.sheet.attachments.some((a) => a.id === card.id)) {
       this.sheet.attachments.push({ ...card });
     }
-    this.setNodeImage(nodeId, card.id);
+    this.setNodeImage(nodeId, card.id, position);
   }
 
   /**
@@ -2071,7 +2093,7 @@ export class EditorStore {
    * the three levels in the AssetStore, then reference the node. Every
    * rejection says why (rule §4bis of AGENT_GUIDE).
    */
-  async attachImageFile(nodeId: string, file: Blob & { name?: string }): Promise<{ ok: boolean; reason?: string }> {
+  async attachImageFile(nodeId: string, file: Blob & { name?: string }, position: ImageSlot = "top"): Promise<{ ok: boolean; reason?: string }> {
     const v = validateImageSource(file.type, file.size);
     if (!v.ok) {
       trace.ignored(
@@ -2090,14 +2112,18 @@ export class EditorStore {
     }
     const assetStore = getAssetStore();
     const id = await assetStore.put(imported.levels, imported.meta);
-    this.attachImage(nodeId, {
-      id,
-      mime: imported.meta.mime,
-      w: imported.meta.w,
-      h: imported.meta.h,
-      bytes: imported.meta.bytes,
-      name: imported.meta.name,
-    });
+    this.attachImage(
+      nodeId,
+      {
+        id,
+        mime: imported.meta.mime,
+        w: imported.meta.w,
+        h: imported.meta.h,
+        bytes: imported.meta.bytes,
+        name: imported.meta.name,
+      },
+      position
+    );
     trace.applied("drop:image", { bytes: imported.meta.bytes, w: imported.meta.w, h: imported.meta.h });
     return { ok: true };
   }
@@ -2603,6 +2629,7 @@ export class EditorStore {
     this.state.groupSel = null;
     this.state.summarySel = null;
     this.state.imageSel = null;
+    this.state.imageSlot = null;
     this.state.relSel = id;
     this.notify();
   }
@@ -2612,6 +2639,7 @@ export class EditorStore {
     this.state.relSel = null;
     this.state.summarySel = null;
     this.state.imageSel = null;
+    this.state.imageSlot = null;
     this.state.groupSel = id;
     this.notify();
   }
@@ -2621,6 +2649,7 @@ export class EditorStore {
     this.state.relSel = null;
     this.state.groupSel = null;
     this.state.imageSel = null;
+    this.state.imageSlot = null;
     this.state.summarySel = id;
     this.notify();
   }

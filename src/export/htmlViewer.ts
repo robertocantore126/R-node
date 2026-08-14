@@ -18,6 +18,7 @@
  * map on my own screen" neither costs anything.
  */
 import viewerBundle from "./generated/viewer.bundle.js?raw";
+import { nodeImageIds } from "../core/ops";
 import type { Sheet } from "../core/types";
 import type { ThemeName } from "../render/theme";
 import { buildReport, publishReport, type ExportReport } from "./report";
@@ -85,7 +86,7 @@ export async function sheetToHtmlViewer(sheet: Sheet, opts: HtmlViewerOptions): 
   const t0 = performance.now();
 
   const ids = new Set<string>();
-  for (const n of Object.values(sheet.nodes)) if (n.style.image) ids.add(n.style.image);
+  for (const n of Object.values(sheet.nodes)) for (const id of nodeImageIds(n)) ids.add(id);
   const images: Record<string, string> = {};
   let imageBytes = 0;
   let imagesMissing = 0;
