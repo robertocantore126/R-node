@@ -677,7 +677,66 @@ Conseguenze derivate, non decisioni separate: si scartano `task`, `labels` e
 super-nodo, template fuori dal documento (è una libreria dell'utente, come i
 colori recenti).
 
+### Il pannello ospita due tipi, non uno
+
+Le forme salvate si dividono in **structure node** (questo task: N topic nativi
+con shape di base, che si adattano al testo) e **shape node** (T24: un topic
+solo, silhouette custom, dimensione fissa). Nel pannello sono due sezioni con
+icone distinte, e accanto al nome di ciascun tipo c'è un'icona **copia** che
+mette negli appunti il prompt per generarne uno con un LLM.
+
+I prompt vivono in `src/editor/shapePrompts.ts` (`STRUCTURE_NODE_PROMPT`,
+`SHAPE_NODE_PROMPT`), non in un documento: il bottone e la documentazione così
+non possono divergere.
+
+Vincolo aggiuntivo su questo tipo: le relazioni di uno structure node sono
+**segmenti dritti**. `saveShape` impone `connector: "straight"` su ognuna — il
+campo e il disegno arrivano da T24, che è quindi un prerequisito per il rendering
+corretto (la libreria funziona anche prima, con gli archi curvi di oggi).
+
 Brief operativo: [T23-HANDOFF.md](../T23-HANDOFF.md) (usa e getta).
+
+---
+
+## T24 — Special shape node · P2
+
+**Obiettivo.** Un topic la cui silhouette è un path arbitrario — mezzaluna,
+scudo, freccia — invece di una delle nove `TopicShape` predefinite. **Dimensione
+fissa**, etichetta **modificabile** come qualunque altro topic.
+
+**Perché la dimensione è fissa.** È la decisione che rende il problema
+trattabile: un nodo che non cresce non deve mai negoziare il proprio contorno
+con un'etichetta che si allunga. E non serve costruirla — `measure.ts:708`
+salta già l'intera misurazione quando `width` e `height` sono entrambe presenti.
+
+**Perché il testo esce oggi** (vedi la mezzaluna di prova): `measure.ts:745`
+manda a capo sulla **bounding box**, non sull'area interna. Il canvas vede un
+rettangolo, non una falce. Il rimedio è un `shapeTextBox`, e va espresso come
+**inset** attraverso `textInsets` — l'helper che già mettono d'accordo misura,
+renderer, overlay e harness (`4244928`). Una seconda strada riprodurrebbe il
+baco che quell'helper esiste per impedire.
+
+**Il costo da accettare.** L'etichetta resta editabile, quindi l'overlay Lexical
+è un secondo renderer sullo stesso testo: **il §3 si applica in pieno** e serve
+un caso nuovo nell'harness, come i quattro aggiunti per le immagini.
+
+**In regalo.** L'export SVG diventa più semplice (il path è già SVG) e l'hit-test
+può diventare esatto con `isPointInPath`: un click nell'incavo della mezzaluna
+correttamente non la seleziona.
+
+**Include anche** le relazioni a segmento dritto che T23 richiede:
+`Relationship.connector?: ConnectorStyle`, riusando l'union già dichiarata per
+`StructureConfig`. Il troncamento al bordo del nodo va accanto a
+`bezierEnterRect`/`bezierExitRect` in `measure.ts` — sono elencati in §2/I9 come
+condivisi fra renderer ed export SVG, e due copie divergono sulle punte delle
+frecce.
+
+**Fatto quando.** Harness a 0 divergenze con un caso per gli inset di uno shape
+node; un `textBox` che esce dal path viene rifiutato (verificato con
+`isPointInPath`, non creduto); un nodo shape mantiene la sua dimensione
+qualunque sia il titolo.
+
+Brief operativo: [T24-HANDOFF.md](../T24-HANDOFF.md) (usa e getta).
 
 ---
 
