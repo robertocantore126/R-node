@@ -254,7 +254,6 @@ function SheetControls(): JSX.Element {
         <input type="range" min={4} max={80} step={2} value={sheet.structure.branchSpacing} onChange={(e) => store.setStructure({ branchSpacing: Number(e.target.value) })} />
         <span className="muted">{sheet.structure.branchSpacing}</span>
       </div>
-      <button className="btn small" data-help="Auto layout" data-help-more="Re-runs the layout algorithm on the whole map, discarding manual positions." onClick={() => store.autoLayoutAll()}>⟳ Auto layout</button>
       <div className="muted count" data-help="Visible topics" data-help-more="How many topics the map contains (hidden/collapsed subtrees excluded).">Visible topics: {store.doc.visibleNodeCount}</div>
     </div>
   );
