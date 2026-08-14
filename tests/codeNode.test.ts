@@ -12,7 +12,22 @@ import {
   measureNode,
 } from "../src/layout/measure";
 import { trace } from "../src/dev/trace";
+import { addRecentColor, getRecentColors } from "../src/editor/recentColors";
 import type { StorageAdapter } from "../src/persist/storage";
+
+// The vitest environment is node (no localStorage). recentColors reads/writes
+// it defensively; a minimal in-memory mock keeps the persistence contract real
+// without dragging jsdom into a canvas-heavy suite.
+const memStorage = new Map<string, string>();
+(globalThis as { localStorage?: unknown }).localStorage = {
+  getItem: (k: string): string | null => memStorage.get(k) ?? null,
+  setItem: (k: string, v: string): void => {
+    memStorage.set(k, v);
+  },
+  clear: (): void => {
+    memStorage.clear();
+  },
+};
 
 const memoryAdapter: StorageAdapter = {
   label: "test",
@@ -189,6 +204,173 @@ describe("code topic — creation from clipboard", () => {
     expect(cap.events.some((e) => e.what === "paste:code" && e.outcome === "ignored")).toBe(true);
     trace.enable(false);
     trace.clear();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Context-menu commands (src/editor/store.ts) — the "fails without the new
+// methods" set: empty code topic, paste-into-code, child-of, branch reset.
+// ---------------------------------------------------------------------------
+
+describe("code topic — context menu commands", () => {
+  it("createCodeTopic spawns an EMPTY code topic under the parent and selects it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createCodeTopic(root.id);
+    const code = Object.values(store.sheet.nodes).find((n) => n.style.code);
+    expect(code).toBeDefined();
+    expect(code!.title).toBe(""); // born empty — the user pastes code into it later
+    expect(code!.style.code!.lang).toBe("text");
+    expect(code!.parentId).toBe(root.id);
+    expect(store.getSnapshot().selection).toEqual([code!.id]);
+  });
+
+  it("paste() with a code topic selected replaces its source and re-sniffs the language", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { readText: async () => "const x: number = 1;" },
+      configurable: true,
+    });
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createCodeTopic(root.id);
+    const code = Object.values(store.sheet.nodes).find((n) => n.style.code)!;
+    store.select(code.id);
+
+    await store.paste();
+    expect(code.title).toBe("const x: number = 1;");
+    expect(code.style.code!.lang).toBe("ts"); // sniffed on paste, not stuck at "text"
+    expect(code.titleRuns).toEqual([{ text: "const x: number = 1;" }]); // I5: plain run
+
+    // One batch op → one undo restores the empty block exactly.
+    store.undo();
+    expect(code.title).toBe("");
+    expect(code.style.code!.lang).toBe("text");
+  });
+
+  it("paste() still opens the editor for a NORMAL selected topic", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { readText: async () => "hello" },
+      configurable: true,
+    });
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild();
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    store.select(main.id);
+    await store.paste();
+    expect(store.getSnapshot().editingId).toBe(main.id);
+    store.cancelEdit();
+  });
+
+  it("createChildOf creates a child under the target and opens the editor on it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild();
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    const id = store.createChildOf(main.id);
+    expect(id).toBeTruthy();
+    const child = store.sheet.nodes[id!];
+    expect(child).toBeDefined();
+    expect(child.parentId).toBe(main.id);
+    expect(store.getSnapshot().editingId).toBe(id); // typed into at once
+    store.cancelEdit();
+  });
+
+  it("setSelectionColor recolours ONLY the selected topics — never descendants", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild();
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    store.createChildOf(main.id);
+    store.cancelEdit();
+    const sub = store.sheet.nodes[main.childrenIds[0]]!;
+    // Two topics selected (marquee) → both recoloured, the child NOT selected
+    // stays untouched, and the grandchild is never painted.
+    store.selectMany([main.id, sub.id]);
+    store.setSelectionColor("#123456");
+    expect(main.style.fill).toBe("#123456");
+    expect(sub.style.fill).toBe("#123456");
+    expect(root.style.fill).toBeUndefined();
+
+    // One batch op → ONE undo restores both topics.
+    store.undo();
+    expect(main.style.fill).toBeUndefined();
+    expect(sub.style.fill).toBeUndefined();
+  });
+
+  it("setSelectionColor with a single selection recolours just that topic", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild();
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    store.createChildOf(main.id);
+    store.cancelEdit();
+    const sub = store.sheet.nodes[main.childrenIds[0]]!;
+
+    store.select(main.id);
+    store.setSelectionColor("#abcdef");
+    expect(main.style.fill).toBe("#abcdef");
+    expect(sub.style.fill).toBeUndefined(); // the child is NOT painted
+  });
+
+  it("resetSelectionColor clears the fills of the selected topics only", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild();
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    store.createChildOf(main.id);
+    store.cancelEdit();
+    const sub = store.sheet.nodes[main.childrenIds[0]]!;
+    store.setNodeStyle(sub.id, { fill: "#0a0b0c" });
+
+    store.selectMany([main.id, sub.id]);
+    store.setSelectionColor("#123456");
+    store.resetSelectionColor();
+    expect(main.style.fill).toBeUndefined();
+    expect(sub.style.fill).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recent colours (src/editor/recentColors.ts)
+// ---------------------------------------------------------------------------
+
+describe("recent colors", () => {
+  it("records, dedupes and caps the recently used colours", () => {
+    localStorage.clear();
+    expect(getRecentColors()).toEqual([]);
+    addRecentColor("#123456");
+    addRecentColor("#abcdef");
+    addRecentColor("#123456"); // re-pick moves it back to the front, no duplicate
+    let rec = getRecentColors();
+    expect(rec[0]).toBe("#123456");
+    expect(rec).toHaveLength(2);
+    for (let i = 0; i < 12; i++) addRecentColor(`#00000${i % 10}`);
+    rec = getRecentColors();
+    expect(rec.length).toBe(8); // MAX=8 — the oldest entries fall off
+    expect(rec[0]).toBe("#000001"); // the most recent add is at the front
+    expect(rec).not.toContain("#123456"); // evicted by the cap, as designed
+    localStorage.clear();
+  });
+
+  it("a fill set through the store lands in the recent list", () => {
+    localStorage.clear();
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild();
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    store.select(main.id);
+    store.setSelectionColor("#ff8800");
+    expect(getRecentColors()[0]).toBe("#ff8800");
+    localStorage.clear();
   });
 });
 

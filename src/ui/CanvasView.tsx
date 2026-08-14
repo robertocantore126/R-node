@@ -17,6 +17,7 @@ import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
 import type { ImageSlot, MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
+import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
 import { installTrace, trace } from "../dev/trace";
 import { fetchImageAsFile, firstImageFile, firstUriFromList } from "../editor/externalImage";
 
@@ -166,6 +167,9 @@ export function CanvasView(): JSX.Element {
   const [resizeHover, setResizeHover] = useState(false);
   const [imgResizeHover, setImgResizeHover] = useState(false);
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // Right-click context menu: null = closed, otherwise the wrap-space cursor
+  // position and the right-clicked topic (see onContextMenu).
+  const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
   // Ghost preview of an image being dragged to another node (internal
   // reassignment): world coords of the cursor + the image to draw. Read by
   // paint/currentRenderState on every frame; the renderer draws the cached
@@ -964,7 +968,24 @@ export function CanvasView(): JSX.Element {
   };
 
   const onContextMenu = (e: RMouseEvent): void => {
+    // The native menu is suppressed either way (a right-drag pan must not
+    // leave one behind). A right-click ON a topic opens the node menu: New
+    // subtopic / New code topic / Delete / Change color. Right-clicking the
+    // empty canvas keeps no menu — the user asked for the node one.
     e.preventDefault();
+    if (store.getSnapshot().editingId) return; // the editor owns right-click (paste etc.)
+    const s = store.getSnapshot();
+    const { x, y } = localPoint(e as unknown as RPointerEvent);
+    const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+    const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+    if (!hit) return;
+    // A topic already inside a marquee multi-selection keeps the WHOLE
+    // selection: the menu's Change color then recolours every selected topic,
+    // not just the one clicked. Right-clicking an unselected topic selects it
+    // alone (the same rule the Inspector's picker follows).
+    if (!s.selection.includes(hit)) store.select(hit);
+    const rect = canvasRef.current!.parentElement!.getBoundingClientRect();
+    setCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, nodeId: hit });
   };
 
   // -------------------------------------------------------------------------
@@ -1261,6 +1282,7 @@ export function CanvasView(): JSX.Element {
           colors={editColors}
         />
       )}
+      {ctxMenu && <NodeContextMenu key={ctxMenu.nodeId} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
     </div>
   );
 }

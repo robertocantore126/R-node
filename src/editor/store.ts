@@ -9,6 +9,7 @@
  * The store is framework-free: React subscribes via useSyncExternalStore.
  */
 import { guessCodeLang } from "../core/codeHighlight";
+import { addRecentColor } from "./recentColors";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
@@ -1608,6 +1609,83 @@ export class EditorStore {
     this.settleLayoutNow();
   }
 
+  /**
+   * Create a child topic under a SPECIFIC parent and start editing it — the
+   * context menu's "New subtopic". Unlike Tab's createChild (which stays on
+   * the source node so repeated Tab keeps stacking siblings), a menu action
+   * is one-shot: the new topic should be typed into at once, so the overlay
+   * opens on it. Returns the new id, or null when the parent is gone.
+   */
+  createChildOf(parentId: string): string | null {
+    const parent = this.model.node(parentId);
+    if (!parent) return null;
+    const type: NodeType = parent.type === "central" ? "main" : "subtopic";
+    const id = uid("n");
+    const position = this.createNodePosition(parent);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: parent.id, index: parent.childrenIds.length, title: this.defaultTopicTitle(), position })]);
+    this.settleLayoutNow();
+    this.startEdit(id);
+    return id;
+  }
+
+  /**
+   * Create an EMPTY code topic under the selection (or a given parent) — the
+   * context menu's "New code topic" (T22). The block must appear even with no
+   * source: the user spawns it, then pastes code into it. The language starts
+   * as "text" and is re-sniffed on the first paste (setCodeSource).
+   */
+  createCodeTopic(parentId?: string): void {
+    const parent = parentId ? this.model.node(parentId) : this.selectionNode ?? this.model.rootNode;
+    if (!parent) return;
+    const type: NodeType = parent.type === "central" ? "main" : "subtopic";
+    const id = uid("n");
+    const position = this.createNodePosition(parent);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id,
+      nodeType: type,
+      parentId: parent.id,
+      index: parent.childrenIds.length,
+      title: "",
+      titleRuns: [],
+      style: { code: { lang: "text" } },
+      position,
+    })]);
+    this.settleLayoutNow();
+    this.select(id);
+    trace.applied("code:create-empty", { nodeId: id, parentId: parent.id });
+  }
+
+  /**
+   * Replace the SOURCE of a code topic with pasted text (T22). The language
+   * is re-sniffed from the new source: a block spawned empty by the context
+   * menu gains its grammar on the first paste, and pasting different code
+   * updates it. Both ops go out in ONE batch, so a single Ctrl+Z undoes the
+   * whole paste.
+   */
+  setCodeSource(id: string, text: string): void {
+    const node = this.model.node(id);
+    if (!node) return;
+    const lang = guessCodeLang(text);
+    const ops: Op[] = [makeOp<Op & { type: "setTitle" }>("setTitle", {
+      id,
+      title: text,
+      prev: node.title,
+      titleRuns: [{ text }],
+      prevRuns: node.titleRuns,
+    })];
+    if (node.style.code?.lang !== lang) {
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id,
+        style: { ...node.style, code: { lang } },
+        prev: node.style,
+      }));
+    }
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.select(id);
+    trace.applied("paste:code:into", { nodeId: id, lang, chars: text.length });
+  }
+
   /** Build a code topic under the current selection from the clipboard text
    *  (T22). The SOURCE is stored verbatim, newlines and leading spaces
    *  included; the colours are derived at paint time from the theme and are
@@ -2053,7 +2131,41 @@ export class EditorStore {
   setNodeStyle(id: string, patch: Partial<Style>): void {
     const node = this.model.node(id);
     if (!node) return;
+    if (typeof patch.fill === "string") addRecentColor(patch.fill);
     this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
+  }
+
+  /**
+   * Paint ONLY the selected topics with `color` — never their descendants
+   * (the right-click menu's Change color, and the Inspector's single-topic
+   * behaviour when several topics are selected). One batch op, so one Ctrl+Z
+   * undoes the whole recolour. The colour is recorded as recently used.
+   */
+  setSelectionColor(color: string): void {
+    const ids = this.state.selection;
+    if (ids.length === 0) return;
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, fill: color }, prev: n.style }));
+    }
+    if (ops.length === 0) return;
+    addRecentColor(color);
+    this.execOps(ops);
+  }
+
+  /** Clear the explicit fill on the selected topics only (menu "Reset"). */
+  resetSelectionColor(): void {
+    const ids = this.state.selection;
+    if (ids.length === 0) return;
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n || !n.style.fill) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, fill: undefined }, prev: n.style }));
+    }
+    if (ops.length) this.execOps(ops);
   }
 
   /**
@@ -2065,6 +2177,7 @@ export class EditorStore {
    */
   setBranchColor(id: string, color: string): void {
     if (!this.model.node(id)) return;
+    addRecentColor(color);
     const ops: Op[] = [];
     for (const sid of this.model.subtreeIds(id)) {
       const n = this.model.node(sid);
@@ -2073,6 +2186,7 @@ export class EditorStore {
     }
     this.execOps(ops);
   }
+
 
   // -------------------------------------------------------------------------
   // Node image (T12-4) — the op carries only the id, never the bytes
@@ -2613,6 +2727,16 @@ export class EditorStore {
       // selected topic instead of rejecting it as "not a map".
       const target = this.selectionNode;
       if (target) {
+        // A selected CODE topic swallows the clipboard as its new source
+        // (T22): the block is read-only for rich text — the Lexical overlay
+        // would be a second renderer over the source, which is the §3 drift
+        // this feature deliberately stays out of — but pasting code into it
+        // is exactly how it gets content now that it can be born empty.
+        if (target.style.code) {
+          this.setCodeSource(target.id, text);
+          this.toast("Pasted code into topic");
+          return;
+        }
         // Diagnose the plain-text paste BEFORE the editor consumes it:
         // listMarkerLines counts lines that plainTextToRuns will turn into
         // list items — 0 here and bullets are impossible no matter the fix.
