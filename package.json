@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "check:map": "node scripts/check-concept-map.mjs",
     "build:viewer": "vite build --config vite.viewer.config.ts",
     "predev": "npm run build:viewer",
     "prebuild": "npm run build:viewer"
