@@ -629,10 +629,17 @@ export function CanvasView(): JSX.Element {
       drag.panning = true;
       drag.dragging = null;
       setPanning(true);
+      trace.applied("pointerdown:pan", { button: e.button, mode: s.mode });
       return;
     }
-    if (e.button !== 0) return;
+    if (e.button !== 0) return trace.ignored("pointerdown", `button-${e.button}`);
     drag.panning = false;
+
+    // What a click was ABOUT to disturb, sampled before anything mutates. A
+    // gesture that changes none of this and still flickers is a painting bug,
+    // not a state one — the distinction the trace could not make before.
+    const wasEditing = s.editingId !== null;
+    const selBefore = s.selection.length;
 
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const renderer = rendererRef.current!;
@@ -652,6 +659,7 @@ export function CanvasView(): JSX.Element {
       store.select(imgResizeHit, { additive: false });
       setResizing(true);
       setResizeHover(false);
+      trace.applied("pointerdown:image-resize", { id: imgResizeHit, wasEditing });
       return;
     }
 
@@ -671,6 +679,7 @@ export function CanvasView(): JSX.Element {
       store.select(resizeHit.id, { additive: false });
       setResizing(true);
       setResizeHover(false);
+      trace.applied("pointerdown:resize", { id: resizeHit.id, side: resizeHit.side, wasEditing });
       return;
     }
 
@@ -688,6 +697,12 @@ export function CanvasView(): JSX.Element {
       drag.imgDragging = imgHit.nodeId;
       drag.dragging = null;
       drag.marqueeStartX = null;
+      trace.applied("pointerdown:image", {
+        id: imgHit.nodeId,
+        slot: imgHit.slot,
+        reselect: s.imageSel === imgHit.nodeId && s.imageSlot === imgHit.slot,
+        wasEditing,
+      });
       return;
     }
 
@@ -697,8 +712,10 @@ export function CanvasView(): JSX.Element {
       if (hit) {
         store.createRelationship(s.relFrom, hit);
         store.clearRelFrom();
+        trace.applied("pointerdown:rel-target", { from: s.relFrom, to: hit });
       } else {
         store.clearRelFrom();
+        trace.ignored("pointerdown:rel-target", "dropped on empty canvas", { from: s.relFrom });
       }
       return;
     }
@@ -707,7 +724,18 @@ export function CanvasView(): JSX.Element {
       const rect = renderer.nodeWorldRect(rs, hit);
       drag.grabOffsetX = rect ? world.x - rect.x : 0;
       drag.grabOffsetY = rect ? world.y - rect.y : 0;
-      store.select(hit, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
+      const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+      // `reselect` is the one that answers the flicker question: clicking a
+      // topic that is ALREADY the whole selection changes no state at all, so
+      // anything visible there comes from painting, not from a reflow.
+      trace.applied("pointerdown:node", {
+        id: hit,
+        additive,
+        reselect: !additive && selBefore === 1 && s.selection[0] === hit,
+        wasEditing,
+        commits: wasEditing && s.editingId !== hit,
+      });
+      store.select(hit, { additive });
       drag.dragging = hit;
       // Capture the pre-drag position: the final op's `prev` must be this,
       // so undo restores the exact pre-drag state (see commitNodeDrag).
@@ -720,23 +748,29 @@ export function CanvasView(): JSX.Element {
       if (relId) {
         store.selectRelationship(relId);
         drag.marqueeStartX = null;
+        trace.applied("pointerdown:relationship", { id: relId, reselect: s.relSel === relId, wasEditing });
         return;
       }
       const grpId = renderer.hitTestGroup(rs, world.x, world.y);
       if (grpId) {
         store.selectGroup(grpId);
         drag.marqueeStartX = null;
+        trace.applied("pointerdown:group", { id: grpId, reselect: s.groupSel === grpId, wasEditing });
         return;
       }
       const sumId = renderer.hitTestSummary(rs, world.x, world.y);
       if (sumId) {
         store.selectSummary(sumId);
         drag.marqueeStartX = null;
+        trace.applied("pointerdown:summary", { id: sumId, reselect: s.summarySel === sumId, wasEditing });
         return;
       }
       // A plain click on empty canvas clears the selection; with Shift held
       // the current selection is kept so the marquee can extend it.
-      if (!e.shiftKey && !e.ctrlKey && !e.metaKey) store.clearSelection();
+      const keepsSelection = e.shiftKey || e.ctrlKey || e.metaKey;
+      // cleared: 0 with wasEditing false means this click changed NOTHING.
+      trace.applied("pointerdown:empty", { cleared: keepsSelection ? 0 : selBefore, wasEditing });
+      if (!keepsSelection) store.clearSelection();
       drag.marqueeStartX = x;
       drag.marqueeStartY = y;
       drag.marqueeActive = false;
