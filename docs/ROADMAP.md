@@ -579,8 +579,12 @@ riduce con lo zoom**, perché dipende dai run e non dai pixel. Lo spike deve
 misurarlo: se è il collo di bottiglia, T6 diventa un prerequisito.
 
 **File.** `src/core/types.ts` · `src/core/codeHighlight.ts` (nuovo) ·
-`src/layout/measure.ts` · `src/render/renderer.ts` · `src/editor/store.ts` ·
+`src/render/theme.ts` · `src/layout/measure.ts` · `src/render/renderer.ts` ·
+`src/editor/store.ts` · `src/ui/CanvasView.tsx` · `src/ui/Palette.tsx` ·
 i rispettivi test.
+
+Brief operativo per la sessione di implementazione: [T22-HANDOFF.md](../T22-HANDOFF.md)
+(usa e getta — va cancellato nel commit che chiude il task).
 
 **Passi.**
 1. `Style.code?: { lang: string }` — il sorgente vive in `node.title` (I5 resta
