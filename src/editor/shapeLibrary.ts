@@ -20,7 +20,7 @@
 import { DEFAULT_STRUCTURE, type MindNode, type Relationship, type Sheet, type Style, type TextRun, type TopicShape } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { validateSheet } from "../core/validate";
-import { makeSilhouetteProbe, textBoxFitsSilhouette, validateShapeParts, validateTextBox, ShapeArtInvalid } from "../core/shapeArt";
+import { computeTextBox, makeSilhouetteProbe, validateShapeParts, MIN_TEXTBOX_SIDE, ShapeArtInvalid } from "../core/shapeArt";
 import { runsToPlain } from "../core/text";
 
 const KEY = "r-node.shape-library";
@@ -231,21 +231,32 @@ export function prepareShape(raw: string | object): ShapeTemplate["payload"] {
  * That is the decision the whole feature rests on.
  */
 function prepareArtShape(raw: Record<string, unknown>): ShapeTemplate["payload"] {
-  let parts, box;
+  let parts;
   try {
     // Rewrapped so the panel has one error type to render, whichever layer
     // found the problem.
     parts = validateShapeParts(raw.parts);
-    box = validateTextBox(raw.textBox);
   } catch (e) {
     throw e instanceof ShapeArtInvalid ? new ShapeRejected(e.message) : e;
   }
+  // The label's box is DERIVED, never taken from the payload: the largest
+  // square centred on the drawing's centroid. An LLM asked for one got it wrong
+  // in both directions — a rectangle in a crescent's hollow, then one too small
+  // to hold two letters — and could see neither mistake. Any "textBox" in the
+  // input is ignored on purpose.
   const probe = makeSilhouetteProbe();
-  // Without a DOM the geometric check cannot run. Skipping it is honest;
-  // faking a pass would let a broken shape through in a test environment.
-  if (probe && !textBoxFitsSilhouette(parts, box, probe)) {
+  // Without a DOM the geometry cannot be measured. A centred half-size square
+  // is the honest fallback: it keeps the label inside anything convex, and a
+  // test environment never silently invents a fit it did not check.
+  const box = probe
+    ? computeTextBox(parts, probe)
+    : { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+  if (!box) {
+    throw new ShapeRejected("That drawing has no area to write a label in — check that the first part is a closed silhouette.");
+  }
+  if (box.w < MIN_TEXTBOX_SIDE) {
     throw new ShapeRejected(
-      'The "textBox" is not inside the shape. It has to fit the drawing, not its bounding rectangle — for a concave shape that is a good deal smaller.',
+      `The shape is too thin to hold a label: the largest square that fits inside it is ${box.w.toFixed(2)} of its size, and ${MIN_TEXTBOX_SIDE} is the minimum. Make the drawing fatter.`,
     );
   }
   const width = typeof raw.width === "number" && raw.width > 0 ? raw.width : 220;

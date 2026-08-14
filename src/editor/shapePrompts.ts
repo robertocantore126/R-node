@@ -6,9 +6,15 @@
  * drift apart. Both end by demanding JSON and nothing else — the paste box
  * parses what comes back, and a sentence of preamble is a parse error.
  *
- * Neither prompt mentions colour. A shape inherits the map's palette, which is
- * the whole reason a template stores no colours: one saved from a dark editor
- * would otherwise stay unreadable on a light theme, forever.
+ * They differ on colour, and the difference is the point. A STRUCTURE stores
+ * none: its topics inherit the host map's palette, because a colour saved from
+ * a dark editor would stay unreadable on a light theme forever. A SHAPE stores
+ * its own, because those colours contrast with each other inside the drawing —
+ * a yellow moon is yellow on either theme.
+ *
+ * Neither asks for a text box. R-node derives the label's square itself, from
+ * the drawing: an LLM asked to place one put it in a crescent's hollow, then
+ * made it too small to hold two letters, and could see neither mistake.
  */
 
 /** A single topic drawn as artwork. Fixed size, editable label. */
@@ -24,8 +30,7 @@ Format:
   "height": 220,
   "parts": [
     { "d": "M… Z", "fill": "#rrggbb" }
-  ],
-  "textBox": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }
+  ]
 }
 
 Rules:
@@ -36,10 +41,8 @@ Rules:
 - Colours are part of the drawing here, unlike text colour: a yellow moon should be yellow on a light map and on a dark one. Choose colours that read on BOTH a white and a near-black background — avoid pure white or pure black for the silhouette.
 - Keep it to at most 12 parts. This is an icon, not a traced photograph.
 - Later parts must stay INSIDE the silhouette drawn by the first one, or they will spill over the edge: the canvas does not clip them.
-- "textBox" is the rectangle the label is written in, same 0..1 space. It MUST lie inside the filled area — this is checked by sampling, and a box that pokes outside is rejected.
-- Give the LARGEST rectangle that fits, not the first one that fits. A cautious little box is rejected too: the minimum is 0.22 wide and 0.16 tall, and below that a label wraps to one letter per line.
-- For a concave shape (crescent, arrow, star) the largest inscribed rectangle is much smaller than the bounding box, and it is NOT centred: put it where the shape is thickest. A crescent's is in the belly, offset away from the hollow — never in the middle of the bounding box.
-- If the drawing genuinely cannot hold a 0.22 x 0.16 rectangle, make the shape fatter rather than shrinking the box.
+- Do NOT describe where the label goes. R-node works that out itself: it finds the centre of the drawing and grows the largest square that fits inside it. Draw the shape; the text takes care of itself.
+- Because of that, leave the drawing room to hold a label. A shape whose widest square is under 0.18 of its size is refused as too thin to write in — a hairline crescent or a thin arrow will come back rejected, and the fix is a fatter drawing, not a smaller one.
 - "width" and "height" are the node's fixed size in world units. Keep the aspect ratio of the drawing. 220 is a good default.
 
 Worked example — a two-colour shield:
@@ -51,8 +54,7 @@ Worked example — a two-colour shield:
   "parts": [
     { "d": "M0.50,0.02 L0.95,0.18 L0.95,0.55 C0.95,0.80 0.75,0.94 0.50,0.98 C0.25,0.94 0.05,0.80 0.05,0.55 L0.05,0.18 Z", "fill": "#8c2f39" },
     { "d": "M0.50,0.14 L0.84,0.26 L0.84,0.54 C0.84,0.72 0.68,0.83 0.50,0.87 C0.32,0.83 0.16,0.72 0.16,0.54 L0.16,0.26 Z", "fill": "#e8c37a" }
-  ],
-  "textBox": { "x": 0.26, "y": 0.34, "w": 0.48, "h": 0.30 }
+  ]
 }`;
 
 /** A prefabricated subgraph: N native topics plus the edges between them. */

@@ -9,10 +9,16 @@
 import type { ShapePaint, ShapePart, Style } from "./types";
 
 export const MAX_PARTS = 12;
-/** Floor for the label's box, as a fraction of the shape. Below this the text
- *  wraps to one letter per line and the shape is unusable as a topic. */
-export const MIN_TEXTBOX_W = 0.22;
-export const MIN_TEXTBOX_H = 0.16;
+/**
+ * Floor for the label's square, as a fraction of the shape's size. On a 220px
+ * node 0.18 is 40px — around five characters a line, cramped but readable.
+ *
+ * Calibrated against a real drawing rather than chosen: the largest square
+ * inside a hand-drawn crescent measured 0.203, so a higher floor would reject
+ * ordinary concave shapes. An earlier 0.22 came from a RECTANGLE that fit the
+ * same crescent — squares cost width, which is the price of the simpler rule.
+ */
+export const MIN_TEXTBOX_SIDE = 0.18;
 export const MAX_PART_CHARS = 4000;
 export const MAX_TOTAL_CHARS = 12000;
 
@@ -84,58 +90,102 @@ export function validateShapeParts(raw: unknown): ShapePart[] {
   return out;
 }
 
-/** The box must sit in the unit square. Whether it sits inside the SILHOUETTE
- *  needs a canvas, and is checked separately by `textBoxFitsSilhouette`. */
-export function validateTextBox(raw: unknown): TextBox {
-  const b = raw as Partial<TextBox> | undefined;
-  if (!b || typeof b !== "object") throw new ShapeArtInvalid('A shape needs a "textBox".');
-  const nums = [b.x, b.y, b.w, b.h];
-  if (!nums.every((n) => typeof n === "number" && Number.isFinite(n))) {
-    throw new ShapeArtInvalid('"textBox" needs numeric x, y, w and h.');
-  }
-  const { x, y, w, h } = b as TextBox;
-  if (w <= 0 || h <= 0) throw new ShapeArtInvalid('"textBox" has no area.');
-  if (x < 0 || y < 0 || x + w > 1 || y + h > 1) {
-    throw new ShapeArtInvalid('"textBox" pokes outside the 0..1 box the shape is drawn in.');
-  }
-  // A box can sit inside the silhouette and still be useless: 0.15 x 0.14 of a
-  // 220px node is 33 x 31 px, which wraps a label one letter per line. Asked
-  // for "a rectangle inside the shape" a model answers with a cautious one, so
-  // the floor is what makes it look for the LARGEST rectangle instead.
-  if (w < MIN_TEXTBOX_W || h < MIN_TEXTBOX_H) {
-    throw new ShapeArtInvalid(
-      `"textBox" is too small to hold a label (${w.toFixed(2)} x ${h.toFixed(2)}; the minimum is ${MIN_TEXTBOX_W} x ${MIN_TEXTBOX_H}). Find the LARGEST rectangle that fits inside the shape, not the first one that does.`,
-    );
-  }
-  return { x, y, w, h };
-}
-
 /**
- * Whether the label's box is really inside the shape, sampled at its corners
- * and centre against the FIRST part — the silhouette.
+ * The largest SQUARE centred on the drawing that fits inside it.
  *
- * This is the rule an LLM breaks most often: it reasons about the extremes of
- * the outline and proposes a rectangle that fits the bounding box rather than
- * the drawing. Checking it needs `Path2D`, so the caller passes a probe; in a
- * DOM-less test the check is simply skipped rather than faked.
+ * Derived, never authored. Asked to supply a text box an LLM gets it wrong in
+ * both directions — a rectangle in the hollow of a crescent, then a cautious
+ * 0.15 x 0.14 that wrapped the label one letter per line — and neither mistake
+ * is one it can see. The shape is the only thing it should be drawing.
+ *
+ * "Centred" means the CENTROID OF THE FILLED AREA, not the middle of the
+ * bounding box: for a crescent those are different points, and the second one
+ * is in the hole. The centroid lands in the belly, which is where a label goes.
+ *
+ * `probe` answers "is this point painted?" — injected so the geometry can be
+ * tested without a canvas, and so a DOM-less environment degrades to the
+ * fallback instead of pretending.
  */
-export function textBoxFitsSilhouette(parts: ShapePart[], box: TextBox, probe: (d: string, x: number, y: number, rule: CanvasFillRule) => boolean): boolean {
+export function computeTextBox(parts: ShapePart[], probe: (d: string, x: number, y: number, rule: CanvasFillRule) => boolean): TextBox | null {
   const first = parts[0];
-  if (!first) return false;
+  if (!first) return null;
   const rule = first.rule ?? "nonzero";
-  const xs = [box.x, box.x + box.w / 2, box.x + box.w];
-  const ys = [box.y, box.y + box.h / 2, box.y + box.h];
-  const pts: Array<[number, number]> = [
-    [xs[0], ys[0]], [xs[2], ys[0]], [xs[0], ys[2]], [xs[2], ys[2]], [xs[1], ys[1]],
-  ];
-  // Nudge the corners a hair inwards: a box that touches the outline exactly is
-  // fine, and floating point on a curve should not decide a refusal.
-  const eps = 0.004;
-  return pts.every(([px, py]) => {
-    const cx = Math.min(Math.max(px, box.x + eps), box.x + box.w - eps);
-    const cy = Math.min(Math.max(py, box.y + eps), box.y + box.h - eps);
-    return probe(first.d, cx, cy, rule);
-  });
+  const inside = (x: number, y: number): boolean => probe(first.d, x, y, rule);
+
+  // Sample the drawing once onto a grid, then find the largest all-inside
+  // square by the standard dynamic programme: the biggest square ending at a
+  // cell is one more than the smallest of its three neighbours. O(N²) probes
+  // and O(N²) work, against the millions a per-point search would cost.
+  const N = 64;
+  const on: boolean[] = new Array(N * N);
+  let hits = 0;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const v = inside((i + 0.5) / N, (j + 0.5) / N);
+      on[j * N + i] = v;
+      if (v) hits++;
+    }
+  }
+  if (hits === 0) return null;
+
+  const dp: number[] = new Array(N * N).fill(0);
+  let best = 0;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      if (!on[j * N + i]) continue;
+      const v = i === 0 || j === 0 ? 1 : 1 + Math.min(dp[(j - 1) * N + i], dp[j * N + i - 1], dp[(j - 1) * N + i - 1]);
+      dp[j * N + i] = v;
+      if (v > best) best = v;
+    }
+  }
+  if (best === 0) return null;
+
+  // Several placements usually tie at the maximum — a wide shape holds the same
+  // square anywhere along it. Taking the first one found puts the label against
+  // the left edge of a symmetric drawing, so the tie breaks toward the centroid,
+  // which is where a label looks like it belongs.
+  //
+  // The centroid does NOT decide the SIZE, only which of the equal-best squares
+  // wins. Centring the square on it was the first attempt and it is wrong: on a
+  // crescent the centroid sits near the inner edge, and a square centred there
+  // measured 0.128 against the 0.22 that fits further into the belly.
+  let cxSum = 0;
+  let cySum = 0;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      if (on[j * N + i]) {
+        cxSum += i;
+        cySum += j;
+      }
+    }
+  }
+  const cx = cxSum / hits;
+  const cy = cySum / hits;
+  let bestI = 0;
+  let bestJ = 0;
+  let bestD = Infinity;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      if (dp[j * N + i] !== best) continue;
+      const sqCx = i + 0.5 - best / 2;
+      const sqCy = j + 0.5 - best / 2;
+      const d = (sqCx - cx) ** 2 + (sqCy - cy) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        bestI = i;
+        bestJ = j;
+      }
+    }
+  }
+
+  // Measured between cell CENTRES, not cell edges: only the centres were
+  // sampled, so a box drawn to the edges can overhang the outline by half a
+  // cell — which showed up as a corner landing outside the silhouette.
+  const x0 = (bestI + 1 - best + 0.5) / N;
+  const y0 = (bestJ + 1 - best + 0.5) / N;
+  const side = (best - 1) / N;
+  if (side <= 0) return null;
+  return { x: x0, y: y0, w: side, h: side };
 }
 
 /** Build a probe backed by a real canvas, or null where there is no DOM. */
