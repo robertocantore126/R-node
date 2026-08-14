@@ -416,7 +416,7 @@ Dettagli di esecuzione (archiviati): [archive/PIANO-IMMAGINI.md](archive/PIANO-I
 
 ---
 
-## T21 — Quattro cose che il codice fa e nessuno guarda · P1
+## T21 — Quattro cose che il codice fa e nessuno guarda · P1 · ✅ FATTO
 
 Emerse da una revisione del **codice** (non dei documenti) il 2026-08-12, e
 verificate una per una. Sono un gruppo coerente: funzionalità che esistono ma
@@ -433,11 +433,11 @@ orfani si accumulano per sempre: cancelli un nodo con immagine e i byte restano
 nel `.rnode`, che **cresce e non torna mai indietro**. T12a lo aveva specificato
 come comando esplicito; il comando non è mai stato collegato.
 
-- [ ] `AssetStore.size(id): Promise<number>` — somma dei byte di tutti i livelli
+- [x] `AssetStore.size(id): Promise<number>` — somma dei byte di tutti i livelli
       (in SQLite è una `SUM(length(bytes))`, quindi esatta e non stimata)
-- [ ] comando nella palette: esegue `collectOrphans`, mostra **quante schede,
+- [x] comando nella palette: esegue `collectOrphans`, mostra **quante schede,
       quanti blob e quanti byte** si recuperano, e chiede conferma
-- [ ] le **schede** orfane si rimuovono con un op (modificano il documento,
+- [x] le **schede** orfane si rimuovono con un op (modificano il documento,
       quindi undo-abili); i **blob** si cancellano dopo, e questo non è undo-abile
 
 > **La conferma deve dirlo.** Dopo la cancellazione dei blob, un undo
@@ -450,7 +450,7 @@ Non esiste alcun `isSaving`. Due Ctrl+S rapidi si sovrappongono: su desktop
 significa due selettori di file, o una scrittura mentre un'altra sta ancora
 copiando asset.
 
-- [ ] coda a **una posizione**: se arriva una richiesta mentre un salvataggio
+- [x] coda a **una posizione**: se arriva una richiesta mentre un salvataggio
       è in corso, segnala «in attesa» e riesegui **una** volta alla fine
 
 > **Non basta un return anticipato.** Scartare la seconda richiesta perde le
@@ -465,8 +465,8 @@ Salvi con nome, un asset manca, e il file nuovo referenzia un id che non
 contiene — senza dire niente. Saltare è giusto (far fallire l'intero
 salvataggio per un'immagine sarebbe peggio); **il silenzio no**.
 
-- [ ] `adoptFile` restituisce quanti asset non ha potuto copiare
-- [ ] il chiamante lo riporta all'utente con il numero
+- [x] `adoptFile` restituisce quanti asset non ha potuto copiare
+- [x] il chiamante lo riporta all'utente con il numero
 
 ### D — La cache del testo si sfratta per numero, non per byte
 
@@ -476,9 +476,9 @@ testo hanno dimensioni molto diverse (larghezza del nodo × altezza × risoluzio
 accorge. È la stessa critica che ha portato la cache delle immagini a un budget
 in byte — la cache del testo è rimasta indietro.
 
-- [ ] budget in byte (`canvas.width * canvas.height * 4`), stessa forma di
+- [x] budget in byte (`canvas.width * canvas.height * 4`), stessa forma di
       `IMAGE_BUDGET`
-- [ ] **LRU vera**: `delete` + `set` sull'hit, come già fa `imageCache`
+- [x] **LRU vera**: `delete` + `set` sull'hit, come già fa `imageCache`
       (oggi la FIFO può sfrattare il nodo che stai guardando)
 
 > Tocca le stesse righe di **T6** (la chiave calcolata con `JSON.stringify` a
@@ -495,6 +495,19 @@ in byte — la cache del testo è rimasta indietro.
 - Un test verifica che la `textCache` sfratta al superamento del budget in byte
   e che un hit rinfresca la ricenza.
 - `npm run typecheck` e `npm test` verdi.
+
+**Chiuso da** `5361e4e` (2026-08-12) — *Wire up orphan GC, guard overlapping
+saves, report skipped assets, bound the text cache by bytes*. I test richiesti
+sono in `store.test.ts` («reports and recovers an asset orphaned by deleting
+its node», «two concurrent saveNow run the queue ONCE more, with the most
+recent content»), `tauriAdapter.test.ts` («adoptFile reports how many
+referenced assets it could not copy») e `renderer.test.ts` («evicts by byte
+budget and refreshes recency on hit»).
+
+> Questa voce è rimasta con le caselle vuote per due giorni **dopo** essere
+> stata implementata, ed è servita nel frattempo da base per chiedere di
+> rifare il lavoro da zero. È esattamente il caso di AGENT_GUIDE §5: chiudere
+> la voce fa parte del task.
 
 ---
 
