@@ -95,81 +95,89 @@ export function Inspector(): JSX.Element {
 
       <div className="inspector-section">
         <div className="inspector-label">Style</div>
-        <div className="field">
-          <span>Fill</span>
-          <input type="color" value={node.style.fill ?? "#4f46e5"} onChange={(e) => store.setNodeStyle(node.id, { fill: e.target.value })} />
-        </div>
-        <div className="field">
-          <span>Text</span>
-          <input type="color" value={node.style.textColor ?? "#ffffff"} onChange={(e) => store.setNodeStyle(node.id, { textColor: e.target.value })} />
-        </div>
-        <div className="field">
-          <span>Font size</span>
-          <input type="number" min={10} max={48} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
-        </div>
-        <div className="field">
-          <span>Node width</span>
-          <input
-            type="range"
-            min={90}
-            max={640}
-            step={5}
-            value={node.style.width ?? 280}
-            onChange={(e) => store.setNodeStyle(node.id, { width: Number(e.target.value) })}
-            title="Fixed node width — the text re-wraps and the height follows"
-          />
-          <span className="muted">{node.style.width ? `${node.style.width}px` : "auto"}</span>
-          <button className="btn small" title="Fit the box to the text again" onClick={() => store.setNodeStyle(node.id, { width: undefined })}>
-            Auto
-          </button>
-        </div>
-        {node.style.image && (() => {
-          const att = store.sheet.attachments.find((a) => a.id === node.style.image);
-          if (!att) return null;
-          const natural = Math.min(att.w, MAX_IMAGE_W);
-          const value = node.style.imageWidth ?? natural;
-          const imgH = Math.round((value * att.h) / att.w);
-          return (
+        {node.style.code ? (
+          <p className="muted">
+            Code topic — view only: colours and style come from the theme and cannot be edited.
+          </p>
+        ) : (
+          <>
             <div className="field">
-              <span>Image size</span>
+              <span>Fill</span>
+              <input type="color" value={node.style.fill ?? "#4f46e5"} onChange={(e) => store.setNodeStyle(node.id, { fill: e.target.value })} />
+            </div>
+            <div className="field">
+              <span>Text</span>
+              <input type="color" value={node.style.textColor ?? "#ffffff"} onChange={(e) => store.setNodeStyle(node.id, { textColor: e.target.value })} />
+            </div>
+            <div className="field">
+              <span>Font size</span>
+              <input type="number" min={10} max={48} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
+            </div>
+            <div className="field">
+              <span>Node width</span>
               <input
                 type="range"
-                min={48}
+                min={90}
                 max={640}
                 step={5}
-                value={value}
-                onChange={(e) => store.setImageResizeDraft(node.id, Number(e.target.value))}
-                onPointerUp={() => store.commitImageResize()}
-                onKeyUp={() => store.commitImageResize()}
-                onBlur={() => store.commitImageResize()}
-                title="Display width — the height keeps the aspect ratio; one undo undoes the whole drag"
+                value={node.style.width ?? 280}
+                onChange={(e) => store.setNodeStyle(node.id, { width: Number(e.target.value) })}
+                title="Fixed node width — the text re-wraps and the height follows"
               />
-              <span className="muted">
-                {value}×{imgH}px
-              </span>
-              <button
-                className="btn small"
-                title="Back to the natural display size"
-                onClick={() => store.resetImageWidth(node.id)}
-              >
-                Natural
+              <span className="muted">{node.style.width ? `${node.style.width}px` : "auto"}</span>
+              <button className="btn small" title="Fit the box to the text again" onClick={() => store.setNodeStyle(node.id, { width: undefined })}>
+                Auto
               </button>
             </div>
-          );
-        })()}
-        <div className="field">
-          <span>Bold</span>
-          <input type="checkbox" checked={(node.style.fontWeight ?? 400) >= 600} onChange={(e) => store.setNodeStyle(node.id, { fontWeight: e.target.checked ? 600 : 400 })} />
-        </div>
-        <div className="field">
-          <span>Shape</span>
-          <select value={node.style.shape ?? "rounded"} onChange={(e) => store.setNodeStyle(node.id, { shape: e.target.value as TopicShape })}>
-            {SHAPES.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        <button className="btn small" onClick={() => store.setNodeStyle(node.id, { fill: undefined, textColor: undefined })}>
-          Reset to branch color
-        </button>
+            {node.style.image && (() => {
+              const att = store.sheet.attachments.find((a) => a.id === node.style.image);
+              if (!att) return null;
+              const natural = Math.min(att.w, MAX_IMAGE_W);
+              const value = node.style.imageWidth ?? natural;
+              const imgH = Math.round((value * att.h) / att.w);
+              return (
+                <div className="field">
+                  <span>Image size</span>
+                  <input
+                    type="range"
+                    min={48}
+                    max={640}
+                    step={5}
+                    value={value}
+                    onChange={(e) => store.setImageResizeDraft(node.id, Number(e.target.value))}
+                    onPointerUp={() => store.commitImageResize()}
+                    onKeyUp={() => store.commitImageResize()}
+                    onBlur={() => store.commitImageResize()}
+                    title="Display width — the height keeps the aspect ratio; one undo undoes the whole drag"
+                  />
+                  <span className="muted">
+                    {value}×{imgH}px
+                  </span>
+                  <button
+                    className="btn small"
+                    title="Back to the natural display size"
+                    onClick={() => store.resetImageWidth(node.id)}
+                  >
+                    Natural
+                  </button>
+                </div>
+              );
+            })()}
+            <div className="field">
+              <span>Bold</span>
+              <input type="checkbox" checked={(node.style.fontWeight ?? 400) >= 600} onChange={(e) => store.setNodeStyle(node.id, { fontWeight: e.target.checked ? 600 : 400 })} />
+            </div>
+            <div className="field">
+              <span>Shape</span>
+              <select value={node.style.shape ?? "rounded"} onChange={(e) => store.setNodeStyle(node.id, { shape: e.target.value as TopicShape })}>
+                {SHAPES.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <button className="btn small" onClick={() => store.setNodeStyle(node.id, { fill: undefined, textColor: undefined })}>
+              Reset to branch color
+            </button>
+          </>
+        )}
       </div>
 
       <div className="inspector-section">

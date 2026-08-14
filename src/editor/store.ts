@@ -2147,7 +2147,10 @@ export class EditorStore {
     const ops: Op[] = [];
     for (const id of ids) {
       const n = this.model.node(id);
-      if (!n) continue;
+      // A code topic is VIEW ONLY (T22): its colours are derived from the
+      // theme at paint time, so a colour pick — even inside a multi-selection
+      // — must never write a fill onto it.
+      if (!n || n.style.code) continue;
       ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, fill: color }, prev: n.style }));
     }
     if (ops.length === 0) return;
@@ -2162,7 +2165,7 @@ export class EditorStore {
     const ops: Op[] = [];
     for (const id of ids) {
       const n = this.model.node(id);
-      if (!n || !n.style.fill) continue;
+      if (!n || n.style.code || !n.style.fill) continue;
       ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, fill: undefined }, prev: n.style }));
     }
     if (ops.length) this.execOps(ops);
@@ -2181,7 +2184,10 @@ export class EditorStore {
     const ops: Op[] = [];
     for (const sid of this.model.subtreeIds(id)) {
       const n = this.model.node(sid);
-      if (!n) continue;
+      // Code topics are view-only (T22): a branch recolour must skip them,
+      // so the block keeps the code surface instead of wearing the branch
+      // colour.
+      if (!n || n.style.code) continue;
       ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: sid, style: { ...n.style, fill: color }, prev: n.style }));
     }
     this.execOps(ops);

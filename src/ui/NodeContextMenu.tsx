@@ -105,36 +105,43 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
       >
         Delete
       </button>
-      <div className="ctx-sep" />
-      {/* The colour rows are ALWAYS visible — no dropdown to open: the theme
-          palette and the recent picks sit right in the menu, one small square
-          per colour. */}
-      <div className="ctx-color-row">
-        <span className="ctx-label">Color</span>
-        {THEMES.light.branch.map((c) => (
-          <button key={c} className="ctx-swatch" style={{ background: c }} title={c} onClick={() => pick(c)} />
-        ))}
-      </div>
-      {recent.length > 0 && (
-        <div className="ctx-color-row">
-          <span className="ctx-label">Recent</span>
-          {recent.map((c) => (
-            <button key={c} className="ctx-swatch" style={{ background: c }} title={c} onClick={() => pick(c)} />
-          ))}
-        </div>
+      {/* A code topic is VIEW ONLY (T22): its colours are derived from the
+          theme at paint time, so the colour rows — which are editing — are
+          not offered for it, whatever the selection holds. */}
+      {!node.style.code && (
+        <>
+          <div className="ctx-sep" />
+          {/* The colour rows are ALWAYS visible — no dropdown to open: the
+              theme palette and the recent picks sit right in the menu, one
+              small square per colour. */}
+          <div className="ctx-color-row">
+            <span className="ctx-label">Color</span>
+            {THEMES.light.branch.map((c) => (
+              <button key={c} className="ctx-swatch" style={{ background: c }} title={c} onClick={() => pick(c)} />
+            ))}
+          </div>
+          {recent.length > 0 && (
+            <div className="ctx-color-row">
+              <span className="ctx-label">Recent</span>
+              {recent.map((c) => (
+                <button key={c} className="ctx-swatch" style={{ background: c }} title={c} onClick={() => pick(c)} />
+              ))}
+            </div>
+          )}
+          <div className="ctx-color-tools">
+            <input
+              type="color"
+              className="ctx-color"
+              defaultValue="#4f46e5"
+              title="Custom color"
+              onChange={(e) => pick(e.target.value)}
+            />
+            <button className="ctx-reset" onClick={act(() => store.resetSelectionColor())}>
+              Reset
+            </button>
+          </div>
+        </>
       )}
-      <div className="ctx-color-tools">
-        <input
-          type="color"
-          className="ctx-color"
-          defaultValue="#4f46e5"
-          title="Custom color"
-          onChange={(e) => pick(e.target.value)}
-        />
-        <button className="ctx-reset" onClick={act(() => store.resetSelectionColor())}>
-          Reset
-        </button>
-      </div>
     </div>
   );
 }

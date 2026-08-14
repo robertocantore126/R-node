@@ -1160,10 +1160,11 @@ export class Renderer {
     bctx.scale(res, res);
     bctx.textBaseline = "alphabetic";
 
-    // Window chrome: a strip with the language and the three dots — the part
-    // that makes the block read as code at a glance. The dots are decoration,
-    // not theme data: the same three colours in every code editor since
-    // forever, and a code block that changed them would look wrong anyway.
+    // Window chrome: a strip with the language — the part that makes the
+    // block read as code at a glance. The three Mac-style dots were removed
+    // on request; the strip keeps only the language label, which is also the
+    // only part that can change (a code block that changed its colours would
+    // look wrong anyway).
     bctx.fillStyle = theme.codeBar;
     bctx.fillRect(0, 0, p.w, CODE_TITLEBAR_H);
     bctx.fillStyle = theme.textMuted;
@@ -1171,13 +1172,6 @@ export class Renderer {
     bctx.textAlign = "left";
     bctx.textBaseline = "middle";
     bctx.fillText(lang === "text" ? "code" : lang, pad, CODE_TITLEBAR_H / 2);
-    const dotColors = ["#ff5f57", "#febc2e", "#28c840"];
-    for (let i = 0; i < 3; i++) {
-      bctx.fillStyle = dotColors[i];
-      bctx.beginPath();
-      bctx.arc(p.w - pad - i * 9, CODE_TITLEBAR_H / 2, 3, 0, Math.PI * 2);
-      bctx.fill();
-    }
 
     // The tokenized source, run by run. The runs are lossless (concatenation
     // equals the source), so splitting them on "\n" and walking the pieces

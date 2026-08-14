@@ -336,6 +336,32 @@ describe("code topic — context menu commands", () => {
     expect(main.style.fill).toBeUndefined();
     expect(sub.style.fill).toBeUndefined();
   });
+
+  it("a code topic is view-only: colour commands never write a fill onto it", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild();
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    store.createChildOf(main.id);
+    store.cancelEdit();
+    const sub = store.sheet.nodes[main.childrenIds[0]]!;
+    store.setNodeStyle(sub.id, { code: { lang: "ts" } }); // the code topic
+
+    // Inside a multi-selection: the normal topic gets the colour, the code
+    // topic keeps its derived code surface.
+    store.selectMany([main.id, sub.id]);
+    store.setSelectionColor("#123456");
+    expect(main.style.fill).toBe("#123456");
+    expect(sub.style.fill).toBeUndefined();
+
+    // Same for the branch recolour (the palette command): a code topic deep
+    // in the subtree must not wear the branch colour.
+    store.setNodeStyle(main.id, { fill: undefined });
+    store.setBranchColor(main.id, "#abcdef");
+    expect(main.style.fill).toBe("#abcdef");
+    expect(sub.style.fill).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
