@@ -694,7 +694,7 @@ Vincolo aggiuntivo su questo tipo: le relazioni di uno structure node sono
 campo e il disegno arrivano da T24, che è quindi un prerequisito per il rendering
 corretto (la libreria funziona anche prima, con gli archi curvi di oggi).
 
-Brief operativo: [T23-HANDOFF.md](../T23-HANDOFF.md) (usa e getta).
+
 
 ---
 

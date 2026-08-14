@@ -1,6 +1,8 @@
+import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listShapes, prepareShape, removeShape, saveShape, ShapeRejected } from "../src/editor/shapeLibrary";
 import { runsToPlain } from "../src/core/text";
+import { EditorStore } from "../src/editor/store";
 import type { MindNode, Relationship, Style, TextRun } from "../src/core/types";
 
 function node(id: string, over: Partial<MindNode> = {}): MindNode {
@@ -165,6 +167,61 @@ describe("prepareShape — refusals", () => {
   it("drops an edge whose endpoint is not in the payload instead of storing it", () => {
     const out = prepareShape(triangle({ rels: [{ id: "r1", fromId: "b", toId: "elsewhere" }] }));
     expect(out.relationships).toHaveLength(0);
+  });
+});
+
+describe("insertShape", () => {
+  const adapter = { label: "test", async load() { return []; }, async save() { /* no-op */ } };
+
+  function freshStore(): EditorStore {
+    return new EditorStore(adapter as never);
+  }
+
+  it("inserts every topic and edge in ONE history entry", () => {
+    // One gesture, one undo. Several batches would need N presses of Ctrl+Z to
+    // undo a single drop, which is never what anyone means.
+    const store = freshStore();
+    const root = store.sheet.rootNodeId;
+    const before = Object.keys(store.sheet.nodes).length;
+    const t = saveShape("Triangolo", triangle());
+
+    store.insertShape(t, root);
+    expect(Object.keys(store.sheet.nodes).length).toBe(before + 3);
+    expect(store.sheet.relationships).toHaveLength(1);
+
+    store.undo();
+    expect(Object.keys(store.sheet.nodes).length).toBe(before);
+    expect(store.sheet.relationships).toHaveLength(0);
+  });
+
+  it("keeps the geometry, translated, and marked manual so the layout leaves it alone", () => {
+    const store = freshStore();
+    const t = saveShape("Triangolo", triangle({ nodes: { b: { position: { x: -160, y: 100, manual: false } }, c: { position: { x: 160, y: 100, manual: false } } } }));
+    store.insertShape(t, store.sheet.rootNodeId);
+
+    const inserted = Object.values(store.sheet.nodes).filter((n) => ["A", "B", "C"].includes(n.title));
+    expect(inserted).toHaveLength(3);
+    expect(inserted.every((n) => n.position.manual === true)).toBe(true);
+    const a = inserted.find((n) => n.title === "A")!;
+    const b = inserted.find((n) => n.title === "B")!;
+    const c = inserted.find((n) => n.title === "C")!;
+    // Relative shape preserved: B and C sit 320 apart and 100 below A.
+    expect(c.position.x - b.position.x).toBeCloseTo(320, 5);
+    expect(b.position.y - a.position.y).toBeCloseTo(100, 5);
+  });
+
+  it("recreates the edges as straight segments between the NEW ids", () => {
+    const store = freshStore();
+    const t = saveShape("Triangolo", triangle());
+    store.insertShape(t, store.sheet.rootNodeId);
+
+    const rel = store.sheet.relationships[0];
+    expect(rel.connector).toBe("straight");
+    expect(store.sheet.nodes[rel.fromId]).toBeDefined();
+    expect(store.sheet.nodes[rel.toId]).toBeDefined();
+    // Remapped, not reused: the template's own ids must not leak into the map.
+    expect(rel.fromId).not.toBe("b");
+    expect(rel.toId).not.toBe("c");
   });
 });
 

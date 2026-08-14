@@ -9,6 +9,7 @@
  * The store is framework-free: React subscribes via useSyncExternalStore.
  */
 import { guessCodeLang } from "../core/codeHighlight";
+import type { ShapeTemplate } from "./shapeLibrary";
 import { addRecentColor } from "./recentColors";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
@@ -2793,8 +2794,26 @@ export class EditorStore {
 
   private lastRemap = new Map<string, string>();
 
-  /** Build createNode ops that clone a subtree under a new parent, remapping ids. */
-  private remapOps(source: MindNode[], parentId: string, index: number, rootType: NodeType): Op[] {
+  /**
+   * Build createNode ops that clone a subtree under a new parent, remapping ids.
+   *
+   * `place` is what a shape template needs and a paste does not: it carries the
+   * source coordinates over, translated so the template's root lands on
+   * `origin`, and marks them manual so the layout leaves the geometry alone. A
+   * paste omits it and the layout places the clone as usual. One remapper for
+   * both — a second one would drift from this in exactly the way ids must not.
+   */
+  private remapOps(
+    source: MindNode[],
+    parentId: string,
+    index: number,
+    rootType: NodeType,
+    place?: { origin: { x: number; y: number }; rootPos: { x: number; y: number } },
+  ): Op[] {
+    const placed = (n: MindNode): Position | undefined =>
+      place
+        ? { x: place.origin.x + (n.position.x - place.rootPos.x), y: place.origin.y + (n.position.y - place.rootPos.y), manual: true }
+        : undefined;
     const idMap = new Map<string, string>();
     this.lastRemap = idMap;
     const ops: Op[] = [];
@@ -2812,6 +2831,7 @@ export class EditorStore {
         titleRuns: srcRoot.titleRuns,
         style: srcRoot.style,
         task: srcRoot.task,
+        position: placed(srcRoot),
       })
     );
     const queue = [srcRoot];
@@ -2832,12 +2852,50 @@ export class EditorStore {
             titleRuns: c.titleRuns,
             style: c.style,
             task: c.task,
+            position: placed(c),
           })
         );
         queue.push(c);
       }
     }
     return ops;
+  }
+
+  /**
+   * Drop a saved shape under `anchorId` (T23).
+   *
+   * The template is N native topics plus their edges, so everything downstream
+   * — search, outliner, export, undo, validateSheet — works on it without
+   * knowing shapes exist. ONE execOps batch, therefore one history entry:
+   * a single Ctrl+Z removes the whole thing, which is the only behaviour that
+   * makes sense for something inserted with one gesture.
+   */
+  insertShape(template: ShapeTemplate, anchorId: string): void {
+    const anchorNode = this.model.node(anchorId);
+    if (!anchorNode) return trace.ignored("shape:insert", "anchor topic is gone");
+    const { rootId, nodes, relationships } = template.payload;
+    const srcRoot = nodes.find((n) => n.id === rootId);
+    if (!srcRoot) return trace.ignored("shape:insert", "template has no root", { shape: template.id });
+
+    const type: NodeType = anchorNode.type === "central" ? "main" : "subtopic";
+    const origin = this.createNodePosition(anchorNode);
+    const ops = this.remapOps(nodes, anchorId, anchorNode.childrenIds.length, type, { origin, rootPos: srcRoot.position });
+    if (ops.length === 0) return trace.ignored("shape:insert", "template produced no topics", { shape: template.id });
+
+    for (const rel of relationships) {
+      const from = this.lastRemap.get(rel.fromId);
+      const to = this.lastRemap.get(rel.toId);
+      if (!from || !to) continue;
+      ops.push(
+        makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+          relationship: { id: uid("rel"), fromId: from, toId: to, label: rel.label, connector: rel.connector, lineStyle: rel.lineStyle },
+        }),
+      );
+    }
+    this.execOps(ops);
+    trace.applied("shape:insert", { shape: template.id, topics: nodes.length, edges: relationships.length });
+    this.select(this.lastRemap.get(rootId)!);
+    this.toast(`Inserted "${template.name}"`);
   }
 
   beginRelationship(fromId: string): void {

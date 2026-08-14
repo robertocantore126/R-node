@@ -8,6 +8,7 @@ import { TopBar } from "./ui/TopBar";
 import { CanvasView } from "./ui/CanvasView";
 import { Outliner } from "./ui/Outliner";
 import { Inspector } from "./ui/Inspector";
+import { ShapeLibrary } from "./ui/ShapeLibrary";
 import { Palette } from "./ui/Palette";
 
 export function App(): JSX.Element {
@@ -60,7 +61,14 @@ export function App(): JSX.Element {
             <CanvasView />
             {state.showOutliner && <Outliner />}
           </div>
-          {state.showInspector && <Inspector />}
+          {state.showInspector && (
+            /* One grid item holding both panels: the Inspector scrolls in the
+               space left over, the library keeps its share at the bottom. */
+            <div className="rightcol">
+              <Inspector />
+              <ShapeLibrary />
+            </div>
+          )}
         </div>
 
         <StatusBar />

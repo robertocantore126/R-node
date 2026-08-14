@@ -15,6 +15,8 @@ import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/me
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
+import { SHAPE_DRAG_TYPE } from "./ShapeLibrary";
+import { listShapes } from "../editor/shapeLibrary";
 import type { ImageSlot, MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
@@ -1179,6 +1181,20 @@ export function CanvasView(): JSX.Element {
         onDoubleClick={onDblClick}
         onContextMenu={onContextMenu}
         onDragOver={(e) => {
+          // A shape from the library (T23). It must land ON a topic — the shape
+          // becomes its child — so over empty canvas the drop is refused right
+          // here, by leaving dropEffect at "none".
+          if (e.dataTransfer.types.includes(SHAPE_DRAG_TYPE)) {
+            e.preventDefault();
+            const { x, y } = localPoint(e as unknown as RPointerEvent);
+            const s = store.getSnapshot();
+            const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+            const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+            store.setHover(hit);
+            store.setDrop(hit ? { mode: "child", nodeId: hit } : null);
+            e.dataTransfer.dropEffect = hit ? "copy" : "none";
+            return;
+          }
           // Accept the drop (T13-2): without preventDefault the browser would
           // navigate away on drop. Highlight the node under the cursor while
           // dragging so the user sees the target.
@@ -1233,6 +1249,24 @@ export function CanvasView(): JSX.Element {
           if (!e.relatedTarget) clearExternalGhost();
         }}
         onDrop={async (e) => {
+          // A shape from the library (T23).
+          const shapeId = e.dataTransfer.getData(SHAPE_DRAG_TYPE);
+          if (shapeId) {
+            e.preventDefault();
+            const { x, y } = localPoint(e as unknown as RPointerEvent);
+            const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+            const target = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+            store.setHover(null);
+            store.setDrop(null);
+            if (!target) {
+              store.toast("Drop the shape on a topic");
+              return trace.ignored("drop:shape", "not over a topic", { shape: shapeId });
+            }
+            const template = listShapes().find((t) => t.id === shapeId);
+            if (!template) return trace.ignored("drop:shape", "shape is no longer in the library", { shape: shapeId });
+            store.insertShape(template, target);
+            return;
+          }
           // External sources: an OS file (Explorer, or a browser image that
           // Chromium materializes as a temp file) OR a browser image URL
           // (text/uri-list, the only payload some browsers hand over).
