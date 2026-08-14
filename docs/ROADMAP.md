@@ -531,6 +531,89 @@ budget and refreshes recency on hit»).
 
 ---
 
+## T22 — Code node di sola lettura · P2 · 🧪 SPIKE
+
+**Obiettivo.** Un nodo che mostra codice con evidenziazione della sintassi, non
+modificabile dall'interfaccia: si vede, si copia, si cancella. Nato da una
+richiesta esplicita del proprietario, da tenere o buttare secondo i criteri in
+fondo.
+
+**Perché.** Incollare codice oggi perde gli a capo (i blocchi annidati non
+producono confini) e non esiste un monospace per run. Il risultato è codice su
+una riga sola nel font del nodo.
+
+### Decisioni già prese, con la ragione
+
+Non riaprirle senza un motivo nuovo: ognuna evita un costo misurato.
+
+- **Sola lettura, e non è una rinuncia.** Il §3 esiste perché un nodo può
+  aprire l'overlay Lexical: sono due renderer che devono concordare. Un nodo
+  che non si edita non ha un secondo renderer, quindi può avere whitespace
+  preservato e niente a-capo automatico **senza toccare il contratto di
+  parità**. È ciò che rende la feature economica.
+- **Il documento tiene sorgente + linguaggio; i colori sono dato derivato**,
+  ricalcolati al disegno (stesso principio di I6 sul layout). Conservare i
+  colori incollati da VS Code significa salvare la palette di un tema scuro:
+  sullo stesso nodo in tema chiaro diventa illeggibile, per sempre.
+- **Nessun nuovo `NodeType`.** Quell'enum guida topologia e layout
+  (`validateSheet` tratta `floating` a parte, i placer dispongono per tipo). Un
+  code node è una variante di **presentazione**: sta in `Style`, senza
+  migrazione dello schema e senza toccare il validatore.
+- **Tokenizzatore minimo interno per lo spike**, nessuna dipendenza. Rimanda la
+  scelta fra Shiki (fedele a VS Code, centinaia di KB con WASM) e Prism
+  (~2KB + grammatiche) a dopo aver visto se la feature vale. Se resta, va
+  caricato con `import()` dinamico: chi non usa code node non scarica nulla.
+
+### Il costo da misurare, non da assumere
+
+Il budget della cache testo **non** è un tetto al numero di nodi: solo i nodi
+visibili vengono rasterizzati (`renderer.ts:337`) e la risoluzione segue lo zoom
+(`renderer.ts:844`), quindi il totale vivo è legato all'area dello schermo
+(~7,75 MB per schermata a 1920×1009) e i 64 MB valgono ~8 schermate. Un code
+node occupa area come qualunque altra cosa: **non è quello il problema.**
+
+Il costo reale è **T6**: `textCacheKey` serializza `n.titleRuns` con
+`JSON.stringify` a ogni frame per ogni nodo visibile. Un topic ha 1–3 run, un
+code node evidenziato ne ha uno per token — centinaia — e quel costo **non si
+riduce con lo zoom**, perché dipende dai run e non dai pixel. Lo spike deve
+misurarlo: se è il collo di bottiglia, T6 diventa un prerequisito.
+
+**File.** `src/core/types.ts` · `src/core/codeHighlight.ts` (nuovo) ·
+`src/layout/measure.ts` · `src/render/renderer.ts` · `src/editor/store.ts` ·
+i rispettivi test.
+
+**Passi.**
+1. `Style.code?: { lang: string }` — il sorgente vive in `node.title` (I5 resta
+   vera: `title === runsToPlain(titleRuns)`, con `titleRuns` in testo piatto).
+2. `codeHighlight.ts`: funzione pura `tokenize(source, lang): TextRun[]`, con
+   cache per `(source, lang)`. I colori vengono dal tema, non dalla sorgente.
+3. Misura: percorso senza wrap, spezzato su `\n`, whitespace iniziale
+   preservato. **Come modalità separata**, mai cambiando il default di
+   `wrapRunLines`: i 20 casi dell'harness ci vivono sopra.
+4. Renderer: cornice a finestra (fondo, barra del titolo, tre glifi) e testo per
+   token. Il colore per run il canvas lo disegna già (`renderer.ts:1082`).
+5. Sola lettura: `startEdit`, `typeToEdit` e il doppio click rifiutano un code
+   node **e lo dicono** (§4bis). Delete, copia e drag restano normali.
+6. Creazione: comando in palette che costruisce il nodo dal contenuto della
+   clipboard.
+
+**Fatto quando.**
+- Un code node incollato mostra righe separate, indentazione preservata e
+  colori per token; il doppio click non apre nessun overlay e traccia il motivo.
+- Un test misura il costo per frame con N code node visibili e lo confronta con
+  N topic normali: il numero decide se T6 è un prerequisito.
+- `npm test` e `npm run typecheck` verdi; harness a 0 divergenze (si tocca
+  `measure.ts`).
+
+**Si tiene se.** Il codice incollato è leggibile senza ritocchi manuali e il
+costo per frame con 10 code node visibili resta sotto quello di 100 topic
+normali. Altrimenti si rimuove il branch: è uno spike, non un impegno.
+
+**Non fare.** Non cambiare `wrapRunLines` per tutti. Non salvare i colori nel
+documento. Non aggiungere una dipendenza di evidenziazione in questo spike.
+
+---
+
 ## Fuori roadmap (decisione del proprietario)
 
 Non iniziare senza richiesta esplicita:

@@ -90,6 +90,14 @@ export interface Style {
   /** Display width of the image(s) in world units; height follows the aspect ratio. */
   imageWidth?: number;
   link?: string;
+  /**
+   * Marks the topic as a read-only code block (T22). The SOURCE lives in
+   * `title`, newlines and all; the colours are NOT stored — they are derived
+   * at paint time from the theme, so one document reads correctly in both
+   * light and dark. A presentation variant, deliberately not a `NodeType`:
+   * that enum drives topology and layout, and a code block changes neither.
+   */
+  code?: { lang: string };
   padding?: number;
   align?: "left" | "center";
   width?: number;
