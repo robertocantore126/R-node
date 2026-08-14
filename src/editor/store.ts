@@ -506,17 +506,23 @@ export class EditorStore {
   }
 
   /**
-   * Apply the pending layout IMMEDIATELY (no 30ms debounce). Used after
-   * structural ops (node creation) so the result appears in its FINAL
-   * position on the very first paint — a new topic must not flash at the
-   * provisional estimated spot and then jump to its layout slot 30ms later.
+   * Apply the pending layout IMMEDIATELY (no 30ms debounce). Used after a
+   * structural op (node creation), a committed edit and an image change, so
+   * the result appears in its FINAL position on the very first paint — nothing
+   * must flash at the provisional spot and jump to its layout slot 30ms later.
    */
   private settleLayoutNow(): void {
     if (this.layoutTimer) {
       clearTimeout(this.layoutTimer);
       this.layoutTimer = null;
     }
+    // Traced like the debounced path, and for the same reason: now that the
+    // common reflows arrive here, an untraced settle leaves a capture full of
+    // ops with no layout behind them, and sends the next reader hunting for a
+    // reflow that never went missing.
+    const t = typeof performance !== "undefined" ? performance.now() : 0;
     applyLayout(this.sheet, false, this.measurer);
+    trace.layout(Object.keys(this.sheet.nodes).length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
     this.notify();
   }
 
@@ -1404,6 +1410,13 @@ export class EditorStore {
           prevRuns: original.titleRuns,
         }),
       ]);
+      // Settle NOW instead of 30ms from now. execOps schedules the layout on a
+      // debounce, which is right while the user types — it coalesces a burst of
+      // keystrokes — but a commit is a single discrete event with no burst to
+      // absorb, and the wait buys one painted frame showing the new text at the
+      // old geometry. A trace of a 2941-character title measured the gap at
+      // 30.3–31.7ms across eight ops, with a render landing inside it.
+      this.settleLayoutNow();
     } else {
       // unchanged -> drop the ephemeral patch, nothing to record
       this.restoreOriginal(node, original);
@@ -2028,6 +2041,10 @@ export class EditorStore {
     this.execOps([
       makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId, imageId, prevImageId, position }),
     ]);
+    // An image changes the box size, so the same debounce that makes a commit
+    // flash makes a pasted image flash: it appears, then the topic grows around
+    // it 30ms later. Same reason, same fix.
+    this.settleLayoutNow();
   }
 
   /**
@@ -2107,6 +2124,7 @@ export class EditorStore {
         makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: toNodeId, imageId, prevImageId: prevTo, position: toPosition })
       );
       this.execOps(ops);
+      this.settleLayoutNow();
     }
     this.selectImage(toNodeId, toPosition);
   }
