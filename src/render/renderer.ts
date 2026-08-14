@@ -146,9 +146,22 @@ export class Renderer {
   }
 
   resize(canvas: HTMLCanvasElement, cssW: number, cssH: number): void {
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.max(1, Math.round(cssW * this.dpr));
-    canvas.height = Math.max(1, Math.round(cssH * this.dpr));
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(1, Math.round(cssW * dpr));
+    const h = Math.max(1, Math.round(cssH * dpr));
+    // Assigning width or height RESETS the canvas — the backing store is
+    // cleared and the 2d context state goes back to its defaults — and the
+    // spec does that even when the value assigned is the one already there.
+    // The ResizeObserver on .canvas-area fires on layout passes that leave the
+    // box exactly as it was (the Inspector swapping its empty state for a
+    // selected topic's controls is one), so an unconditional assignment blanked
+    // the map and left it blank until the next animation frame repainted it:
+    // one empty frame, on every selection, with nothing in any counter to show
+    // for it.
+    if (canvas.width === w && canvas.height === h && this.dpr === dpr) return;
+    this.dpr = dpr;
+    canvas.width = w;
+    canvas.height = h;
   }
 
   // -------------------------------------------------------------------------

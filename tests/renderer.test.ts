@@ -187,6 +187,58 @@ describe("placement cache", () => {
   });
 });
 
+describe("resize", () => {
+  /** A canvas whose width/height behave like the real ones: writable, and
+   *  every write counted — a write is what wipes the backing store. */
+  function countingCanvas(ctx: CanvasRenderingContext2D): { canvas: HTMLCanvasElement; writes: () => number } {
+    let w = 300;
+    let h = 150;
+    let writes = 0;
+    const canvas = {
+      get width() { return w; },
+      set width(v: number) { w = v; writes += 1; },
+      get height() { return h; },
+      set height(v: number) { h = v; writes += 1; },
+      getContext: () => ctx,
+    } as unknown as HTMLCanvasElement;
+    return { canvas, writes: () => writes };
+  }
+
+  it("does not touch width or height when the size has not changed", () => {
+    // Assigning canvas.width clears the canvas even when the value is
+    // identical. The ResizeObserver fires on layout passes that leave the box
+    // unchanged, so an unconditional assignment blanked the map for a frame on
+    // every selection.
+    const ctx = make2dCtx();
+    vi.stubGlobal("window", { devicePixelRatio: 1 });
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const { canvas, writes } = countingCanvas(ctx);
+    const renderer = new Renderer(canvas);
+
+    renderer.resize(canvas, 800, 600);
+    const afterFirst = writes();
+    expect(afterFirst).toBeGreaterThan(0); // the real resize did happen
+
+    renderer.resize(canvas, 800, 600);
+    renderer.resize(canvas, 800, 600);
+    expect(writes()).toBe(afterFirst);
+  });
+
+  it("still resizes when the size really changes", () => {
+    const ctx = make2dCtx();
+    vi.stubGlobal("window", { devicePixelRatio: 1 });
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const { canvas, writes } = countingCanvas(ctx);
+    const renderer = new Renderer(canvas);
+
+    renderer.resize(canvas, 800, 600);
+    const afterFirst = writes();
+    renderer.resize(canvas, 801, 600);
+    expect(writes()).toBeGreaterThan(afterFirst);
+    expect(canvas.width).toBe(801);
+  });
+});
+
 describe("the rings drawn around a topic", () => {
   /** A context that records the rectangles it is asked to stroke. */
   function recordingCtx(): { ctx: CanvasRenderingContext2D; rects: number[][] } {
