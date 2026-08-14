@@ -10,7 +10,6 @@ import { sheetToPdf } from "../dev/pdfProbe";
 import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
-import { isShiftHeld, showCanvasHelp } from "./help";
 import { imageResolver, measureNode } from "../layout/mindmap";
 import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
@@ -536,69 +535,6 @@ export function CanvasView(): JSX.Element {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  // Shift-inspection on the canvas: hit-test what is under the cursor and
-  // show the "what is this?" tooltip (phase 1 — overlay only, no actions).
-  const showCanvasInspection = (e: RPointerEvent, x: number, y: number): void => {
-    const s = store.getSnapshot();
-    const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-    const rs = currentRenderState();
-    const renderer = rendererRef.current!;
-    const hit = renderer.hitTest(rs, world.x, world.y);
-    const n = hit ? store.doc.node(hit) : undefined;
-    if (n) {
-      const kids = n.childrenIds.length;
-      const att = n.style.image ? store.sheet.attachments.find((a) => a.id === n.style.image) : undefined;
-      const parts = [`type ${n.type}`, `${kids} child${kids === 1 ? "" : "ren"}`];
-      if (att) parts.push(`image ${att.w}×${att.h}`);
-      if (n.collapsed) parts.push("collapsed");
-      showCanvasHelp({
-        title: n.title || "(empty topic)",
-        body: parts.join(" · "),
-        x: e.clientX,
-        y: e.clientY,
-        anchor: "cursor",
-      });
-      return;
-    }
-    const relId = renderer.hitTestRelationship(rs, world.x, world.y);
-    if (relId) {
-      const rel = store.sheet.relationships.find((r) => r.id === relId);
-      showCanvasHelp({
-        title: "Relationship",
-        body: rel?.label ? `label: ${rel.label}` : `${rel?.fromId.slice(0, 6)}… → ${rel?.toId.slice(0, 6)}…`,
-        x: e.clientX,
-        y: e.clientY,
-        anchor: "cursor",
-      });
-      return;
-    }
-    const grpId = renderer.hitTestGroup(rs, world.x, world.y);
-    if (grpId) {
-      const g = store.sheet.boundaries.find((gr) => gr.id === grpId);
-      showCanvasHelp({
-        title: "Group",
-        body: g?.label ?? `${g?.memberIds.length ?? 0} members`,
-        x: e.clientX,
-        y: e.clientY,
-        anchor: "cursor",
-      });
-      return;
-    }
-    const sumId = renderer.hitTestSummary(rs, world.x, world.y);
-    if (sumId) {
-      const sm = store.sheet.summaries.find((sr) => sr.id === sumId);
-      showCanvasHelp({
-        title: "Summary",
-        body: sm?.label ?? `${sm?.memberIds.length ?? 0} topics`, 
-        x: e.clientX,
-        y: e.clientY,
-        anchor: "cursor",
-      });
-      return;
-    }
-    showCanvasHelp(null);
-  };
-
   const onPointerDown = (e: RPointerEvent): void => {
     interactedRef.current = true;
     // Best-effort: capture keeps move/up events coming if the pointer leaves
@@ -785,13 +721,6 @@ export function CanvasView(): JSX.Element {
     const dy = y - drag.lastY;
     drag.lastX = x;
     drag.lastY = y;
-
-    // Shift-inspection: while Shift is held, hovering the canvas shows what
-    // is under the cursor. Skipped during active gestures (drag/resize/pan/
-    // marquee) so the tooltip never fights a real interaction.
-    if (isShiftHeld() && !drag.dragging && !drag.resizing && !drag.imgResizing && !drag.marqueeActive) {
-      showCanvasInspection(e, x, y);
-    }
 
     if (drag.imgResizing) {
       const s = store.getSnapshot();

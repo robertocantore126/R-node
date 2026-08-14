@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import { runExportHtml } from "../editor/exportBridge";
-import { referencedAssetIds } from "../persist/assets";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
 
@@ -63,9 +62,6 @@ export function TopBar(): JSX.Element {
         <button className="btn small" data-help="New document" data-help-more="Creates a fresh empty map. Nothing is saved until you press Save." onClick={() => store.newDocument()}>
           + New
         </button>
-        <button className="btn small" data-help="From template" data-help-more="Creates a document from the built-in roadmap template." onClick={() => store.switchToDoc(store.duplicateSample())} title="Create a doc from the roadmap template">
-          Template
-        </button>
         <button className="btn" data-help="Open" data-help-more="Opens a .rnode document from disk (Ctrl+O)." title="Open a .rnode.json file (Ctrl+O)" onClick={() => void store.loadFile()}>
           Open
         </button>
@@ -110,8 +106,8 @@ export function TopBar(): JSX.Element {
       </div>
 
       <div className="topbar-group">
-        <button className={`btn icon${state.showInspector ? " on" : ""}`} data-help="Inspector panel" data-help-more="Toggles the style/task/notes panel for the selected topic." title="Inspector panel" onClick={() => store.toggleInspector()}>
-          ⚙
+        <button className={`btn icon${state.showOutliner ? " on" : ""}`} data-help="Outline panel" data-help-more="Toggles the document outline — the same tree as the canvas, as a list." title="Outline panel" onClick={() => store.toggleOutliner()}>
+          ▤
         </button>
         <button className="btn icon" data-help="Command palette" data-help-more="Search any command or open a document (Ctrl+K)." title="Command palette (Ctrl+K)" onClick={() => store.togglePalette()}>
           ⌘
@@ -139,40 +135,29 @@ export function TopBar(): JSX.Element {
 
       <div className="topbar-group" ref={exportRef}>
         <div className="menu-wrap">
-          <button className="btn" data-help="Export menu" data-help-more="Exports the document: JSON, ZIP with images, Markdown, or a self-contained HTML viewer. Only working formats are listed." onClick={() => setExportOpen((o) => !o)}>
+          <button className="btn" data-help="Export menu" data-help-more="Exports the document: Markdown, or a self-contained HTML viewer." onClick={() => setExportOpen((o) => !o)}>
             Export ▾
           </button>
           {exportOpen && (
             <div className="menu">
-              <button data-help="Export JSON" data-help-more="The document as plain JSON — text, styles, positions. No images." onClick={() => { store.exportJson(); setExportOpen(false); }}>JSON (.rnode.json)</button>
-              {/* Only offered when there is something to carry: a .rnode.zip of
-                  an image-less map is just document.json in a container. */}
-              {referencedAssetIds(store.sheet).size > 0 && (
-                <>
-                  <button data-help="Export with images — originals" data-help-more="A .rnode.zip carrying the original image files (large but lossless)." onClick={() => { void store.exportRnodeZip("complete"); setExportOpen(false); }}>
-                    With images — originals (.rnode.zip)
-                  </button>
-                  <button data-help="Export with images — compact" data-help-more="A .rnode.zip with scaled-down images (smaller, good enough on screen)." onClick={() => { void store.exportRnodeZip("compact"); setExportOpen(false); }}>
-                    With images — compact (.rnode.zip)
-                  </button>
-                </>
-              )}
               <button data-help="Export Markdown" data-help-more="The map as a bulleted Markdown outline. Text only." onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
               <button data-help="Interactive viewer" data-help-more="A self-contained HTML file with the renderer built in — open it anywhere, no R-node needed." onClick={() => { runExportHtml(); setExportOpen(false); }}>Interactive viewer (.html) — read on screen</button>
-              {/* SVG / PNG / PDF exist in the code (src/export, src/dev/pdfProbe) but
-                  are not real yet: SVG stalls on large maps, PNG is the viewport
-                  only, PDF is an experiment with a blank-page history. Removed
-                  from the GUI until they are. */}
+              {/* JSON, ZIP and image-carrying exports existed here but were
+                  removed from the GUI: this menu ships only Markdown and the
+                  HTML viewer. SVG / PNG / PDF exist in the code (src/export,
+                  src/dev/pdfProbe) but are not real yet: SVG stalls on large
+                  maps, PNG is the viewport only, PDF is an experiment with a
+                  blank-page history. Off the GUI until they are. */}
             </div>
           )}
         </div>
 
       </div>
 
-      {/* Outline panel, mirrored to the sidebar hamburger on the far left. */}
+      {/* Inspector toggle on the far right (position inverted with the Outline one). */}
       <div className="topbar-group topbar-outline">
-        <button className={`btn icon${state.showOutliner ? " on" : ""}`} data-help="Outline panel" data-help-more="Toggles the document outline — the same tree as the canvas, as a list." title="Outline panel" onClick={() => store.toggleOutliner()}>
-          ▤
+        <button className={`btn icon${state.showInspector ? " on" : ""}`} data-help="Inspector panel" data-help-more="Toggles the style/task/notes panel for the selected topic." title="Inspector panel" onClick={() => store.toggleInspector()}>
+          ⚙
         </button>
       </div>
     </header>

@@ -9,8 +9,6 @@ import { CanvasView } from "./ui/CanvasView";
 import { Outliner } from "./ui/Outliner";
 import { Inspector } from "./ui/Inspector";
 import { Palette } from "./ui/Palette";
-import { HelpOverlay } from "./ui/HelpOverlay";
-import { hideHelp, setShiftHeld, trackHover } from "./ui/help";
 
 export function App(): JSX.Element {
   const store = useStore();
@@ -19,42 +17,6 @@ export function App(): JSX.Element {
   useEffect(() => {
     document.documentElement.dataset.theme = state.theme;
   }, [state.theme]);
-
-  // Inspection mode: Shift held reveals what is under the cursor. Shift is
-  // otherwise free (all existing shortcuts combine it with other keys), so a
-  // plain Shift press is safe to claim. Tooltips follow the cursor via the
-  // document mouseover; canvas objects are hit-tested in CanvasView.
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key !== "Shift") return;
-      // Typing capitals in a field must not pop the tooltip over it — the
-      // inspection reveal is for hovering, not for holding Shift while typing.
-      const tag = (e.target as HTMLElement | null)?.tagName ?? "";
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      setShiftHeld(true);
-    };
-    const onKeyUp = (e: KeyboardEvent): void => {
-      if (e.key === "Shift") setShiftHeld(false);
-    };
-    const onMouseOver = (e: MouseEvent): void => {
-      const el = (e.target as HTMLElement | null)?.closest?.("[data-help]") as HTMLElement | null ?? null;
-      trackHover(el);
-    };
-    const onBlur = (): void => {
-      setShiftHeld(false);
-      hideHelp();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    document.addEventListener("mouseover", onMouseOver);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-      document.removeEventListener("mouseover", onMouseOver);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -112,7 +74,6 @@ export function App(): JSX.Element {
         </div>
       )}
 
-      <HelpOverlay />
     </div>
   );
 }
