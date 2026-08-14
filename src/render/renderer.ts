@@ -11,7 +11,7 @@ import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, FONT_STACK, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -892,12 +892,17 @@ export class Renderer {
       this.drawPlaceholder(p, color);
       return;
     }
-    const pad = n.style.padding ?? 10;
+    // A custom shape's textBox already IS the safe area its author chose, so
+    // padding and TEXT_INSET are not charged on top of it. Doing so ate a small
+    // box entirely and wrapped the label one letter per line.
+    const artBox = n.style.shape === "custom" ? n.style.shapeTextBox : undefined;
+    const pad = artBox ? 0 : n.style.padding ?? 10;
+    const inset = artBox ? 0 : TEXT_INSET;
     // Side images reserve their columns; the wrap width shrinks by the same
     // amount measureTopic uses, so the bitmap (keyed on this width) is
     // invalidated exactly when a side image appears or disappears.
     const slots = positionedImageSlots(p, n, this.resolveImage);
-    const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET - slots.sidePadW);
+    const maxW = Math.max(20, p.w - pad * 2 - inset - slots.sidePadW);
     // Resolution bucket: re-render the bitmap only when the zoom crosses a
     // power-of-two boundary; between boundaries pan/zoom just blits.
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
@@ -924,11 +929,16 @@ export class Renderer {
     // bottom one, between the side ones — each separated by IMAGE_GAP. With
     // no images at all this reduces to the old vertical centering exactly
     // (p.y + pad + (p.h − pad·2 − totalH)/2 = p.y + (p.h − totalH)/2).
-    const topBlock = (slots.slots.top?.h ?? 0) + (slots.slots.top ? IMAGE_GAP : 0);
-    const botBlock = slots.slots.bottom ? IMAGE_GAP + slots.slots.bottom.h : 0;
+    // Read from the INSETS, not from the image slots. For images the two agree
+    // exactly (an occupied slot's inset is its size plus one gap), but a custom
+    // shape's text box only reaches this far through the insets — and reading
+    // the slots meant the label of a shape node was drawn at the box's left
+    // edge, outside the drawing entirely.
+    const topBlock = slots.insets.top;
+    const botBlock = slots.insets.bottom;
     const midH = topBlock + totalH + botBlock;
     const startY = p.y + pad + topBlock + Math.max(0, (p.h - pad * 2 - midH) / 2);
-    const startX = p.x + pad + (slots.slots.left ? slots.slots.left.w + IMAGE_GAP : 0);
+    const startX = p.x + pad + slots.insets.left;
     if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, startX, startY, entry.w, entry.h);
   }
 

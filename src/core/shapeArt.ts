@@ -9,6 +9,10 @@
 import type { ShapePaint, ShapePart, Style } from "./types";
 
 export const MAX_PARTS = 12;
+/** Floor for the label's box, as a fraction of the shape. Below this the text
+ *  wraps to one letter per line and the shape is unusable as a topic. */
+export const MIN_TEXTBOX_W = 0.22;
+export const MIN_TEXTBOX_H = 0.16;
 export const MAX_PART_CHARS = 4000;
 export const MAX_TOTAL_CHARS = 12000;
 
@@ -93,6 +97,15 @@ export function validateTextBox(raw: unknown): TextBox {
   if (w <= 0 || h <= 0) throw new ShapeArtInvalid('"textBox" has no area.');
   if (x < 0 || y < 0 || x + w > 1 || y + h > 1) {
     throw new ShapeArtInvalid('"textBox" pokes outside the 0..1 box the shape is drawn in.');
+  }
+  // A box can sit inside the silhouette and still be useless: 0.15 x 0.14 of a
+  // 220px node is 33 x 31 px, which wraps a label one letter per line. Asked
+  // for "a rectangle inside the shape" a model answers with a cautious one, so
+  // the floor is what makes it look for the LARGEST rectangle instead.
+  if (w < MIN_TEXTBOX_W || h < MIN_TEXTBOX_H) {
+    throw new ShapeArtInvalid(
+      `"textBox" is too small to hold a label (${w.toFixed(2)} x ${h.toFixed(2)}; the minimum is ${MIN_TEXTBOX_W} x ${MIN_TEXTBOX_H}). Find the LARGEST rectangle that fits inside the shape, not the first one that does.`,
+    );
   }
   return { x, y, w, h };
 }

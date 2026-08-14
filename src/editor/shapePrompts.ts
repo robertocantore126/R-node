@@ -36,8 +36,10 @@ Rules:
 - Colours are part of the drawing here, unlike text colour: a yellow moon should be yellow on a light map and on a dark one. Choose colours that read on BOTH a white and a near-black background — avoid pure white or pure black for the silhouette.
 - Keep it to at most 12 parts. This is an icon, not a traced photograph.
 - Later parts must stay INSIDE the silhouette drawn by the first one, or they will spill over the edge: the canvas does not clip them.
-- "textBox" is the rectangle the label is written in, same 0..1 space. It MUST lie inside the filled area — this is checked, and a box that pokes outside is rejected.
-- Make the textBox as large as it can be while staying inside. For a concave shape (crescent, arrow, star) that is much smaller than the bounding box: think about where a rectangle actually fits, not about the extremes of the outline.
+- "textBox" is the rectangle the label is written in, same 0..1 space. It MUST lie inside the filled area — this is checked by sampling, and a box that pokes outside is rejected.
+- Give the LARGEST rectangle that fits, not the first one that fits. A cautious little box is rejected too: the minimum is 0.22 wide and 0.16 tall, and below that a label wraps to one letter per line.
+- For a concave shape (crescent, arrow, star) the largest inscribed rectangle is much smaller than the bounding box, and it is NOT centred: put it where the shape is thickest. A crescent's is in the belly, offset away from the hollow — never in the middle of the bounding box.
+- If the drawing genuinely cannot hold a 0.22 x 0.16 rectangle, make the shape fatter rather than shrinking the box.
 - "width" and "height" are the node's fixed size in world units. Keep the aspect ratio of the drawing. 220 is a good default.
 
 Worked example — a two-colour shield:

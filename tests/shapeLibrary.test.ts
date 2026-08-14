@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listShapes, prepareShape, removeShape, saveShape, ShapeRejected } from "../src/editor/shapeLibrary";
 import { runsToPlain } from "../src/core/text";
+import { shapeTextInsets } from "../src/core/shapeArt";
 import { EditorStore } from "../src/editor/store";
 import type { MindNode, Relationship, Style, TextRun } from "../src/core/types";
 
@@ -304,5 +305,38 @@ describe("shape nodes (T24)", () => {
   it("accepts a theme token as a paint, so a shape can follow the palette", () => {
     const out = prepareShape({ ...SHIELD, parts: [{ ...SHIELD.parts[0], fill: "accent" }] });
     expect(out.nodes[0].style.shapeParts![0].fill).toBe("accent");
+  });
+});
+
+describe("shape text box — the three faults the crescent exposed", () => {
+  const MOON = "M0.72,0.08 C0.48,0.12 0.30,0.31 0.30,0.50 C0.30,0.69 0.48,0.88 0.72,0.92 C0.61,0.82 0.54,0.67 0.54,0.50 C0.54,0.33 0.61,0.18 0.72,0.08 Z";
+  const moon = (textBox: object) => ({ kind: "shape", name: "Crescent Moon", width: 220, height: 220, parts: [{ d: MOON, fill: "#f2c94c" }], textBox });
+
+  it("refuses a box that fits but is too small to hold a label", () => {
+    // 0.15 x 0.14 of a 220px node is 33 x 31 px: the label wrapped to one
+    // letter per line. Asked for "a rectangle inside the shape" a model gives
+    // a cautious one, so the floor is what makes it look for the largest.
+    expect(() => prepareShape(moon({ x: 0.34, y: 0.43, w: 0.15, h: 0.14 }))).toThrow(/too small to hold a label/);
+  });
+
+  it("accepts the largest one a real crescent can hold", () => {
+    // Measured against the silhouette, not assumed: the floor has to be
+    // reachable or concave shapes become impossible to author.
+    const out = prepareShape(moon({ x: 0.31, y: 0.42, w: 0.22, h: 0.16 }));
+    expect(out.nodes[0].style.shapeTextBox).toEqual({ x: 0.31, y: 0.42, w: 0.22, h: 0.16 });
+  });
+
+  it("turns the box into insets that put the label inside the drawing", () => {
+    // The bug this pins: drawText read the IMAGE slots for its start position,
+    // so with no image the label was drawn at the node's left edge — outside
+    // the moon entirely — while its WIDTH already came from the insets.
+    const out = prepareShape(moon({ x: 0.31, y: 0.42, w: 0.22, h: 0.16 }));
+    const n = out.nodes[0];
+    const insets = shapeTextInsets(n.style, 220, 220)!;
+    expect(insets.left).toBeCloseTo(68.2, 1);
+    expect(insets.right).toBeCloseTo(103.4, 1);
+    // The moon's belly spans x 66 → 119 at mid height; the label must land in it.
+    expect(insets.left).toBeGreaterThan(66);
+    expect(220 - insets.right).toBeLessThan(119);
   });
 });
