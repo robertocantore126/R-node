@@ -2,6 +2,7 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listShapes, prepareShape, removeShape, saveShape, ShapeRejected } from "../src/editor/shapeLibrary";
 import { runsToPlain } from "../src/core/text";
+import { validateSheet } from "../src/core/validate";
 import { EditorStore } from "../src/editor/store";
 import type { MindNode, Relationship, Style, TextRun } from "../src/core/types";
 
@@ -340,5 +341,79 @@ describe("a structure keeps its shape when a topic is written into", () => {
     const b = Object.values(store.sheet.nodes).find((n) => n.title === "B")!;
     expect(b.style.width).toBe(321);
     expect(b.style.height).toBe(123);
+  });
+});
+
+describe("deleting a special node cannot corrupt the map", () => {
+  const adapter = { label: "test", async load() { return []; }, async save() { /* no-op */ } };
+  const dangling = (store: EditorStore): string[] =>
+    store.sheet.relationships
+      .filter((r) => !store.sheet.nodes[r.fromId] || !store.sheet.nodes[r.toId])
+      .map((r) => r.id);
+
+  it("takes the edges with it instead of leaving them pointing at nothing", () => {
+    // The one way a delete could corrupt a document: an edge left aimed at an
+    // id that is gone. validateSheet already refuses that, and it runs after
+    // every op outside production, so this would surface as a named throw at
+    // the moment of the delete — never as a puzzle weeks later.
+    const store = new EditorStore(adapter as never);
+    const t = saveShape("Triangolo", triangle());
+    store.insertShape(t, store.sheet.rootNodeId);
+    expect(store.sheet.relationships).toHaveLength(1);
+
+    const b = Object.values(store.sheet.nodes).find((n) => n.title === "B")!;
+    store.deleteNodes([b.id]);
+
+    expect(dangling(store)).toEqual([]);
+    expect(() => validateSheet(store.sheet)).not.toThrow();
+  });
+
+  it("puts the whole structure back on one undo, edges included", () => {
+    const store = new EditorStore(adapter as never);
+    const t = saveShape("Triangolo", triangle());
+    store.insertShape(t, store.sheet.rootNodeId);
+    const a = Object.values(store.sheet.nodes).find((n) => n.title === "A")!;
+
+    store.deleteNodes([a.id]); // the root of the shape: takes B and C with it
+    expect(Object.values(store.sheet.nodes).filter((n) => ["A", "B", "C"].includes(n.title))).toHaveLength(0);
+    expect(dangling(store)).toEqual([]);
+
+    store.undo();
+    expect(Object.values(store.sheet.nodes).filter((n) => ["A", "B", "C"].includes(n.title))).toHaveLength(3);
+    expect(store.sheet.relationships).toHaveLength(1);
+    expect(dangling(store)).toEqual([]);
+    expect(() => validateSheet(store.sheet)).not.toThrow();
+  });
+
+  it("leaves nothing behind outside the document — no orphaned asset, ever", () => {
+    // A code topic keeps its source in `title` and a shape keeps its artwork in
+    // `style`. Neither reaches into the AssetStore, and a template carrying an
+    // image is refused at the door, so a deleted special node can never leave
+    // bytes stranded the way a deleted image node can.
+    const store = new EditorStore(adapter as never);
+    const shape = saveShape("Scudo", {
+      kind: "shape", name: "Scudo", width: 200, height: 200,
+      parts: [{ d: "M0.1,0.1 L0.9,0.1 L0.9,0.9 L0.1,0.9 Z", fill: "#8c2f39" }],
+    });
+    store.insertShape(shape, store.sheet.rootNodeId);
+    const node = Object.values(store.sheet.nodes).find((n) => n.style.shape === "custom")!;
+    expect(node.style.shapeParts).toHaveLength(1);
+    expect(store.sheet.attachments).toHaveLength(0);
+
+    store.deleteNodes([node.id]);
+    expect(store.sheet.attachments).toHaveLength(0);
+    expect(() => validateSheet(store.sheet)).not.toThrow();
+  });
+
+  it("survives the template being deleted from the library afterwards", () => {
+    // Inserted shapes are stamps, not instances: nothing links a topic back to
+    // the template it came from, so emptying the library cannot reach them.
+    const store = new EditorStore(adapter as never);
+    const t = saveShape("Triangolo", triangle());
+    store.insertShape(t, store.sheet.rootNodeId);
+    removeShape(t.id);
+    expect(listShapes()).toEqual([]);
+    expect(Object.values(store.sheet.nodes).filter((n) => ["A", "B", "C"].includes(n.title))).toHaveLength(3);
+    expect(() => validateSheet(store.sheet)).not.toThrow();
   });
 });
