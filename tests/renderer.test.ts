@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Renderer } from "../src/render/renderer";
 import type { MindNode } from "../src/core/types";
+import { THEMES } from "../src/render/theme";
 
 /**
  * Every offscreen canvas reports the SAME fixed dimensions (2048×2048 → exactly
@@ -183,5 +184,78 @@ describe("placement cache", () => {
     const { place, state } = setup();
     const first = place(state(undefined));
     expect(place(state(undefined))).not.toBe(first);
+  });
+});
+
+describe("the rings drawn around a topic", () => {
+  /** A context that records the rectangles it is asked to stroke. */
+  function recordingCtx(): { ctx: CanvasRenderingContext2D; rects: number[][] } {
+    const rects: number[][] = [];
+    const target: Record<string | symbol, unknown> = {};
+    const ctx = new Proxy(target, {
+      get(_t, p) {
+        if (p === "measureText") return (text: string) => ({ width: text.length * 8 });
+        if (p === "strokeRect") return (...args: number[]) => void rects.push(args);
+        return () => {};
+      },
+      set(_t, p, v) {
+        target[p] = v;
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx, rects };
+  }
+
+  const BOX = { x: 100, y: 50, w: 160, h: 40 };
+
+  function ringsFor(over: Record<string, unknown>): number[][] {
+    const { ctx, rects } = recordingCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const renderer = new Renderer(makeFakeCanvas(ctx));
+    const root = makeNode("root");
+    root.parentId = null;
+    root.childrenIds = ["a"];
+    const a = makeNode("a");
+    const sheet = {
+      sheetId: "s", title: "t",
+      structure: { structureType: "mindmap", orientation: "horizontal", spacing: 180, branchSpacing: 14, padding: 18, compactMode: false, autoBalance: true, freePositioningBranches: false, allowManualPositioning: true, connectorStyle: "curved" },
+      rootNodeId: "root", nodes: { root, a },
+      relationships: [], boundaries: [], summaries: [], callouts: [], labels: [], zones: [], attachments: [], comments: [], presentation: {},
+    } as never;
+    const state = {
+      sheet, camera: { x: 0, y: 0, scale: 1 }, selection: new Set<string>(), editingId: null,
+      hoverId: null, drop: null, themeName: "light", viewW: 800, viewH: 600, rev: 1, ...over,
+    } as never;
+    const placed = { node: a, ...BOX, visible: true } as never;
+    (renderer as unknown as { drawNode: (t: unknown, p: never, s: never) => void }).drawNode(THEMES.light, placed, state);
+    return rects;
+  }
+
+  it("puts the hover ring and the selection ring on exactly the same rectangle", () => {
+    // They used to differ — hover at pad 2, selection at pad 3 — so the outline
+    // jumped a pixel outward the instant a hovered topic was clicked. Nothing
+    // in the document changed there, which is why no op, no layout and no cache
+    // counter in a trace could show it: the flicker lived only in the paint.
+    const hover = ringsFor({ hoverId: "a" });
+    const selected = ringsFor({ selection: new Set(["a"]) });
+
+    expect(hover.length).toBeGreaterThan(0);
+    expect(selected.length).toBeGreaterThan(0);
+    expect(hover[0]).toEqual(selected[0]);
+  });
+
+  it("draws the marquee preview ring on that same rectangle too", () => {
+    const marquee = ringsFor({ marqueeSel: new Set(["a"]) });
+    const selected = ringsFor({ selection: new Set(["a"]) });
+    expect(marquee[0]).toEqual(selected[0]);
+  });
+
+  it("keeps the ring outside the box on every side", () => {
+    const [ring] = ringsFor({ selection: new Set(["a"]) });
+    const [x, y, w, h] = ring;
+    expect(x).toBeLessThan(BOX.x);
+    expect(y).toBeLessThan(BOX.y);
+    expect(x + w).toBeGreaterThan(BOX.x + BOX.w);
+    expect(y + h).toBeGreaterThan(BOX.y + BOX.h);
   });
 });

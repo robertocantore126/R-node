@@ -68,6 +68,15 @@ interface Placed {
   visible: boolean;
 }
 
+/**
+ * Geometry of every outline drawn around a topic. ONE distance from the box,
+ * shared by selection, marquee preview and hover — see Renderer.strokeRing for
+ * why they must not differ. The weights below are the only thing that may.
+ */
+const RING_PAD = 3;
+const RING_W_SELECTED = 2.5;
+const RING_W_HOVER = 1.5;
+
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private dpr = 1;
@@ -543,6 +552,23 @@ export class Renderer {
     return prev ?? n.id;
   }
 
+  /**
+   * The outline drawn around a topic — selection, marquee preview, hover.
+   *
+   * One geometry for all three, on purpose. They used to differ: hover sat at
+   * pad 2 with a 1.5px stroke, selection at pad 3 with 2.5px, so the ring
+   * jumped a pixel outward at the exact moment a hovered topic was clicked.
+   * Nothing in the document changed there — no op, no reflow, not even a text
+   * bitmap — which is why the flicker was invisible to every measurement until
+   * it was looked for in the painting. Only the WEIGHT may distinguish these
+   * states; a ring that also moves reads as the node itself twitching.
+   */
+  private strokeRing(ctx: CanvasRenderingContext2D, p: { x: number; y: number; w: number; h: number }, lineWidth: number): void {
+    ctx.lineWidth = lineWidth;
+    ctx.setLineDash([]);
+    ctx.strokeRect(p.x - RING_PAD, p.y - RING_PAD, p.w + RING_PAD * 2, p.h + RING_PAD * 2);
+  }
+
   private drawNode(theme: RenderTheme, p: Placed, state: RenderState): void {
     const ctx = this.ctx;
     const n = p.node;
@@ -583,10 +609,7 @@ export class Renderer {
     // selection ring
     if (selected) {
       ctx.strokeStyle = theme.selection;
-      ctx.lineWidth = 2.5;
-      ctx.setLineDash([]);
-      const pad = 3;
-      ctx.strokeRect(p.x - pad, p.y - pad, p.w + pad * 2, p.h + pad * 2);
+      this.strokeRing(ctx, p, RING_W_SELECTED);
 
       // Xmind-style resize handles on BOTH edges (hidden while editing — the
       // HTML overlay owns the node then). Dragging changes the width and the
@@ -635,28 +658,21 @@ export class Renderer {
     // really selected until the release).
     if (!selected && state.marqueeSel?.has(n.id)) {
       ctx.strokeStyle = theme.selection;
-      ctx.lineWidth = 2.5;
-      ctx.setLineDash([]);
-      const pad = 3;
-      ctx.strokeRect(p.x - pad, p.y - pad, p.w + pad * 2, p.h + pad * 2);
+      this.strokeRing(ctx, p, RING_W_SELECTED);
     }
     // Image selection ring: the image is selected (not the node) — outline
     // around the SELECTED slot so Backspace/Delete knows what it will remove.
     if (state.imageSel === n.id) {
       const ir = this.selectedImageRect(state, p); // same reason as above
       if (ir) {
-        const pad = 3;
         ctx.strokeStyle = theme.selection;
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([]);
-        ctx.strokeRect(ir.x - pad, ir.y - pad, ir.w + pad * 2, ir.h + pad * 2);
+        this.strokeRing(ctx, ir, RING_W_SELECTED);
       }
     }
     if (state.hoverId === n.id && !selected) {
       ctx.strokeStyle = theme.selection;
-      ctx.lineWidth = 1.5;
       ctx.globalAlpha = opacity * 0.55;
-      ctx.strokeRect(p.x - 2, p.y - 2, p.w + 4, p.h + 4);
+      this.strokeRing(ctx, p, RING_W_HOVER);
       ctx.globalAlpha = opacity;
     }
 
