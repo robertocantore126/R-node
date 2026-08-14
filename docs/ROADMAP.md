@@ -618,6 +618,53 @@ documento. Non aggiungere una dipendenza di evidenziazione in questo spike.
 
 ---
 
+## T23 — Libreria di forme componibili · P2
+
+**Obiettivo.** Un pannello nella metà bassa della colonna destra, sotto
+l'Inspector: un bottone apre una scheda dove si incolla un sottografo, gli si dà
+un nome e resta salvato. Le forme salvate si trascinano sulla mappa e, **solo se
+il rilascio cade su un topic**, vengono inserite come suo figlio.
+
+**Perché.** Strutture prefabbricate (un ciclo a 3, un anello a 5, l'Albero della
+Vita) oggi si costruiscono a mano ogni volta. E il formato per descriverle
+esiste già.
+
+### La decisione che rende la feature piccola
+
+Una forma **non** è un nodo speciale: sono N topic nativi più le loro
+`Relationship`. Un "super-nodo" opaco sarebbe invisibile a ricerca, outliner,
+export, `validateSheet` e undo — cioè per costruzione la stessa classe di
+difetto di BUG-002, moltiplicata per ogni consumatore. Come N nodi, invece,
+tutto funziona già e la forma resta modificabile dopo l'inserimento.
+
+Di conseguenza **non serve nessuna DSL nuova**: il formato è quello che
+`copySelection` già scrive (`{ app: "r-node", payload: { rootId, nodes,
+relationships } }`) e che `paste` già istanzia rimappando gli id. L'utente può
+disegnare una forma a mano, copiarla e incollarla nella libreria; un LLM a cui
+si chiede una forma emette lo stesso identico oggetto.
+
+**File.** `src/editor/shapeLibrary.ts` (nuovo) · `src/ui/ShapeLibrary.tsx`
+(nuovo) · `src/App.tsx` · `src/styles.css` · `src/ui/CanvasView.tsx` ·
+`src/editor/store.ts` · i rispettivi test.
+
+**Fatto quando.**
+- Una forma incollata, nominata e salvata sopravvive al reload.
+- Trascinata su un topic diventa suo figlio con la geometria intatta; rilasciata
+  sul vuoto viene rifiutata **con il motivo tracciato**.
+- Un solo Ctrl+Z rimuove l'intera forma.
+- Un template malformato viene rifiutato da `saveShape`, non al momento del drop.
+- L'altezza di `.canvas-area` **non cambia** quando il pannello si riempie e
+  scorre — misurata, non guardata: è la colonna che ha già avuto quel baco
+  (`cb5b5df`).
+
+**Non fare.** Nessun secondo formato, nessun secondo rimappatore di id, nessun
+super-nodo, template fuori dal documento (è una libreria dell'utente, come i
+colori recenti).
+
+Brief operativo: [T23-HANDOFF.md](../T23-HANDOFF.md) (usa e getta).
+
+---
+
 ## Fuori roadmap (decisione del proprietario)
 
 Non iniziare senza richiesta esplicita:
