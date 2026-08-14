@@ -219,6 +219,14 @@ export interface Relationship {
   label?: string;
   color?: string;
   lineStyle?: "solid" | "dashed" | "dotted";
+  /**
+   * Line GEOMETRY, as opposed to `lineStyle`'s dash pattern. Absent means
+   * "curved", so every document written before this field keeps the look it
+   * has. Shape templates set it to "straight" (T23); the renderer honours it
+   * from T24 on. The union is the one `StructureConfig` already uses — the
+   * alternative was a second, parallel vocabulary for the same idea.
+   */
+  connector?: ConnectorStyle;
   bidirectional?: boolean;
 }
 

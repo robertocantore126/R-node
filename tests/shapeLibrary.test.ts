@@ -1,0 +1,198 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { listShapes, prepareShape, removeShape, saveShape, ShapeRejected } from "../src/editor/shapeLibrary";
+import { runsToPlain } from "../src/core/text";
+import type { MindNode, Relationship, Style, TextRun } from "../src/core/types";
+
+function node(id: string, over: Partial<MindNode> = {}): MindNode {
+  return {
+    id,
+    type: "subtopic",
+    parentId: null,
+    childrenIds: [],
+    title: id.toUpperCase(),
+    position: { x: 0, y: 0, manual: false },
+    style: {},
+    collapsed: false,
+    labels: [],
+    markers: [],
+    notes: "",
+    task: null,
+    metadata: { createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+    ...over,
+  };
+}
+
+/** root a → children b, c, with an edge b→c: the 3-cycle of the prompt. */
+function triangle(over: { nodes?: Partial<Record<"a" | "b" | "c", Partial<MindNode>>>; rels?: Relationship[] } = {}) {
+  const a = node("a", { childrenIds: ["b", "c"], ...over.nodes?.a });
+  const b = node("b", { parentId: "a", ...over.nodes?.b });
+  const c = node("c", { parentId: "a", ...over.nodes?.c });
+  return {
+    app: "r-node",
+    payload: {
+      rootId: "a",
+      nodes: [a, b, c],
+      relationships: over.rels ?? [{ id: "r1", fromId: "b", toId: "c" }],
+    },
+  };
+}
+
+const store = new Map<string, string>();
+beforeEach(() => {
+  store.clear();
+  globalThis.localStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, v),
+    removeItem: (k: string) => void store.delete(k),
+    clear: () => store.clear(),
+    key: () => null,
+    length: 0,
+  } as unknown as Storage;
+});
+afterEach(() => store.clear());
+
+describe("prepareShape — what a template may carry", () => {
+  it("accepts the shape of payload copySelection writes", () => {
+    const out = prepareShape(triangle());
+    expect(out.nodes).toHaveLength(3);
+    expect(out.relationships).toHaveLength(1);
+  });
+
+  it("strips fill, stroke and textColor, keeping the form", () => {
+    // A stored colour eventually lands on a theme where it cannot be read.
+    const style: Style = { fill: "#ff0000", stroke: "#00ff00", textColor: "#0000ff", shape: "hexagon", fontSize: 22, width: 200 };
+    const out = prepareShape(triangle({ nodes: { b: { style } } }));
+    const b = out.nodes.find((n) => n.id === "b")!;
+    expect(b.style.fill).toBeUndefined();
+    expect(b.style.stroke).toBeUndefined();
+    expect(b.style.textColor).toBeUndefined();
+    expect(b.style.shape).toBe("hexagon");
+    expect(b.style.fontSize).toBe(22);
+    expect(b.style.width).toBe(200);
+  });
+
+  it("strips the colour of every RUN, not only of the node", () => {
+    // The easy one to miss: emphasis colour lives on the run. Leaving it would
+    // defeat the whole rule while the node's own style looked clean.
+    const titleRuns: TextRun[] = [{ text: "rosso ", color: "#ff0000" }, { text: "e nero", bold: true }];
+    const out = prepareShape(triangle({ nodes: { b: { title: "rosso e nero", titleRuns } } }));
+    const b = out.nodes.find((n) => n.id === "b")!;
+    expect(b.titleRuns!.every((r) => r.color === undefined)).toBe(true);
+    expect(b.titleRuns![1].bold).toBe(true); // emphasis survives, only colour goes
+  });
+
+  it("leaves the text itself untouched, so I5 still holds", () => {
+    const titleRuns: TextRun[] = [{ text: "abc", color: "#123456" }, { text: "def" }];
+    const out = prepareShape(triangle({ nodes: { b: { title: "abcdef", titleRuns } } }));
+    const b = out.nodes.find((n) => n.id === "b")!;
+    expect(runsToPlain(b.titleRuns!)).toBe(b.title);
+  });
+
+  it("forces the geometry rigid on every node", () => {
+    const out = prepareShape(triangle());
+    expect(out.nodes.every((n) => n.position.manual === true)).toBe(true);
+  });
+
+  it("keeps the titles — the reason for saving a shape at all", () => {
+    const out = prepareShape(triangle({ nodes: { b: { title: "Chokhmah" } } }));
+    expect(out.nodes.find((n) => n.id === "b")!.title).toBe("Chokhmah");
+  });
+
+  it("drops a map's state: task, labels, markers, collapsed", () => {
+    const out = prepareShape(
+      triangle({ nodes: { b: { task: { status: "in-progress", priority: "high", progress: 40 }, labels: ["x"], markers: ["m"], collapsed: true, notes: "tenuto" } } }),
+    );
+    const b = out.nodes.find((n) => n.id === "b")!;
+    expect(b.task).toBeNull();
+    expect(b.labels).toEqual([]);
+    expect(b.markers).toEqual([]);
+    expect(b.collapsed).toBe(false);
+    expect(b.notes).toBe("tenuto"); // notes is content, it stays
+  });
+
+  it("makes every relationship a straight segment and drops its colour", () => {
+    const out = prepareShape(triangle({ rels: [{ id: "r1", fromId: "b", toId: "c", color: "#abcdef" }] }));
+    expect(out.relationships[0].connector).toBe("straight");
+    expect(out.relationships[0].color).toBeUndefined();
+  });
+
+  it("detaches the root, which still points at its parent in the map it came from", () => {
+    const out = prepareShape(triangle({ nodes: { a: { parentId: "somewhere-else" } } }));
+    expect(out.nodes.find((n) => n.id === "a")!.parentId).toBeNull();
+  });
+
+  it("drops a custom silhouette: a structure uses base shapes only", () => {
+    const out = prepareShape(triangle({ nodes: { b: { style: { shape: "moon" as never } } } }));
+    expect(out.nodes.find((n) => n.id === "b")!.style.shape).toBeUndefined();
+  });
+});
+
+describe("prepareShape — refusals", () => {
+  const rejects = (input: unknown, needle: string): void => {
+    expect(() => prepareShape(input as object)).toThrow(ShapeRejected);
+    expect(() => prepareShape(input as object)).toThrow(needle);
+  };
+
+  it("refuses an image, naming the topic", () => {
+    // The bytes live in a per-document AssetStore keyed by SHA-256: the
+    // template would carry the reference without them and draw a hole.
+    rejects(triangle({ nodes: { b: { title: "Foto", style: { imageLeft: "sha-1" } } } }), "Foto");
+  });
+
+  it("refuses a parentId that resolves to nothing", () => {
+    rejects(triangle({ nodes: { b: { parentId: "ghost" } } }), "inconsistent");
+  });
+
+  it("refuses a node unreachable from the root", () => {
+    rejects(triangle({ nodes: { a: { childrenIds: ["b"] }, c: { parentId: null } } }), "inconsistent");
+  });
+
+  it("refuses text that is not JSON, an alien payload, and an empty one", () => {
+    rejects("{not json", "valid JSON");
+    rejects({ app: "drawio", payload: {} }, "R-node payload");
+    rejects({ app: "r-node", payload: { rootId: "a", nodes: [] } }, "non-empty");
+  });
+
+  it("refuses a root that is not among the topics", () => {
+    rejects({ app: "r-node", payload: { rootId: "zzz", nodes: [node("a")], relationships: [] } }, "not among the topics");
+  });
+
+  it("refuses a template larger than the cap", () => {
+    const many = Array.from({ length: 201 }, (_, i) => node(`n${i}`));
+    rejects({ app: "r-node", payload: { rootId: "n0", nodes: many, relationships: [] } }, "Too large");
+  });
+
+  it("drops an edge whose endpoint is not in the payload instead of storing it", () => {
+    const out = prepareShape(triangle({ rels: [{ id: "r1", fromId: "b", toId: "elsewhere" }] }));
+    expect(out.relationships).toHaveLength(0);
+  });
+});
+
+describe("the library", () => {
+  it("saves, lists and removes", () => {
+    expect(listShapes()).toEqual([]);
+    const t = saveShape("Ciclo a 3", triangle());
+    expect(listShapes()).toHaveLength(1);
+    expect(listShapes()[0].name).toBe("Ciclo a 3");
+    removeShape(t.id);
+    expect(listShapes()).toEqual([]);
+  });
+
+  it("refuses a nameless shape and stores nothing when the payload is bad", () => {
+    expect(() => saveShape("  ", triangle())).toThrow(ShapeRejected);
+    expect(() => saveShape("Rotta", { app: "r-node", payload: { rootId: "a", nodes: [] } })).toThrow(ShapeRejected);
+    expect(listShapes()).toEqual([]);
+  });
+
+  it("gives two shapes of the same name distinct ids", () => {
+    const a = saveShape("Ciclo", triangle());
+    const b = saveShape("Ciclo", triangle());
+    expect(a.id).not.toBe(b.id);
+    expect(listShapes()).toHaveLength(2);
+  });
+
+  it("reads a corrupt store as an empty library rather than breaking the panel", () => {
+    store.set("r-node.shape-library", "{{{ not json");
+    expect(listShapes()).toEqual([]);
+  });
+});
