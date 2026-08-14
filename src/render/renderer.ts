@@ -892,17 +892,18 @@ export class Renderer {
       this.drawPlaceholder(p, color);
       return;
     }
-    // A custom shape's textBox already IS the safe area its author chose, so
-    // padding and TEXT_INSET are not charged on top of it. Doing so ate a small
-    // box entirely and wrapped the label one letter per line.
-    const artBox = n.style.shape === "custom" ? n.style.shapeTextBox : undefined;
-    const pad = artBox ? 0 : n.style.padding ?? 10;
-    const inset = artBox ? 0 : TEXT_INSET;
+    const pad = n.style.padding ?? 10;
     // Side images reserve their columns; the wrap width shrinks by the same
     // amount measureTopic uses, so the bitmap (keyed on this width) is
     // invalidated exactly when a side image appears or disappears.
+    //
+    // A custom shape does NOT narrow this. Its drawing is a BACKGROUND and the
+    // label lays out across the whole box exactly as it would on a rectangular
+    // topic. Confining the text to the silhouette's interior — which is what
+    // this did first — wrapped it one word per line and made the drawing read
+    // as a container it is not.
     const slots = positionedImageSlots(p, n, this.resolveImage);
-    const maxW = Math.max(20, p.w - pad * 2 - inset - slots.sidePadW);
+    const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET - slots.sidePadW);
     // Resolution bucket: re-render the bitmap only when the zoom crosses a
     // power-of-two boundary; between boundaries pan/zoom just blits.
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));

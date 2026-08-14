@@ -128,10 +128,6 @@ export interface Style {
    * (`accent` | `surface` | `text` | `muted`) instead of a hex.
    */
   shapeParts?: ShapePart[];
-  /** Where the label may be written, in the same 0..1 space. Checked against
-   *  the silhouette when the shape is saved: a box that pokes outside is
-   *  refused, because the canvas does not clip. */
-  shapeTextBox?: { x: number; y: number; w: number; h: number };
   padding?: number;
   align?: "left" | "center";
   width?: number;

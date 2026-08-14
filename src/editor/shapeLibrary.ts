@@ -20,7 +20,7 @@
 import { DEFAULT_STRUCTURE, type MindNode, type Relationship, type Sheet, type Style, type TextRun, type TopicShape } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { validateSheet } from "../core/validate";
-import { computeTextBox, makeSilhouetteProbe, validateShapeParts, MIN_TEXTBOX_SIDE, ShapeArtInvalid } from "../core/shapeArt";
+import { validateShapeParts, ShapeArtInvalid } from "../core/shapeArt";
 import { runsToPlain } from "../core/text";
 
 const KEY = "r-node.shape-library";
@@ -239,26 +239,9 @@ function prepareArtShape(raw: Record<string, unknown>): ShapeTemplate["payload"]
   } catch (e) {
     throw e instanceof ShapeArtInvalid ? new ShapeRejected(e.message) : e;
   }
-  // The label's box is DERIVED, never taken from the payload: the largest
-  // square centred on the drawing's centroid. An LLM asked for one got it wrong
-  // in both directions — a rectangle in a crescent's hollow, then one too small
-  // to hold two letters — and could see neither mistake. Any "textBox" in the
-  // input is ignored on purpose.
-  const probe = makeSilhouetteProbe();
-  // Without a DOM the geometry cannot be measured. A centred half-size square
-  // is the honest fallback: it keeps the label inside anything convex, and a
-  // test environment never silently invents a fit it did not check.
-  const box = probe
-    ? computeTextBox(parts, probe)
-    : { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
-  if (!box) {
-    throw new ShapeRejected("That drawing has no area to write a label in — check that the first part is a closed silhouette.");
-  }
-  if (box.w < MIN_TEXTBOX_SIDE) {
-    throw new ShapeRejected(
-      `The shape is too thin to hold a label: the largest square that fits inside it is ${box.w.toFixed(2)} of its size, and ${MIN_TEXTBOX_SIDE} is the minimum. Make the drawing fatter.`,
-    );
-  }
+  // Nothing is checked about where a label would fit, and no shape is refused
+  // for being thin: the drawing is a BACKGROUND. The label lays out across the
+  // node exactly as it does on a rectangular topic, painted over the artwork.
   const width = typeof raw.width === "number" && raw.width > 0 ? raw.width : 220;
   const height = typeof raw.height === "number" && raw.height > 0 ? raw.height : 220;
   const title = typeof raw.name === "string" ? raw.name : "";
@@ -271,7 +254,7 @@ function prepareArtShape(raw: Record<string, unknown>): ShapeTemplate["payload"]
     title,
     titleRuns: [{ text: title }],
     position: { x: 0, y: 0, manual: true },
-    style: { shape: "custom", shapeParts: parts, shapeTextBox: box, width, height },
+    style: { shape: "custom", shapeParts: parts, width, height },
     collapsed: false,
     labels: [],
     markers: [],

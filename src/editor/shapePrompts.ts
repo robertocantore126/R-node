@@ -12,9 +12,11 @@
  * its own, because those colours contrast with each other inside the drawing —
  * a yellow moon is yellow on either theme.
  *
- * Neither asks for a text box. R-node derives the label's square itself, from
- * the drawing: an LLM asked to place one put it in a crescent's hollow, then
- * made it too small to hold two letters, and could see neither mistake.
+ * Neither asks about the label. A shape is a BACKGROUND: the topic's text lays
+ * out across it exactly as it would on a rectangular topic, and is painted on
+ * top. Two earlier attempts confined the text to the drawing's interior — an
+ * LLM-supplied box, then a derived one — and both wrapped a normal title into a
+ * one-word column.
  */
 
 /** A single topic drawn as artwork. Fixed size, editable label. */
@@ -41,8 +43,8 @@ Rules:
 - Colours are part of the drawing here, unlike text colour: a yellow moon should be yellow on a light map and on a dark one. Choose colours that read on BOTH a white and a near-black background — avoid pure white or pure black for the silhouette.
 - Keep it to at most 12 parts. This is an icon, not a traced photograph.
 - Later parts must stay INSIDE the silhouette drawn by the first one, or they will spill over the edge: the canvas does not clip them.
-- Do NOT describe where the label goes. R-node works that out itself: it finds the centre of the drawing and grows the largest square that fits inside it. Draw the shape; the text takes care of itself.
-- Because of that, leave the drawing room to hold a label. A shape whose widest square is under 0.18 of its size is refused as too thin to write in — a hairline crescent or a thin arrow will come back rejected, and the fix is a fatter drawing, not a smaller one.
+- Do NOT describe where the label goes. The drawing is a background: R-node lays the topic's text over it, wrapped across the whole node, exactly as on a rectangular topic. Draw the shape and nothing else.
+- Prefer ONE closed path over clever fill rules. A crescent is a single outline — an outer arc out and an inner arc back — not a disc with a bite taken by "evenodd". Fill rules are for real holes, like a ring.
 - "width" and "height" are the node's fixed size in world units. Keep the aspect ratio of the drawing. 220 is a good default.
 
 Worked example — a two-colour shield:
