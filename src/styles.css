@@ -86,12 +86,22 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* The pair of min-width. Without it this column keeps min-height: auto and
+     refuses to shrink below its content, so it overflowed .app's 100vh and
+     dragged the workspace row with it — measured at 1239px inside a 1009px
+     window. Capping anything further down cannot help once this has grown. */
+  min-height: 0;
 }
 
 .workspace {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr;
+  /* minmax(0, 1fr), not the implicit auto row: an auto row is sized by its
+     TALLEST item, so a panel with more content than fits would drag the row —
+     and the canvas beside it — past the bottom of the window. See the
+     min-height on .inspector for what that cost. */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -469,6 +479,14 @@ textarea:focus {
   background: var(--surface);
   overflow-y: auto;
   padding: 14px;
+  /* A grid item defaults to min-height: auto and so refuses to shrink below
+     its own content: `overflow-y: auto` above never engaged, and a selected
+     topic's controls STRETCHED THE ROW instead of scrolling. The canvas shares
+     that row. Selecting grew it ~180px, which resized the canvas — clearing
+     its buffer — and panned the camera by half the delta to hold the centre:
+     the flicker and the jump on every click, only ever with this panel open.
+     Measured in the app: the canvas oscillated 1364x937 ↔ 1364x1117 per click. */
+  min-height: 0;
 }
 
 .inspector-section {
