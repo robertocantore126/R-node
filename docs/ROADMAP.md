@@ -15,7 +15,7 @@ solo in parte (la sezione dice cosa resta) · senza marcatore = aperto.
 
 ---
 
-## T1 — Invariant checker della topologia · P0
+## T1 — Invariant checker della topologia · P0 · ✅ FATTO
 
 **Obiettivo.** Una funzione pura che verifica che l'albero dei nodi sia
 coerente, invocata dopo ogni batch di operazioni in dev/test.
@@ -65,6 +65,26 @@ silenziosa in un errore immediato e con un nome.
 
 **Non fare.** Non "riparare" automaticamente lo sheet quando trovi
 un'incoerenza: deve fallire, non correggere. Non invocarlo in produzione.
+
+**Chiuso da** `de6c6a2` — *Add a runtime invariant checker for sheet topology*.
+14 test in `tests/validate.test.ts`; il checker gira su ogni op dei test
+esistenti senza far emergere alcuna violazione preesistente.
+
+Due punti dove l'implementazione va **oltre la lettera** dei passi qui sopra.
+Non sono sviste: chi li "semplifica" riporta indietro due bug.
+
+- **I nodi `floating` fanno da radice per la raggiungibilità**, non solo da
+  eccezione al controllo. Il passo 2 esentava i floating ma non i loro
+  discendenti: camminando solo da `rootNodeId`, un figlio droppato su un topic
+  floating — documento legale, vedi `dropAt(…, "child", …)` — sarebbe stato
+  segnalato come orfano.
+- **Il controllo sui cicli come scritto al passo 2 è irraggiungibile.** Con la
+  coerenza parent/children verificata prima, un ciclo raggiungibile dalla
+  radice è impossibile: richiederebbe due `parentId` diversi per lo stesso
+  nodo. Un ciclo reale è quindi sempre *scollegato* dalla radice, e senza un
+  controllo dedicato verrebbe riportato come "orfano". `validateSheet` risale
+  la catena dei parent di ogni nodo irraggiungibile: se si chiude è un ciclo,
+  se finisce a `null` è un orfano, e il messaggio dice quale.
 
 ---
 
