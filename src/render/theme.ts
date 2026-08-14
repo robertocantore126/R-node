@@ -26,6 +26,23 @@ export interface RenderTheme {
   shadow: string;
 }
 
+/**
+ * Mix a `#rrggbb` colour toward white by `t` (0..1). Used to derive the child
+ * shades of an explicitly-coloured node, so a branch the user painted keeps
+ * its hue down the tree instead of falling back to the palette. Anything that
+ * is not a 6-digit hex colour passes through unchanged.
+ */
+export function lighten(hex: string, t: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  const mix = (c: number) => Math.round(c + (255 - c) * t);
+  return `#${((1 << 24) | (mix(r) << 16) | (mix(g) << 8) | mix(b)).toString(16).slice(1)}`;
+}
+
 export const THEMES: Record<ThemeName, RenderTheme> = {
   light: {
     name: "light",

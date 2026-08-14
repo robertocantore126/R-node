@@ -1470,31 +1470,54 @@ export class EditorStore {
     return "";
   }
 
+  /**
+   * Drops fills that are indistinguishable from the system's old stamps.
+   * Documents used to be born carrying the palette colour stamped into
+   * style.fill (main topics vivid, their children the soft tint) — and once a
+   * colour sits in style.fill it wins over every rule in resolveFill, so a map
+   * rooted in a colour the user chose kept its children stuck in the palette
+   * default (red for the first branch) no matter what the parent wore. A fill
+   * that still equals the palette default at the node's current depth is a
+   * stamp, not a choice: dropping it lets resolveFill decide — the same
+   * default for uncoloured branches, the inherited hue under a coloured one.
+   * A colour the user actually picked never equals a default and survives.
+   */
   private normalizeBranchColors(sheet: Sheet): void {
     const root = sheet.nodes[sheet.rootNodeId];
     if (!root) return;
-    for (const [index, childId] of root.childrenIds.entries()) {
-      const child = sheet.nodes[childId];
-      if (!child) continue;
-      if (!child.style.fill) child.style.fill = this.defaultBranchFill(index);
-      const softFill = this.defaultBranchSoftFill(childId);
-      const stack: { id: string; depth: number }[] = [{ id: childId, depth: 1 }];
-      while (stack.length > 0) {
-        const { id: currentId, depth } = stack.pop()!;
-        const current = sheet.nodes[currentId];
-        if (!current) continue;
-        // Depth 2 is the last level that wears the branch's soft tint. Deeper
-        // nodes get no stamped fill, so the renderer's deepFill decides their
-        // colour — stamping every depth froze the soft shade forever and made
-        // the depth rule in the renderer unreachable.
-        if (depth === 2 && !current.style.fill) current.style.fill = softFill;
-        stack.push(...current.childrenIds.map((cid) => ({ id: cid, depth: depth + 1 })));
+    // Mirrors the renderer's depthOf and branchIndex, with a capped walk: a
+    // cycle or a broken parent must terminate instead of looping forever.
+    const depthOf = (id: string): number => {
+      let d = 0;
+      let cur: string | null = id;
+      while (cur && cur !== sheet.rootNodeId && d < 64) {
+        cur = sheet.nodes[cur]?.parentId ?? null;
+        d++;
       }
+      return cur === sheet.rootNodeId ? d : 3;
+    };
+    const branchIndex = (id: string): number => {
+      let cur: string | null = id;
+      let prev: string | null = null;
+      let hops = 0;
+      while (cur && cur !== sheet.rootNodeId && hops < 64) {
+        prev = cur;
+        cur = sheet.nodes[cur]?.parentId ?? null;
+        hops++;
+      }
+      const index = prev ? root.childrenIds.indexOf(prev) : -1;
+      return (index >= 0 ? index : 0) % THEMES.light.branch.length;
+    };
+    for (const id of Object.keys(sheet.nodes)) {
+      const n = sheet.nodes[id];
+      if (!n || id === root.id || !n.style.fill) continue;
+      const depth = depthOf(id);
+      // depth 1 or 2 implies the walk reached the root, so branchIndex is safe.
+      if (depth !== 1 && depth !== 2) continue;
+      const bi = branchIndex(id);
+      const stamp = depth === 1 ? THEMES.light.branch[bi] : THEMES.light.branchSoft[bi];
+      if (n.style.fill === stamp) delete n.style.fill;
     }
-  }
-
-  private defaultBranchFill(index: number): string {
-    return THEMES.light.branch[index % THEMES.light.branch.length];
   }
 
   private createNodePosition(parent: MindNode): { x: number; y: number; manual: boolean } {
@@ -1505,41 +1528,6 @@ export class EditorStore {
     const offsetX = parent.type === "central" ? pSize.w / 2 + st.spacing + estimatedW / 2 + 20 : pSize.w / 2 + st.spacing + estimatedW / 2 + 10;
     const offsetY = parent.type === "central" ? parent.childrenIds.length * (pSize.h + st.branchSpacing) - (parent.childrenIds.length > 0 ? pSize.h / 2 : 0) : parent.childrenIds.length * (pSize.h + st.branchSpacing);
     return { x: base.x + offsetX, y: base.y + offsetY, manual: false };
-  }
-
-  private branchRootId(parentId: string | null): string | null {
-    if (!parentId) return null;
-    let cur: string | null = parentId;
-    let prev: string | null = parentId;
-    while (cur && cur !== this.sheet.rootNodeId) {
-      prev = cur;
-      cur = this.sheet.nodes[cur]?.parentId ?? null;
-    }
-    return prev;
-  }
-
-  private defaultBranchSoftFill(rootId: string | null): string | undefined {
-    if (!rootId) return undefined;
-    const root = this.sheet.nodes[this.sheet.rootNodeId];
-    if (!root) return undefined;
-    const index = root.childrenIds.indexOf(rootId);
-    return THEMES.light.branchSoft[(index >= 0 ? index : 0) % THEMES.light.branchSoft.length];
-  }
-
-  private createNodeStyle(type: NodeType, parentId: string | null, index: number): Style | undefined {
-    if (type === "main" && parentId === this.sheet.rootNodeId) {
-      return { fill: this.defaultBranchFill(index) };
-    }
-    if (type === "subtopic") {
-      const branchRootId = this.branchRootId(parentId);
-      // Only the first level under a main topic wears the soft tint; deeper
-      // topics keep no fill so the renderer's depth rule picks deepFill.
-      if (parentId && this.model.depth(parentId) === 1) {
-        return { fill: this.defaultBranchSoftFill(branchRootId) };
-      }
-      return undefined;
-    }
-    return undefined;
   }
 
   createSibling(): void {
@@ -1555,8 +1543,7 @@ export class EditorStore {
     const type: NodeType = parent.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(type === "main" ? parent : node);
-    const style = this.createNodeStyle(type, parent.id, index);
-    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: parent.id, index, title: this.defaultTopicTitle(), position, style })]);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: parent.id, index, title: this.defaultTopicTitle(), position })]);
     // The layout must settle BEFORE the editor opens, or the overlay would
     // mount on the provisional position and the topic would appear to jump.
     this.settleLayoutNow();
@@ -1568,8 +1555,7 @@ export class EditorStore {
     const type: NodeType = node.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(node);
-    const style = this.createNodeStyle(type, node.id, node.childrenIds.length);
-    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(), position, style })]);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(), position })]);
     // Tab spawns the child without entering edit mode: the selection stays on
     // the source node, so repeated Tab keeps adding siblings under the same
     // parent instead of nesting (or stealing the selection).
@@ -1583,9 +1569,8 @@ export class EditorStore {
     const type: NodeType = parent.type === "central" ? "main" : "subtopic";
     const newId = uid("n");
     const idx = parent.childrenIds.indexOf(node.id);
-    const style = this.createNodeStyle(type, parent.id, idx);
     const ops: Op[] = [
-      makeOp<Op & { type: "createNode" }>("createNode", { id: newId, nodeType: type, parentId: parent.id, index: idx, title: this.defaultTopicTitle(), style }),
+      makeOp<Op & { type: "createNode" }>("createNode", { id: newId, nodeType: type, parentId: parent.id, index: idx, title: this.defaultTopicTitle() }),
       makeOp<Op & { type: "moveNode" }>("moveNode", {
         id: node.id,
         fromParentId: parent.id,

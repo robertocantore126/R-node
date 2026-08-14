@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Renderer } from "../src/render/renderer";
-import { THEMES } from "../src/render/theme";
+import { THEMES, lighten } from "../src/render/theme";
 import type { MindNode, Sheet } from "../src/core/types";
 import { EditorStore } from "../src/editor/store";
 import { DocumentModel } from "../src/core/doc";
@@ -192,6 +192,130 @@ describe("one hue per branch", () => {
     expect(r.nodeColors(s, "a1")!.fill).toBe(THEMES.light.branchSoft[0]);
     expect(r.nodeColors(s, "b")!.fill).toBe(THEMES.light.branch[1]);
     expect(r.nodeColors(s, "b1")!.fill).toBe(THEMES.light.branchSoft[1]);
+  });
+});
+
+describe("inheritance by fixed ladder: denso → schiarito → white", () => {
+  it("a coloured root is worn by the main topics (denso), lightened for their children, white from the grandchildren down", () => {
+    const sheet = makeSheet();
+    sheet.nodes.root.style.fill = "#ff8800";
+    const r = makeRenderer();
+    const s = stateOf(sheet);
+    expect(r.nodeColors(s, "root")!.fill).toBe("#ff8800"); // own choice
+    expect(r.nodeColors(s, "a")!.fill).toBe("#ff8800"); // main: denso, same hue
+    expect(r.nodeColors(s, "b")!.fill).toBe("#ff8800"); // sibling branches share it
+    expect(r.nodeColors(s, "a1")!.fill).toBe(lighten("#ff8800", 0.3)); // figli: schiarito
+    expect(r.nodeColors(s, "b1")!.fill).toBe(lighten("#ff8800", 0.3));
+    expect(r.nodeColors(s, "a1x")!.fill).toBe(THEMES.light.deepFill); // nipoti: bianchi
+    expect(r.nodeColors(s, "b1x")!.fill).toBe(THEMES.light.deepFill);
+  });
+
+  it("a coloured main topic tints its children one step; grandchildren go white; sibling branches keep the palette", () => {
+    const sheet = makeSheet();
+    sheet.nodes.a.style.fill = "#123456"; // main topic of branch a
+    const r = makeRenderer();
+    const s = stateOf(sheet);
+    expect(r.nodeColors(s, "a1")!.fill).toBe(lighten("#123456", 0.3));
+    expect(r.nodeColors(s, "a1x")!.fill).toBe(THEMES.light.deepFill); // no tint of a distant ancestor
+    // Branch b never touches the coloured node: the depth rule stays.
+    expect(r.nodeColors(s, "b")!.fill).toBe(THEMES.light.branch[1]);
+    expect(r.nodeColors(s, "b1")!.fill).toBe(THEMES.light.branchSoft[1]);
+    expect(r.nodeColors(s, "b1x")!.fill).toBe(THEMES.light.deepFill);
+  });
+
+  it("an explicit fill still wins over inheritance", () => {
+    const sheet = makeSheet();
+    sheet.nodes.root.style.fill = "#ff8800";
+    sheet.nodes.a.style.fill = "#009900"; // main topic painted by hand
+    const r = makeRenderer();
+    const s = stateOf(sheet);
+    expect(r.nodeColors(s, "a")!.fill).toBe("#009900");
+    // Below the hand-painted main the children follow green, not orange.
+    expect(r.nodeColors(s, "a1")!.fill).toBe(lighten("#009900", 0.3));
+  });
+
+  it("non-hex colours pass through instead of being mis-mixed", () => {
+    const sheet = makeSheet();
+    sheet.nodes.a.style.fill = "rebeccapurple"; // named colour
+    const r = makeRenderer();
+    const s = stateOf(sheet);
+    expect(lighten("rebeccapurple", 0.3)).toBe("rebeccapurple");
+    expect(r.nodeColors(s, "a1")!.fill).toBe("rebeccapurple");
+  });
+
+  it("a broken parent walk reads as depth 3+ and stays white", () => {
+    const sheet = makeSheet();
+    sheet.nodes.root.style.fill = "#ff8800";
+    sheet.nodes.a1x.parentId = "nowhere";
+    const r = makeRenderer();
+    const s = stateOf(sheet);
+    expect(r.nodeColors(s, "a1x")!.fill).toBe(THEMES.light.deepFill);
+  });
+});
+
+describe("no more stamped fills — the renderer decides colours", () => {
+  it("newly created topics carry no style.fill, so inheritance can apply", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.nodes[store.sheet.rootNodeId]!;
+    store.select(root.id);
+    store.createChild(); // main topic under the root
+    const main = store.sheet.nodes[root.childrenIds[0]]!;
+    expect(main.style.fill).toBeUndefined();
+    store.select(main.id);
+    store.createChild(); // subtopic under the main
+    const sub = store.sheet.nodes[main.childrenIds[0]]!;
+    expect(sub.style.fill).toBeUndefined();
+  });
+
+  it("legacy stamped fills (vivid main, soft child) are dropped on load", async () => {
+    const doc = DocumentModel.blank("legacy");
+    const sheet = doc.sheets[0];
+    const root = sheet.nodes[sheet.rootNodeId]!;
+    const main = DocumentModel.makeNode("main", root.id, "main");
+    const sub = DocumentModel.makeNode("subtopic", main.id, "sub");
+    sheet.nodes[main.id] = main;
+    sheet.nodes[sub.id] = sub;
+    root.childrenIds = [main.id];
+    main.childrenIds = [sub.id];
+    // The old normalizer wrote exactly these two stamps.
+    main.style.fill = THEMES.light.branch[0];
+    sub.style.fill = THEMES.light.branchSoft[0];
+    const stored: StorageAdapter = {
+      label: "legacy",
+      async load() {
+        return [doc];
+      },
+      async save() { /* no-op */ },
+    };
+    const store = new EditorStore(stored);
+    await store.init();
+    expect(store.sheet.nodes[main.id].style.fill).toBeUndefined();
+    expect(store.sheet.nodes[sub.id].style.fill).toBeUndefined();
+  });
+
+  it("a colour the user actually picked is not mistaken for a stamp", async () => {
+    const doc = DocumentModel.blank("legacy");
+    const sheet = doc.sheets[0];
+    const root = sheet.nodes[sheet.rootNodeId]!;
+    const main = DocumentModel.makeNode("main", root.id, "main");
+    const sub = DocumentModel.makeNode("subtopic", main.id, "sub");
+    sheet.nodes[main.id] = main;
+    sheet.nodes[sub.id] = sub;
+    root.childrenIds = [main.id];
+    main.childrenIds = [sub.id];
+    main.style.fill = "#abcdef"; // user choice — never a palette default
+    sub.style.fill = "#123456";
+    const stored: StorageAdapter = {
+      label: "legacy",
+      async load() {
+        return [doc];
+      },
+      async save() { /* no-op */ },
+    };
+    const store = new EditorStore(stored);
+    await store.init();
+    expect(store.sheet.nodes[main.id].style.fill).toBe("#abcdef");
+    expect(store.sheet.nodes[sub.id].style.fill).toBe("#123456");
   });
 });
 

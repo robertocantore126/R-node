@@ -10,7 +10,7 @@ import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextR
 import { nodeRuns } from "../core/text";
 import { createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
-import { THEMES, type RenderTheme, type ThemeName } from "./theme";
+import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
@@ -442,16 +442,40 @@ export class Renderer {
    * double-clicked or exported — that happened while the logic was split
    * across two methods that had drifted apart.
    *
-   * Depth, not type, picks the default: the root, the main topics, their
-   * children and everything deeper each have their own level. An explicit
-   * style.fill always wins; it is the user's own choice.
+   * Depth, not type, picks the default, and the ladder is fixed: the root,
+   * then "denso" main topics, then one "schiarito" step for their children,
+   * then white from the grandchildren down. An explicit style.fill always
+   * wins; it is the user's own choice.
+   *
+   * A topic painted by hand is a statement about its branch: main topics wear
+   * the root's chosen colour instead of the palette default, and their
+   * children take a lightened version of it (the generated subtopics used to
+   * come out in the palette colour of their branch index — red for the first
+   * branch — no matter what the parent wore). Inheritance stops after one
+   * step: grandchildren and deeper are always white, never a tint of a
+   * distant ancestor.
    */
   private resolveFill(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     if (n.style.fill) return n.style.fill;
     const depth = this.depthOf(n, sheet);
     if (depth === 0) return theme.rootFill;
-    if (depth === 1) return theme.branch[this.branchIndex(n, sheet)];
-    if (depth === 2) return theme.branchSoft[this.branchIndex(n, sheet)];
+    if (depth === 1) {
+      // Main topics are the dense step: the root's colour when the root is
+      // painted, otherwise the palette vivid of their branch.
+      const root = sheet.nodes[sheet.rootNodeId];
+      if (root?.style.fill) return root.style.fill;
+      return theme.branch[this.branchIndex(n, sheet)];
+    }
+    if (depth === 2) {
+      // Their children are the lightened step, derived from the main topic's
+      // colour — which may itself be the root's colour, inherited. Uncoloured
+      // branches keep the palette soft tint, as before.
+      const branchRoot = this.branchRoot(n, sheet);
+      const main = sheet.nodes[branchRoot];
+      const source = main?.style.fill ?? sheet.nodes[sheet.rootNodeId]?.style.fill;
+      if (source) return lighten(source, 0.3);
+      return theme.branchSoft[this.branchIndex(n, sheet)];
+    }
     return theme.deepFill;
   }
 
