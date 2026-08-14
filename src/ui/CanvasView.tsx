@@ -509,6 +509,24 @@ export function CanvasView(): JSX.Element {
     force((n) => n + 1);
   }, [state, schedule]);
 
+  // Ctrl+V of an image copied as a FILE. The keydown path reads the async
+  // clipboard, which does not expose file copies at all (they arrive as an
+  // item with no mime type), so the picture is only reachable here, on the
+  // event's DataTransfer — the same place the drag & drop path reads it from.
+  // Both paths may fire for one keystroke; the second is a no-op because the
+  // asset id is the hash of the bytes.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent): void => {
+      if (store.getSnapshot().editingId) return; // the overlay owns its own paste
+      const file = e.clipboardData ? firstImageFile(e.clipboardData.files) : null;
+      if (!file) return;
+      e.preventDefault();
+      void store.pasteImageFile(file);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [store]);
+
   // -------------------------------------------------------------------------
   // Pointer handling
   // -------------------------------------------------------------------------

@@ -2051,6 +2051,31 @@ export class EditorStore {
   }
 
   /**
+   * Attach an image that arrived as a FILE on a paste event.
+   *
+   * `navigator.clipboard.read()` — the only thing `paste()` looks at — exposes
+   * web formats, so an image copied from the file manager reaches it as an item
+   * with an empty `types` array and is dropped without a trace of an image ever
+   * being on the clipboard. The same picture arrives intact on the paste
+   * event's DataTransfer, which is where this comes from.
+   *
+   * Always the TOP slot: a keystroke cannot be aimed at a side, unlike a drop.
+   *
+   * Safe to race with `paste()`: assets are addressed by the SHA-256 of their
+   * bytes, so both paths resolve to the same id and `setNodeImage` no-ops the
+   * second one.
+   */
+  async pasteImageFile(file: Blob & { name?: string }, anchorId?: string | null): Promise<boolean> {
+    const node = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
+    if (!node) {
+      trace.ignored("paste:image", "no node selected");
+      return false;
+    }
+    const res = await this.attachImageFile(node.id, file);
+    return res.ok;
+  }
+
+  /**
    * Move a node's image reference to another node's slot (image drag & drop).
    * `fromSlot` is the slot the user grabbed, `toPosition` the side they
    * dropped on. Both reference changes are ONE undoable batch: undo restores
@@ -2496,7 +2521,18 @@ export class EditorStore {
       }
     }
     if (text === null) text = await navigator.clipboard.readText().catch(() => null);
-    if (!text) return;
+    // §4bis: this return used to be mute, and a mute return is indistinguishable
+    // from a defect. A clipboard item that advertises NO mime type reaches here
+    // — an image copied as a FILE does exactly that on Windows — and the trace
+    // has to say so, or the next capture shows only "paste applied" next to a
+    // document nothing was written to.
+    if (!text) {
+      return trace.ignored(
+        "paste",
+        items && items.length > 0 ? "clipboard items expose no usable type (a copied FILE looks like this)" : "clipboard empty",
+        { mimeItems: items?.length ?? 0 },
+      );
+    }
     let parsed: { app?: string; payload?: { rootId: string; nodes: MindNode[]; relationships: { fromId: string; toId: string; label?: string }[] } } | null = null;
     try {
       parsed = JSON.parse(text);

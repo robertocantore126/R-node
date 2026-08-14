@@ -94,6 +94,34 @@ describe("where an image lands", () => {
     expect(attach.mock.calls[0][2] ?? "top").toBe("top");
   });
 
+  it("a file pasted from the OS lands on the TOP slot of the selected node", async () => {
+    // An image copied as a FILE never appears on navigator.clipboard.read():
+    // it arrives on the paste event's DataTransfer, and this is the entry point
+    // CanvasView hands it to. Same rule as the clipboard path — top, always.
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const id = firstChild(store);
+    store.select(id);
+    const attach = vi.spyOn(store, "attachImageFile").mockResolvedValue({ ok: true });
+
+    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", { type: "image/png" });
+    await expect(store.pasteImageFile(file)).resolves.toBe(true);
+
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(attach.mock.calls[0][0]).toBe(id);
+    expect(attach.mock.calls[0][2] ?? "top").toBe("top");
+  });
+
+  it("refuses a pasted file when no node is selected, instead of guessing one", async () => {
+    const store = new EditorStore(memoryAdapter);
+    store.clearSelection();
+    const attach = vi.spyOn(store, "attachImageFile");
+
+    const file = new File([new Uint8Array([1])], "photo.png", { type: "image/png" });
+    await expect(store.pasteImageFile(file)).resolves.toBe(false);
+    expect(attach).not.toHaveBeenCalled();
+  });
+
   it("moves an image between two slots of the SAME node in one undoable batch", () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();
