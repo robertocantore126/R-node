@@ -101,6 +101,19 @@ export const LINE_HEIGHT_FACTOR = 1.25;
  */
 export const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 /**
+ * Monospace stack for code topics (T22). A code topic is never edited, so
+ * there is no CSS counterpart to keep in sync — the measure and the renderer
+ * are the only two readers, and both take it from here (I9).
+ */
+export const CODE_FONT_STACK = 'ui-monospace, "Cascadia Code", Consolas, "Liberation Mono", Menlo, monospace';
+/** Height of the window-chrome strip on top of a code topic (T22). Shared with
+ *  the renderer (I9): the measure must reserve exactly what the painter draws. */
+export const CODE_TITLEBAR_H = 22;
+/** Ceiling for a code topic's width (T22). Code never re-wraps, so one long
+ *  line must not be able to mint a 20,000px box; the cap is far above any
+ *  real line, unlike MAX_TOPIC_W which a code block is allowed to exceed. */
+export const MAX_CODE_W = 720;
+/**
  * Block gap shared by BOTH renderers (single source of truth): every block
  * boundary (paragraph end, list item end) advances by this fraction of the
  * line height. The Lexical overlay mirrors it via --rnode-block-gap
@@ -640,7 +653,10 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
   // four slots take part — a node with a left image measures differently
   // from one whose image moved to the top.
   const sz = (p: SlotSize | null): string => (p ? `${p.w}x${p.h}` : "");
-  return `${runs}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}`;
+  // The code flag must be in the key: without it a topic promoted to a code
+  // block keeps the extent it had as a normal topic (measured with wrap and
+  // clamped to MAX_TOPIC_W) until some unrelated edit happens to bust it.
+  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}`;
 }
 
 /**
@@ -690,6 +706,29 @@ function measureTopicUncached(
 ): Extent {
   const style = n.style;
   if (style.width && style.height) return { w: style.width, h: style.height };
+
+  // A code topic measures on its own path (T22): it does NOT wrap and DOES
+  // keep its leading whitespace — both properties are exactly what the shared
+  // wrapRunLines must not do for normal topics, so this lives beside that path
+  // instead of inside it. One source line is one box line, never re-flowed; a
+  // trailing newline closes the last line instead of opening an empty one (the
+  // same rule §3 rule 8 applies to normal blocks).
+  if (style.code) {
+    const fontSize = style.fontSize ?? 14;
+    const pad = style.padding ?? 10;
+    const lineCount = n.title === "" ? 1 : n.title.split("\n").length - (n.title.endsWith("\n") ? 1 : 0);
+    const lineH = fontSize * LINE_HEIGHT_FACTOR;
+    let widest = 0;
+    for (const line of n.title.split("\n")) {
+      // Leading spaces count toward the line: they are the indentation.
+      widest = Math.max(widest, measurer.measure(line, { fontSize, fontFamily: CODE_FONT_STACK }).width);
+    }
+    const w = style.width
+      ? Math.max(MIN_TOPIC_W, style.width)
+      : Math.min(MAX_CODE_W, Math.max(MIN_TOPIC_W, Math.ceil(widest) + pad * 2 + TEXT_INSET));
+    const h = style.height ?? Math.max(28, lineCount * lineH + pad * 2 + 4 + CODE_TITLEBAR_H);
+    return { w, h };
+  }
 
   const fontSize = style.fontSize ?? 14;
   const pad = style.padding ?? 10;

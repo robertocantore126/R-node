@@ -9,7 +9,8 @@
 import type { Group, ImageSlot, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -587,7 +588,11 @@ export class Renderer {
     const n = p.node;
     const editing = state.editingId === n.id;
     const selected = state.selection.has(n.id);
-    const fill = this.nodeFill(theme, p, state);
+    // A code topic paints its own block (T22): the box wears the code surface
+    // unless the user picked a fill of their own, and the rich-text/image
+    // path below is skipped entirely.
+    const isCode = !!n.style.code;
+    const fill = isCode ? n.style.fill ?? theme.codeBg : this.nodeFill(theme, p, state);
     const textColor = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
     const opacity = n.style.opacity ?? 1;
 
@@ -602,7 +607,10 @@ export class Renderer {
       ctx.shadowOffsetY = 4;
     }
 
-    this.traceShape(ctx, p, n.style.shape ?? "rounded", n.style.cornerRadius ?? 10);
+    // A code block is always a rounded rectangle: shape styles (circle,
+    // diamond…) describe presentational topics, and the chrome strip needs a
+    // straight top edge to sit on.
+    this.traceShape(ctx, p, isCode ? "rounded" : n.style.shape ?? "rounded", isCode ? 8 : n.style.cornerRadius ?? 10);
     ctx.fillStyle = fill;
     ctx.fill();
     ctx.shadowBlur = 0;
@@ -703,8 +711,16 @@ export class Renderer {
     // images between shape and text (ADR-001 §12); skipped while editing —
     // the HTML overlay owns it, no double-render (same rule as the text).
     if (!editing) {
-      this.drawImage(p);
-      this.drawText(theme, p, textColor);
+      if (isCode) {
+        // A code block paints its own chrome and tokenized lines; the images
+        // and the rich-text path are skipped because code has neither, and
+        // staying off the rich-text path keeps this out of the §3 parity
+        // contract entirely (T22).
+        this.drawCodeBlock(theme, p);
+      } else {
+        this.drawImage(p);
+        this.drawText(theme, p, textColor);
+      }
     }
 
     // collapsed badge (mirror to the left when the branch is left-side)
@@ -1098,6 +1114,99 @@ export class Renderer {
       yCursor += lh;
     }
     return { canvas, w: maxW, h: totalH };
+  }
+
+  /** Draw a code topic (T22): the whole block — chrome and tokenized lines —
+   *  rasterized once into a bitmap, exactly like drawText. The key carries
+   *  the theme's palette id so two themes can never share entries (the
+   *  tokenizer's own cache is keyed on the same id). */
+  private drawCodeBlock(theme: RenderTheme, p: Placed): void {
+    const n = p.node;
+    const lang = asCodeLang(n.style.code?.lang);
+    const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
+    const key = `code:${n.id}|${JSON.stringify(n.titleRuns ?? n.title)}|${lang}|${theme.code.id}|${p.w}|${p.h}|${res}|${n.style.fontSize ?? 14}|${n.style.padding ?? 10}`;
+    let entry = this.textCache.get(key);
+    if (entry) {
+      this.textHits++;
+      // LRU refresh, same as the rich-text path: without it the FIFO eviction
+      // could throw away the node the user is looking at.
+      this.textCache.delete(key);
+      this.textCache.set(key, entry);
+    } else {
+      this.textMisses++;
+      const bitmap = this.renderCodeBitmap(theme, p, lang, res);
+      const bytes = bitmap.canvas.width * bitmap.canvas.height * 4;
+      entry = { ...bitmap, bytes };
+      this.textCache.set(key, entry);
+      this.textBytes += bytes;
+      this.evictTextToBudget();
+    }
+    if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, p.x, p.y, entry.w, entry.h);
+  }
+
+  /** Render the code block into an offscreen canvas sized to the box (world
+   *  units, `res` pixels per unit). The box background is painted by drawNode
+   *  (the codeBg fill) — this bitmap is transparent there, like the rich-text
+   *  bitmaps, so a user-chosen fill shows through. */
+  private renderCodeBitmap(theme: RenderTheme, p: Placed, lang: CodeLang, res: number): { canvas: HTMLCanvasElement; w: number; h: number } {
+    const n = p.node;
+    const size = n.style.fontSize ?? 14;
+    const pad = n.style.padding ?? 10;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(p.w * res));
+    canvas.height = Math.max(1, Math.ceil(p.h * res));
+    const bctx = canvas.getContext("2d");
+    if (!bctx) return { canvas, w: p.w, h: p.h };
+    bctx.scale(res, res);
+    bctx.textBaseline = "alphabetic";
+
+    // Window chrome: a strip with the language and the three dots — the part
+    // that makes the block read as code at a glance. The dots are decoration,
+    // not theme data: the same three colours in every code editor since
+    // forever, and a code block that changed them would look wrong anyway.
+    bctx.fillStyle = theme.codeBar;
+    bctx.fillRect(0, 0, p.w, CODE_TITLEBAR_H);
+    bctx.fillStyle = theme.textMuted;
+    bctx.font = `600 11px ${FONT_STACK}`;
+    bctx.textAlign = "left";
+    bctx.textBaseline = "middle";
+    bctx.fillText(lang === "text" ? "code" : lang, pad, CODE_TITLEBAR_H / 2);
+    const dotColors = ["#ff5f57", "#febc2e", "#28c840"];
+    for (let i = 0; i < 3; i++) {
+      bctx.fillStyle = dotColors[i];
+      bctx.beginPath();
+      bctx.arc(p.w - pad - i * 9, CODE_TITLEBAR_H / 2, 3, 0, Math.PI * 2);
+      bctx.fill();
+    }
+
+    // The tokenized source, run by run. The runs are lossless (concatenation
+    // equals the source), so splitting them on "\n" and walking the pieces
+    // redraws the source exactly one line at a time, with no wrap and the
+    // leading whitespace intact — the same two properties the measure
+    // promises, so the painted text fits the box it was measured for.
+    const lineH = size * LINE_HEIGHT_FACTOR;
+    const met = this.measurer.metrics?.({ fontSize: size, fontFamily: CODE_FONT_STACK });
+    const ascent = met ? met.ascent : size * 0.8;
+    const runs = tokenize(n.title, lang, theme.code);
+    bctx.font = `${size}px ${CODE_FONT_STACK}`;
+    bctx.textBaseline = "alphabetic";
+    let x = pad;
+    let y = CODE_TITLEBAR_H + pad + ascent;
+    for (const run of runs) {
+      const parts = run.text.split("\n");
+      for (let i = 0; i < parts.length; i++) {
+        if (parts[i].length > 0) {
+          bctx.fillStyle = run.color ?? theme.code.plain;
+          bctx.fillText(parts[i], x, y);
+          x += this.measurer.measure(parts[i], { fontSize: size, fontFamily: CODE_FONT_STACK }).width;
+        }
+        if (i < parts.length - 1) {
+          x = pad;
+          y += lineH;
+        }
+      }
+    }
+    return { canvas, w: p.w, h: p.h };
   }
 
   private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string, bidirectional?: boolean, selected?: boolean): void {

@@ -173,3 +173,21 @@ export function tokenize(source: string, lang: CodeLang, palette: CodePalette): 
 export function asCodeLang(lang: string | undefined): CodeLang {
   return lang === "ts" || lang === "js" || lang === "cpp" ? lang : "text";
 }
+
+/**
+ * A cheap sniff for the palette command (T22): the pasted source picks its
+ * own grammar when it can, defaulting to plain text. Deliberately shallow —
+ * the spike is about reading code, not about perfect detection, and a wrong
+ * guess only mis-colours the block, never its content.
+ */
+export function guessCodeLang(source: string): CodeLang {
+  const head = source.slice(0, 400);
+  // C++ first: a preprocessor line is unambiguous, and C++ source also
+  // contains function/const, which alone would guess JS.
+  if (/#\s*(?:include|define|pragma|ifdef|ifndef|endif)\b|std::/.test(head)) return "cpp";
+  // TypeScript before JavaScript: it is a superset, and a type annotation
+  // (`: number` and friends) is the only cheap hint that tells the two apart.
+  if (/\b(?:import|export)\b[^;]*\bfrom\b|:\s*(?:string|number|boolean|unknown|any|void)\b/.test(head)) return "ts";
+  if (/\bfunction\b|\bconst\b|\blet\b|=>\s*[{(]/.test(head)) return "js";
+  return "text";
+}

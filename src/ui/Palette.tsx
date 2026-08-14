@@ -47,6 +47,7 @@ export function Palette(): JSX.Element | null {
       { label: "Create child topic", hint: "Tab", run: () => store.createChild() },
       { label: "Create sibling topic", hint: "Enter", run: () => store.createSibling() },
       { label: "Promote topic", hint: "Shift+Tab", run: () => store.promote() },
+      { label: "Paste code topic from clipboard", hint: "read-only · plain text", run: () => void store.pasteCodeFromClipboard() },
       {
         label: "Recolour branch (subtree)…",
         hint: "this topic and all its descendants",

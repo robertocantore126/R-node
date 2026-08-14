@@ -8,6 +8,7 @@
  *
  * The store is framework-free: React subscribes via useSyncExternalStore.
  */
+import { guessCodeLang } from "../core/codeHighlight";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
@@ -1267,6 +1268,19 @@ export class EditorStore {
     this.commitDraftOnLeave();
     const node = this.model.node(id);
     if (!node) return;
+    // A code topic is read-only by design (T22): mounting the Lexical overlay
+    // would be a second renderer over the source, and the §3 parity contract
+    // exists precisely because two renderers over one title drift. The refusal
+    // still selects the topic, so the double-click shows what it acted on; a
+    // mute return would be indistinguishable from a defect (§4bis).
+    if (node.style.code) {
+      this.state.selection = [id];
+      this.state.editingId = null;
+      this.state.pendingInsert = null;
+      this.state.imageSel = null;
+      this.state.imageSlot = null;
+      return trace.ignored("edit:start", "code topic is read-only", { nodeId: id });
+    }
     this.state.selection = [id];
     this.state.editingId = id;
     this.state.pendingInsert = null;
@@ -1288,6 +1302,9 @@ export class EditorStore {
     this.commitDraftOnLeave();
     const node = this.selectionNode;
     if (!node) return;
+    // Same refusal as startEdit: a code topic never enters the editor, not
+    // even through type/paste-to-edit (T22).
+    if (node.style.code) return trace.ignored("paste-to-edit:trigger", "code topic is read-only", { nodeId: node.id });
     trace.applied("paste-to-edit:trigger", {
       nodeId: node.id,
       chars: text.length,
@@ -1589,6 +1606,40 @@ export class EditorStore {
     // the source node, so repeated Tab keeps adding siblings under the same
     // parent instead of nesting (or stealing the selection).
     this.settleLayoutNow();
+  }
+
+  /** Build a code topic under the current selection from the clipboard text
+   *  (T22). The SOURCE is stored verbatim, newlines and leading spaces
+   *  included; the colours are derived at paint time from the theme and are
+   *  never written to the document — a snippet pasted from a dark editor must
+   *  not carry that editor's palette into a light map, forever. */
+  async pasteCodeFromClipboard(): Promise<void> {
+    const parent = this.selectionNode ?? this.model.rootNode;
+    if (!parent) return;
+    const text = await navigator.clipboard.readText().catch(() => null);
+    if (!text) return trace.ignored("paste:code", "clipboard empty or blocked");
+    const lang = guessCodeLang(text);
+    const id = uid("n");
+    const type: NodeType = parent.type === "central" ? "main" : "subtopic";
+    const position = this.createNodePosition(parent);
+    this.execOps([
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id,
+        nodeType: type,
+        parentId: parent.id,
+        index: parent.childrenIds.length,
+        title: text,
+        // One plain run: a code topic carries no inline styling, and I5 needs
+        // runsToPlain(titleRuns) === title for every consumer (search, export,
+        // outliner) to keep working.
+        titleRuns: [{ text }],
+        style: { code: { lang } },
+        position,
+      }),
+    ]);
+    this.settleLayoutNow();
+    this.select(id);
+    trace.applied("paste:code", { nodeId: id, lang, chars: text.length, lines: text.split("\n").length });
   }
 
   createParent(): void {

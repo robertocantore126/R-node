@@ -949,6 +949,14 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const hit = renderer.hitTest(currentRenderState(), world.x, world.y);
     if (hit) {
+      // A code topic is read-only (T22): select it and return instead of
+      // mounting the RichEditor overlay. startEdit refuses it too — this skips
+      // the call entirely so the overlay never even starts to mount (the one
+      // thing that would drag this feature into the §3 parity contract).
+      if (store.sheet.nodes[hit]?.style.code) {
+        store.select(hit);
+        return;
+      }
       store.startEdit(hit);
     } else {
       store.createFloatingAt(world.x - 60, world.y - 18);
