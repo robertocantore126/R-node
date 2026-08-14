@@ -11,6 +11,7 @@
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, type Op } from "../core/ops";
+import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
 import { SCHEMA_VERSION, type AttachmentInfo, type Group, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
@@ -456,6 +457,9 @@ export class EditorStore {
     for (const op of ops) inverses.push(applyWithInverse(this.sheet, op));
     if (!opts?.skipHistory) this.history.push(ops, inverses);
     trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
+    // Before touch(), so a corrupt tree fails here instead of reaching the
+    // renderer. Zero cost in production (T1).
+    if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
     this.touch();
   }
 
@@ -464,6 +468,7 @@ export class EditorStore {
     if (!ops) return;
     for (const op of ops) applyWithInverse(this.sheet, op);
     this.clearSelection();
+    if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
     this.touch();
   }
 
@@ -472,6 +477,7 @@ export class EditorStore {
     if (!ops) return;
     for (const op of ops) applyWithInverse(this.sheet, op);
     this.clearSelection();
+    if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
     this.touch();
   }
 
