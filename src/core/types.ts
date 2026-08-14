@@ -45,6 +45,7 @@ export type TaskStatus = "not-started" | "in-progress" | "blocked" | "completed"
 export type Priority = "none" | "low" | "medium" | "high" | "urgent";
 
 export type TopicShape =
+  | "custom" // silhouette drawn from Style.shapeParts (T24)
   | "rounded"
   | "rect"
   | "capsule"
@@ -58,6 +59,21 @@ export type TopicShape =
 // ---------------------------------------------------------------------------
 // Style
 // ---------------------------------------------------------------------------
+
+/** Paint that either names a theme token or states a colour outright. */
+export type ShapePaint = "accent" | "surface" | "text" | "muted" | (string & {});
+
+/** One painted path of a custom shape (T24). See `Style.shapeParts`. */
+export interface ShapePart {
+  /** SVG path data in a 0..1 box, origin top-left. */
+  d: string;
+  fill?: ShapePaint;
+  stroke?: ShapePaint;
+  /** In the same 0..1 units as `d`, so it scales with the node. */
+  strokeWidth?: number;
+  /** "evenodd" is how a subpath cuts a hole. */
+  rule?: "nonzero" | "evenodd";
+}
 
 /** Which of the four edges of a topic box an image is attached to. */
 export type ImageSlot = "top" | "bottom" | "left" | "right";
@@ -98,6 +114,24 @@ export interface Style {
    * that enum drives topology and layout, and a code block changes neither.
    */
   code?: { lang: string };
+  /**
+   * Artwork for a `shape: "custom"` topic (T24), painted in order: silhouette
+   * first, details on top. Every `d` is SVG path data in a NORMALISED 0..1 box,
+   * scaled onto the node's rect at paint time, so one drawing works at any size.
+   *
+   * Colours ARE stored here, unlike anywhere else in this schema. T22 and T23
+   * both strip colour because it had to contrast with something the theme owns
+   * — text against a fill — so saving it fixed half of a pairing that later
+   * changed. A shape's colours contrast with EACH OTHER, inside the shape: a
+   * yellow moon is yellow on a light map and on a dark one. Here colour is
+   * content. A part may still follow the palette by naming a token
+   * (`accent` | `surface` | `text` | `muted`) instead of a hex.
+   */
+  shapeParts?: ShapePart[];
+  /** Where the label may be written, in the same 0..1 space. Checked against
+   *  the silhouette when the shape is saved: a box that pokes outside is
+   *  refused, because the canvas does not clip. */
+  shapeTextBox?: { x: number; y: number; w: number; h: number };
   padding?: number;
   align?: "left" | "center";
   width?: number;

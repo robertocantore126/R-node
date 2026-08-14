@@ -6,11 +6,12 @@
  * HTML overlay (allowed by the architecture) — the renderer skips the title
  * of the node being edited so the overlay doesn't double-paint.
  */
-import type { Group, ImageSlot, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
+import type { Group, ImageSlot, MindNode, Sheet, ConnectorStyle, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
+import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -310,7 +311,7 @@ export class Renderer {
       const b = byId.get(rel.toId);
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
-        this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional, state.relSel === rel.id);
+        this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional, state.relSel === rel.id, rel.connector);
       }
     }
 
@@ -607,14 +608,24 @@ export class Renderer {
       ctx.shadowOffsetY = 4;
     }
 
-    // A code block is always a rounded rectangle: shape styles (circle,
-    // diamond…) describe presentational topics, and the chrome strip needs a
-    // straight top edge to sit on.
-    this.traceShape(ctx, p, isCode ? "rounded" : n.style.shape ?? "rounded", isCode ? 8 : n.style.cornerRadius ?? 10);
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.shadowOffsetY = 0;
+    // Custom artwork (T24): a list of paths painted in order, silhouette first.
+    // It replaces the box entirely — there is no rectangle underneath, or every
+    // shape would sit on a visible slab.
+    const art = !isCode && n.style.shape === "custom" ? n.style.shapeParts : undefined;
+    if (art && art.length > 0) {
+      this.paintShapeArt(ctx, theme, p, art, fill);
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+    } else {
+      // A code block is always a rounded rectangle: shape styles (circle,
+      // diamond…) describe presentational topics, and the chrome strip needs a
+      // straight top edge to sit on.
+      this.traceShape(ctx, p, isCode ? "rounded" : n.style.shape ?? "rounded", isCode ? 8 : n.style.cornerRadius ?? 10);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+    }
     if (n.style.borderWidth && n.style.stroke && n.style.stroke !== "transparent") {
       ctx.strokeStyle = n.style.stroke;
       ctx.lineWidth = n.style.borderWidth;
@@ -755,6 +766,38 @@ export class Renderer {
       if (!c.collapsed) queue.push(...c.childrenIds);
     }
     return count;
+  }
+
+  /**
+   * Paint a custom shape's parts (T24), scaled from their 0..1 box onto the
+   * node's rect and drawn in order.
+   *
+   * `Path2D` cannot be appended to the context's current path, so this branch
+   * fills its own paths rather than going through traceShape — the built-in
+   * shapes keep the existing route untouched.
+   */
+  private paintShapeArt(ctx: CanvasRenderingContext2D, theme: RenderTheme, p: Placed, parts: ShapePart[], fallbackFill: string): void {
+    if (typeof Path2D === "undefined") return;
+    const m = new DOMMatrix().translateSelf(p.x, p.y).scaleSelf(p.w, p.h);
+    for (const part of parts) {
+      let path: Path2D;
+      try {
+        path = new Path2D();
+        path.addPath(new Path2D(part.d), m);
+      } catch {
+        continue; // a path the engine refuses is skipped, never fatal
+      }
+      ctx.fillStyle = resolvePaint(part.fill, theme, fallbackFill);
+      ctx.fill(path, part.rule ?? "nonzero");
+      if (part.stroke) {
+        ctx.strokeStyle = resolvePaint(part.stroke, theme, theme.text);
+        // strokeWidth is in the same 0..1 units as the path, so it scales with
+        // the node instead of thinning out as the shape grows.
+        ctx.lineWidth = Math.max(0.5, (part.strokeWidth ?? 0.01) * p.w);
+        ctx.setLineDash([]);
+        ctx.stroke(path);
+      }
+    }
   }
 
   private traceShape(ctx: CanvasRenderingContext2D, p: Placed, shape: string, radius: number): void {
@@ -1203,7 +1246,7 @@ export class Renderer {
     return { canvas, w: p.w, h: p.h };
   }
 
-  private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string, bidirectional?: boolean, selected?: boolean): void {
+  private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string, bidirectional?: boolean, selected?: boolean, connector?: ConnectorStyle): void {
     const ctx = this.ctx;
     const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
     const bx = b.x + b.w / 2, by = b.y + b.h / 2;
@@ -1218,15 +1261,28 @@ export class Renderer {
     // under the head toward the centre, and the head's angle — computed on
     // the straight line to the centre — disagreed with the curve's real
     // tangent at the border on pronounced curves.
-    const t0 = bezierExitRect(curve, a.x, a.y, a.w, a.h);
-    const t1 = bezierEnterRect(curve, b.x, b.y, b.w, b.h);
-    const drawn = t1 - t0 > 1e-6 ? bezierSlice(curve, t0, t1) : curve;
+    // A straight relationship (T24, and what a saved structure asks for) is the
+    // same drawing with the control points collapsed onto the border crossings:
+    // the arrowhead code below then reads its angle off p2→p3 and gets the
+    // segment's direction for free, instead of needing a second path.
+    const straight = connector === "straight";
+    const s0 = straight ? segmentExitRect(a, b) : null;
+    const s1 = straight ? segmentExitRect(b, a) : null;
+    const t0 = straight ? 0 : bezierExitRect(curve, a.x, a.y, a.w, a.h);
+    const t1 = straight ? 1 : bezierEnterRect(curve, b.x, b.y, b.w, b.h);
+    const drawn =
+      straight && s0 && s1
+        ? { p0: s0, p1: s0, p2: s1, p3: s1 }
+        : t1 - t0 > 1e-6
+          ? bezierSlice(curve, t0, t1)
+          : curve;
     ctx.strokeStyle = color;
     ctx.lineWidth = selected ? 2.5 : 1.5;
     ctx.setLineDash(style === "dashed" ? [7, 5] : style === "dotted" ? [2, 4] : []);
     ctx.beginPath();
     ctx.moveTo(drawn.p0.x, drawn.p0.y);
-    ctx.bezierCurveTo(drawn.p1.x, drawn.p1.y, drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
+    if (straight) ctx.lineTo(drawn.p3.x, drawn.p3.y);
+    else ctx.bezierCurveTo(drawn.p1.x, drawn.p1.y, drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
     ctx.stroke();
     ctx.setLineDash([]);
     // Arrowheads: at the target, and at the source when bidirectional. The
@@ -1248,11 +1304,19 @@ export class Renderer {
       ctx.closePath();
       ctx.fill();
     };
-    arrow(drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
-    if (bidirectional) {
-      // Source head: tip at the exit crossing, pointing back INTO node a
-      // (opposite of the start tangent).
-      arrow(drawn.p1.x, drawn.p1.y, drawn.p0.x, drawn.p0.y);
+    if (straight) {
+      // The whole segment IS the tangent, so the head reads its angle from the
+      // two endpoints. Using p2→p3 here would be atan2(0, 0): the collapsed
+      // control points coincide with the end.
+      arrow(drawn.p0.x, drawn.p0.y, drawn.p3.x, drawn.p3.y);
+      if (bidirectional) arrow(drawn.p3.x, drawn.p3.y, drawn.p0.x, drawn.p0.y);
+    } else {
+      arrow(drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
+      if (bidirectional) {
+        // Source head: tip at the exit crossing, pointing back INTO node a
+        // (opposite of the start tangent).
+        arrow(drawn.p1.x, drawn.p1.y, drawn.p0.x, drawn.p0.y);
+      }
     }
     if (label) {
       const mx = (ax + bx) / 2, my = (ay + by) / 2;
@@ -1653,7 +1717,7 @@ export class Renderer {
     for (const rel of state.sheet.relationships) {
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
-      if (a && b) this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional);
+      if (a && b) this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional, false, rel.connector);
     }
     for (const p of all) {
       if (p.node.parentId) {

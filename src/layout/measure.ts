@@ -16,6 +16,7 @@
  *  - pure layout code and tests default to a deterministic heuristic.
  */
 import type { ImageSlot, MindNode, Sheet, Style, TextRun } from "../core/types";
+import { shapeTextInsets } from "../core/shapeArt";
 import { nodeRuns } from "../core/text";
 
 // ---------------------------------------------------------------------------
@@ -232,6 +233,35 @@ function rectCrossing(b: Bezier3, x: number, y: number, w: number, h: number, ex
 /** First t where the curve (starting outside, ending inside) enters the rect. */
 export function bezierEnterRect(b: Bezier3, x: number, y: number, w: number, h: number): number {
   return rectCrossing(b, x, y, w, h, false);
+}
+
+/**
+ * Where the segment from one box's centre to another's crosses the FIRST box's
+ * border (T24's straight relationships).
+ *
+ * Lives here beside the bezier trimmers for the reason §2/I9 gives: the
+ * renderer and the SVG export both truncate a link at the node border, and two
+ * copies of that arithmetic drift — visibly, at the arrowheads. Returns the
+ * point on the border; the caller decides which end it is trimming by passing
+ * the boxes in the right order.
+ */
+export function segmentExitRect(
+  from: { x: number; y: number; w: number; h: number },
+  to: { x: number; y: number; w: number; h: number },
+): { x: number; y: number } {
+  const cx = from.x + from.w / 2;
+  const cy = from.y + from.h / 2;
+  const dx = to.x + to.w / 2 - cx;
+  const dy = to.y + to.h / 2 - cy;
+  if (dx === 0 && dy === 0) return { x: cx, y: cy };
+  // Scale the direction until it touches the nearer of the two half-extents:
+  // the border hit is whichever axis runs out first.
+  const halfW = from.w / 2;
+  const halfH = from.h / 2;
+  const tx = dx === 0 ? Infinity : halfW / Math.abs(dx);
+  const ty = dy === 0 ? Infinity : halfH / Math.abs(dy);
+  const t = Math.min(tx, ty);
+  return { x: cx + dx * t, y: cy + dy * t };
 }
 
 /** First t where the curve (starting inside, ending outside) leaves the rect. */
@@ -588,7 +618,21 @@ export interface TextInsets {
  * Consumed by measureTopic, positionedImageSlots, the RichEditor overlay and
  * the parity harness: all four have to agree on where the text may go.
  */
-export function textInsets(slots: SlotSizes): TextInsets {
+export function textInsets(slots: SlotSizes, art?: TextInsets | null): TextInsets {
+  // A custom shape's text box arrives as insets too (T24), and takes the same
+  // road for the same reason: the overlay must inset its editable exactly as
+  // the canvas insets the label, or the text jumps on the double click. The
+  // larger of the two wins, so a shape node carrying an image still clears
+  // both.
+  if (art) {
+    const base = textInsets(slots);
+    return {
+      top: Math.max(base.top, art.top),
+      bottom: Math.max(base.bottom, art.bottom),
+      left: Math.max(base.left, art.left),
+      right: Math.max(base.right, art.right),
+    };
+  }
   const reserve = (v: number | undefined): number => (v && v > 0 ? v + IMAGE_GAP : 0);
   return {
     top: reserve(slots.top?.h),
@@ -610,7 +654,7 @@ export function positionedImageSlots(
   resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
 ): { slots: SlotSizes; insets: TextInsets; sidePadW: number; midL: number; midW: number; items: PositionedSlot[] } {
   const slots = slotSizes(n, resolveImage);
-  const insets = textInsets(slots);
+  const insets = textInsets(slots, shapeTextInsets(n.style, box.w, box.h));
   const sidePadW = insets.left + insets.right;
   const pad = n.style.padding ?? 10;
   const midL = box.x + pad + insets.left;

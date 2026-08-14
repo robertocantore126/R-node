@@ -253,3 +253,56 @@ describe("the library", () => {
     expect(listShapes()).toEqual([]);
   });
 });
+
+describe("shape nodes (T24)", () => {
+  const SHIELD = {
+    kind: "shape",
+    name: "Shield",
+    width: 200,
+    height: 220,
+    parts: [
+      { d: "M0.50,0.02 L0.95,0.18 L0.95,0.55 C0.95,0.80 0.75,0.94 0.50,0.98 C0.25,0.94 0.05,0.80 0.05,0.55 L0.05,0.18 Z", fill: "#8c2f39" },
+      { d: "M0.50,0.14 L0.84,0.26 L0.84,0.54 C0.84,0.72 0.68,0.83 0.50,0.87 C0.32,0.83 0.16,0.72 0.16,0.54 L0.16,0.26 Z", fill: "#e8c37a" },
+    ],
+    textBox: { x: 0.26, y: 0.34, w: 0.48, h: 0.3 },
+  };
+
+  it("becomes a one-topic template with a FIXED size", () => {
+    // Fixed size is the decision the whole feature rests on: with width and
+    // height both set, measureTopicUncached short-circuits and the outline
+    // never negotiates with a growing label.
+    const out = prepareShape(SHIELD);
+    expect(out.nodes).toHaveLength(1);
+    const n = out.nodes[0];
+    expect(n.style.width).toBe(200);
+    expect(n.style.height).toBe(220);
+    expect(n.style.shape).toBe("custom");
+    expect(n.style.shapeParts).toHaveLength(2);
+  });
+
+  it("KEEPS the colours, unlike every other template", () => {
+    // The reversal, and its reason: these colours contrast with each other
+    // inside the drawing, not with anything the theme owns.
+    const out = prepareShape(SHIELD);
+    expect(out.nodes[0].style.shapeParts![0].fill).toBe("#8c2f39");
+    expect(out.nodes[0].style.shapeParts![1].fill).toBe("#e8c37a");
+  });
+
+  it("refuses more than 12 parts, junk path data and an unknown paint", () => {
+    const many = { ...SHIELD, parts: Array.from({ length: 13 }, () => SHIELD.parts[0]) };
+    expect(() => prepareShape(many)).toThrow(/Too many parts/);
+    expect(() => prepareShape({ ...SHIELD, parts: [{ d: "M0,0 L1,1 <script>" }] })).toThrow(/not SVG path data/);
+    expect(() => prepareShape({ ...SHIELD, parts: [{ d: "M0,0 L1,1 Z", fill: "rebeccapurple" }] })).toThrow(/neither a #hex/);
+    expect(() => prepareShape({ ...SHIELD, parts: [{ d: "M0,0 L1,NaN Z" }] })).toThrow(/not a number/);
+  });
+
+  it("refuses a textBox outside the unit square", () => {
+    expect(() => prepareShape({ ...SHIELD, textBox: { x: 0.5, y: 0.5, w: 0.9, h: 0.2 } })).toThrow(/pokes outside/);
+    expect(() => prepareShape({ ...SHIELD, textBox: { x: 0, y: 0, w: 0, h: 0.2 } })).toThrow(/no area/);
+  });
+
+  it("accepts a theme token as a paint, so a shape can follow the palette", () => {
+    const out = prepareShape({ ...SHIELD, parts: [{ ...SHIELD.parts[0], fill: "accent" }] });
+    expect(out.nodes[0].style.shapeParts![0].fill).toBe("accent");
+  });
+});

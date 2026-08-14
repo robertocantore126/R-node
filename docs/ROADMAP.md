@@ -746,7 +746,7 @@ node; un `textBox` che esce dal path viene rifiutato (verificato con
 `isPointInPath`, non creduto); un nodo shape mantiene la sua dimensione
 qualunque sia il titolo.
 
-Brief operativo: [T24-HANDOFF.md](../T24-HANDOFF.md) (usa e getta).
+
 
 ---
 

@@ -20,6 +20,7 @@
 import { DEFAULT_STRUCTURE, type MindNode, type Relationship, type Sheet, type Style, type TextRun, type TopicShape } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { validateSheet } from "../core/validate";
+import { makeSilhouetteProbe, textBoxFitsSilhouette, validateShapeParts, validateTextBox, ShapeArtInvalid } from "../core/shapeArt";
 import { runsToPlain } from "../core/text";
 
 const KEY = "r-node.shape-library";
@@ -163,6 +164,13 @@ export function prepareShape(raw: string | object): ShapeTemplate["payload"] {
     parsed = raw as RawPayload;
   }
 
+  // A shape node (T24) is a template of ONE topic. Converting it here rather
+  // than teaching the panel, the drag and insertShape about a second kind means
+  // the whole library treats both the same way from this line on.
+  if (parsed && (parsed as { kind?: unknown }).kind === "shape") {
+    return prepareArtShape(parsed as Record<string, unknown>);
+  }
+
   if (!parsed || parsed.app !== "r-node" || !parsed.payload) {
     throw new ShapeRejected('Not an R-node payload: the object needs "app": "r-node" and a "payload".');
   }
@@ -213,6 +221,54 @@ export function prepareShape(raw: string | object): ShapeTemplate["payload"] {
   }
 
   return { rootId, nodes: normalised, relationships: rels };
+}
+
+/**
+ * A `kind: "shape"` payload (T24) → a one-topic template.
+ *
+ * The size is fixed on purpose: with both width and height set, measurement
+ * short-circuits and the outline never has to negotiate with a growing label.
+ * That is the decision the whole feature rests on.
+ */
+function prepareArtShape(raw: Record<string, unknown>): ShapeTemplate["payload"] {
+  let parts, box;
+  try {
+    // Rewrapped so the panel has one error type to render, whichever layer
+    // found the problem.
+    parts = validateShapeParts(raw.parts);
+    box = validateTextBox(raw.textBox);
+  } catch (e) {
+    throw e instanceof ShapeArtInvalid ? new ShapeRejected(e.message) : e;
+  }
+  const probe = makeSilhouetteProbe();
+  // Without a DOM the geometric check cannot run. Skipping it is honest;
+  // faking a pass would let a broken shape through in a test environment.
+  if (probe && !textBoxFitsSilhouette(parts, box, probe)) {
+    throw new ShapeRejected(
+      'The "textBox" is not inside the shape. It has to fit the drawing, not its bounding rectangle — for a concave shape that is a good deal smaller.',
+    );
+  }
+  const width = typeof raw.width === "number" && raw.width > 0 ? raw.width : 220;
+  const height = typeof raw.height === "number" && raw.height > 0 ? raw.height : 220;
+  const title = typeof raw.name === "string" ? raw.name : "";
+  const id = "shape-root";
+  const node: MindNode = {
+    id,
+    type: "subtopic",
+    parentId: null,
+    childrenIds: [],
+    title,
+    titleRuns: [{ text: title }],
+    position: { x: 0, y: 0, manual: true },
+    style: { shape: "custom", shapeParts: parts, shapeTextBox: box, width, height },
+    collapsed: false,
+    labels: [],
+    markers: [],
+    notes: "",
+    task: null,
+    metadata: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  };
+  return { rootId: id, nodes: [node], relationships: [] };
 }
 
 // ---------------------------------------------------------------------------
