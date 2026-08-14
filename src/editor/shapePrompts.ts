@@ -11,10 +11,10 @@
  * would otherwise stay unreadable on a light theme, forever.
  */
 
-/** A single topic with a custom silhouette. Fixed size, editable label. */
+/** A single topic drawn as artwork. Fixed size, editable label. */
 export const SHAPE_NODE_PROMPT = `Generate an R-node SHAPE NODE as JSON. Reply with the JSON object only — no prose, no markdown fence.
 
-Shape: <describe it here, e.g. "a crescent moon">
+Shape: <describe it here, e.g. "a crescent moon", "a shield", "a gear">
 
 Format:
 {
@@ -22,27 +22,35 @@ Format:
   "name": "short name",
   "width": 220,
   "height": 220,
-  "path": "M… Z",
+  "parts": [
+    { "d": "M… Z", "fill": "#rrggbb" }
+  ],
   "textBox": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }
 }
 
 Rules:
-- "path" is SVG path data in a NORMALISED box: x and y run 0..1, origin top-left. It is scaled to the node's real size, so never use pixels.
+- Every "d" is SVG path data in a NORMALISED box: x and y run 0..1, origin top-left. It is scaled to the node's real size, so never use pixels.
 - Use only the commands M, L, H, V, C, S, Q, T, A, Z. Close every subpath with Z. No transforms, no styling attributes, no <svg> wrapper.
-- Describe ONLY the outline. No fill, no stroke, no colour: the map's theme paints it.
-- "textBox" is the rectangle the label will be written in, in the same 0..1 space. It MUST lie entirely inside the filled area of the path — this is checked, and a box that pokes outside the shape is rejected.
+- Parts are painted in order, first to last: put the silhouette first and the details on top of it.
+- "fill" is a hex colour, OR one of the theme tokens "accent", "surface", "text", "muted" if you want that part to follow the map's palette instead of a fixed colour. A part may also carry "stroke" and "strokeWidth" (in the same 0..1 units), and "rule": "evenodd" when a subpath is meant to cut a hole.
+- Colours are part of the drawing here, unlike text colour: a yellow moon should be yellow on a light map and on a dark one. Choose colours that read on BOTH a white and a near-black background — avoid pure white or pure black for the silhouette.
+- Keep it to at most 12 parts. This is an icon, not a traced photograph.
+- Later parts must stay INSIDE the silhouette drawn by the first one, or they will spill over the edge: the canvas does not clip them.
+- "textBox" is the rectangle the label is written in, same 0..1 space. It MUST lie inside the filled area — this is checked, and a box that pokes outside is rejected.
 - Make the textBox as large as it can be while staying inside. For a concave shape (crescent, arrow, star) that is much smaller than the bounding box: think about where a rectangle actually fits, not about the extremes of the outline.
 - "width" and "height" are the node's fixed size in world units. Keep the aspect ratio of the drawing. 220 is a good default.
-- A shape with a hole (a ring, a donut) is drawn with two subpaths wound in opposite directions.
 
-Worked example — crescent moon:
+Worked example — a two-colour shield:
 {
   "kind": "shape",
-  "name": "Crescent",
-  "width": 220,
+  "name": "Shield",
+  "width": 200,
   "height": 220,
-  "path": "M0.50,0.02 A0.48,0.48 0 1 0 0.50,0.98 A0.38,0.38 0 1 1 0.50,0.02 Z",
-  "textBox": { "x": 0.30, "y": 0.34, "w": 0.34, "h": 0.32 }
+  "parts": [
+    { "d": "M0.50,0.02 L0.95,0.18 L0.95,0.55 C0.95,0.80 0.75,0.94 0.50,0.98 C0.25,0.94 0.05,0.80 0.05,0.55 L0.05,0.18 Z", "fill": "#8c2f39" },
+    { "d": "M0.50,0.14 L0.84,0.26 L0.84,0.54 C0.84,0.72 0.68,0.83 0.50,0.87 C0.32,0.83 0.16,0.72 0.16,0.54 L0.16,0.26 Z", "fill": "#e8c37a" }
+  ],
+  "textBox": { "x": 0.26, "y": 0.34, "w": 0.48, "h": 0.30 }
 }`;
 
 /** A prefabricated subgraph: N native topics plus the edges between them. */

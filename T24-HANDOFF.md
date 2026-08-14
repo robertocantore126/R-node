@@ -44,14 +44,30 @@ A crescent is concave, so the label runs out onto its horns. The fix is the
 
 ### 1 — Model
 
-`src/core/types.ts`, three optional fields on `Style` (no migration):
+`src/core/types.ts`, two optional fields on `Style` (no migration):
 
 ```ts
-shapePath?: string;                                  // SVG path data, 0..1 box
-shapeTextBox?: { x: number; y: number; w: number; h: number };  // same space
+/** Painted in order: silhouette first, details on top. */
+shapeParts?: Array<{
+  d: string;                    // SVG path data in a 0..1 box
+  fill?: string;                // hex, or a theme token: accent|surface|text|muted
+  stroke?: string;              // same
+  strokeWidth?: number;         // in the same 0..1 units
+  rule?: "nonzero" | "evenodd"; // evenodd cuts holes
+}>;
+shapeTextBox?: { x: number; y: number; w: number; h: number };
 ```
 
 `shape: "custom"` selects them. Add `"custom"` to `TopicShape`.
+
+**Why colours ARE stored here, when nothing else in this codebase stores them.**
+T22 and T23 both strip colour, and the reason was always the same: a stored
+colour had to contrast with something the theme owns — text against a node's
+fill — so saving it fixed half of a pairing and eventually produced something
+unreadable. A shape's colours contrast with **each other, inside the shape**. A
+yellow moon is yellow on a white map and on a dark one. Here the colour is
+content, not presentation, so it is kept — and a part may still opt into the
+theme by naming a token instead of a hex.
 
 ### 2 — The text box IS an inset. Do not invent a second concept.
 
@@ -72,38 +88,59 @@ slots, and report 0 diverging.
 
 ### 3 — Draw it
 
-`renderer.ts`, a `"custom"` branch in `traceShape`:
+`renderer.ts`, a `"custom"` branch. Each part becomes a `Path2D` transformed
+from the 0..1 box onto the node's rect, painted in order:
 
 ```ts
-const p2 = new Path2D();
-p2.addPath(new Path2D(style.shapePath), new DOMMatrix().translate(x, y).scaleNonUniform(w, h));
+const m = new DOMMatrix().translate(x, y).scaleNonUniform(w, h);
+for (const part of style.shapeParts) {
+  const p2 = new Path2D();
+  p2.addPath(new Path2D(part.d), m);
+  ctx.fillStyle = resolvePaint(theme, part.fill) ?? nodeFill;
+  ctx.fill(p2, part.rule ?? "nonzero");
+  if (part.stroke) { /* strokeWidth is in 0..1 units: multiply by w */ }
+}
 ```
 
-`traceShape` currently traces into the context's current path and lets the
-caller fill. A `Path2D` cannot be appended to that, so return `Path2D | null`
-and have the callers use `ctx.fill(path)` / `ctx.stroke(path)` when it is
-non-null. Keep the built-in shapes on the existing route.
+`resolvePaint` maps `accent | surface | text | muted` to the theme and passes a
+hex straight through. It belongs next to the other theme lookups, not inline.
 
-Two consequences worth taking:
-- Hit-testing can become exact with `ctx.isPointInPath(p2, x, y)` — a click in
-  the hollow of a crescent then correctly misses it.
-- **The SVG export gets easier**, not harder: the path is already SVG. Emit it
-  with a transform rather than re-deriving the outline.
+`traceShape` currently traces into the context's current path and lets the
+caller fill. Path2D cannot be appended to that, so the custom branch paints its
+own parts and reports that it did; keep the built-in shapes on the existing
+route rather than rewriting them.
+
+Three consequences worth taking:
+- **Hit-testing** becomes exact: `isPointInPath` against the parts in turn — a
+  click in the hollow of a crescent then correctly misses it. Test the FIRST
+  part at least; it is the silhouette.
+- **The SVG export gets easier**, not harder: one `<path>` per part with a
+  transform, instead of re-deriving an outline.
+- **Cost** is one `Path2D` per part per visible shape node per frame, so cap the
+  parts at 12 (the validator does) and remember the count scales with how many
+  such nodes are on screen, not with the map's size.
 
 ### 4 — Validate what an LLM produced
 
 `src/editor/shapeLibrary.ts` (T23's module). A shape is refused, with a reason,
 if:
-- the path is longer than a sane cap (suggest 4000 chars) or contains anything
-  outside `M L H V C S Q T A Z m l h v c s q t a z`, digits, separators, signs
-  and exponents;
-- any coordinate is NaN, or the path fails to construct;
+- there are more than 12 parts, or the parts together exceed a sane cap (suggest
+  12000 chars, and 4000 for any single one);
+- any `d` contains something outside `M L H V C S Q T A Z m l h v c s q t a z`,
+  digits, separators, signs and exponents;
+- any coordinate is NaN, or a path fails to construct;
+- a `fill` or `stroke` is neither a `#rgb`/`#rrggbb` nor one of the four theme
+  tokens;
 - `shapeTextBox` is not fully inside `[0,1]²`;
 - **the text box is not inside the filled shape** — check it, do not trust it.
-  Build the `Path2D` on an offscreen canvas and `isPointInPath` the four corners
-  and the centre of the box. This is the rule an LLM breaks most often: it
-  reasons about the outline's extremes and proposes a box that fits the bounding
-  rectangle, not the silhouette.
+  Build the parts on an offscreen canvas and `isPointInPath` the four corners
+  and the centre of the box against the FIRST part, the silhouette. This is the
+  rule an LLM breaks most often: it reasons about the outline's extremes and
+  proposes a box that fits the bounding rectangle, not the shape.
+
+Not worth refusing, worth knowing: a later part that spills outside the
+silhouette is legal and will simply draw over the canvas. The prompt warns
+against it; a validator that measured it would reject too many good shapes.
 
 ### 5 — Straight relationships (needed by T23, specified here)
 

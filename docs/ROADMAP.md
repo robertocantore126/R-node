@@ -700,9 +700,19 @@ corretto (la libreria funziona anche prima, con gli archi curvi di oggi).
 
 ## T24 — Special shape node · P2
 
-**Obiettivo.** Un topic la cui silhouette è un path arbitrario — mezzaluna,
-scudo, freccia — invece di una delle nove `TopicShape` predefinite. **Dimensione
-fissa**, etichetta **modificabile** come qualunque altro topic.
+**Obiettivo.** Un topic disegnato come **artwork multicolore**: una lista di path
+(`Style.shapeParts`), dipinti in ordine, ciascuno col proprio colore — mezzaluna,
+scudo bicolore, ingranaggio — invece di una delle nove `TopicShape` predefinite.
+**Dimensione fissa**, etichetta **modificabile** come qualunque altro topic.
+
+**Perché qui i colori si salvano, quando in tutto il resto del progetto no.**
+T22 e T23 li scartano entrambi, e la ragione era sempre la stessa: quel colore
+doveva contrastare con **qualcosa che possiede il tema** — il testo sul fill del
+nodo — quindi salvarlo fissava metà di un accoppiamento e prima o poi produceva
+qualcosa di illeggibile. I colori di una forma contrastano **fra loro, dentro la
+forma**: una luna gialla è gialla su mappa chiara e su mappa scura. Qui il colore
+è contenuto, non presentazione. Una parte può comunque scegliere di seguire il
+tema nominando un token (`accent`, `surface`, `text`, `muted`) invece di un hex.
 
 **Perché la dimensione è fissa.** È la decisione che rende il problema
 trattabile: un nodo che non cresce non deve mai negoziare il proprio contorno
