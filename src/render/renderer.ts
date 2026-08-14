@@ -8,7 +8,7 @@
  */
 import type { Group, MindNode, Sheet, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, createCanvasTextMeasurer, FONT_STACK, IMAGE_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -509,6 +509,17 @@ export class Renderer {
     const branchRootId = this.branchRoot(n, sheet);
     const branchRoot = sheet.nodes[branchRootId];
     return branchRoot?.style.fill ?? theme.branch[this.branchIndex(n, sheet)];
+  }
+
+  /**
+   * The colour a relationship is drawn with (its own, else the theme's
+   * selection accent). Public for the SVG export, which must not re-derive
+   * theme colours: they live here, and a second copy would disagree the
+   * first time a theme changes.
+   */
+  relationshipColorOf(state: RenderState, relId: string): string {
+    const rel = state.sheet.relationships.find((r) => r.id === relId);
+    return rel?.color ?? THEMES[state.themeName].selection;
   }
 
   private branchIndex(n: MindNode, sheet: Sheet): number {
@@ -1055,31 +1066,53 @@ export class Renderer {
     const ctx = this.ctx;
     const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
     const bx = b.x + b.w / 2, by = b.y + b.h / 2;
-    const c1x = ax + (bx - ax) * 0.35, c1y = ay;
-    const c2x = bx - (bx - ax) * 0.35, c2y = by;
+    const curve: Bezier3 = {
+      p0: { x: ax, y: ay },
+      p1: { x: ax + (bx - ax) * 0.35, y: ay },
+      p2: { x: bx - (bx - ax) * 0.35, y: by },
+      p3: { x: bx, y: by },
+    };
+    // Truncate the curve exactly where it crosses each node's box, so the
+    // visible line ends where the arrowhead sits. The old full curve ran on
+    // under the head toward the centre, and the head's angle — computed on
+    // the straight line to the centre — disagreed with the curve's real
+    // tangent at the border on pronounced curves.
+    const t0 = bezierExitRect(curve, a.x, a.y, a.w, a.h);
+    const t1 = bezierEnterRect(curve, b.x, b.y, b.w, b.h);
+    const drawn = t1 - t0 > 1e-6 ? bezierSlice(curve, t0, t1) : curve;
     ctx.strokeStyle = color;
     ctx.lineWidth = selected ? 2.5 : 1.5;
     ctx.setLineDash(style === "dashed" ? [7, 5] : style === "dotted" ? [2, 4] : []);
     ctx.beginPath();
-    ctx.moveTo(ax, ay);
-    ctx.bezierCurveTo(c1x, c1y, c2x, c2y, bx, by);
+    ctx.moveTo(drawn.p0.x, drawn.p0.y);
+    ctx.bezierCurveTo(drawn.p1.x, drawn.p1.y, drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
     ctx.stroke();
     ctx.setLineDash([]);
-    // Arrowheads: at the target, and at the source when bidirectional.
+    // Arrowheads: at the target, and at the source when bidirectional. The
+    // head used to be painted at the node CENTRE and then covered by the
+    // node's fill (nodes paint over relationships), so only the stub stuck
+    // out. The tip now sits on the border crossing, and its angle is the
+    // curve's exact tangent there — the slice's end segment.
     const arrow = (fromX: number, fromY: number, toX: number, toY: number): void => {
       const ang = Math.atan2(toY - fromY, toX - fromX);
-      const len = 9;
+      // Scale-compensated, like the groups and the drop indicator: the head
+      // keeps its screen size at any zoom. Uncompensated it is 9 world units
+      // — at scale 0.4 that is ~4 screen px, effectively invisible.
+      const len = ARROW_LEN / this.curScale;
       ctx.fillStyle = color;
       ctx.beginPath();
       ctx.moveTo(toX, toY);
-      ctx.lineTo(toX - len * Math.cos(ang - 0.42), toY - len * Math.sin(ang - 0.42));
-      ctx.lineTo(toX - len * Math.cos(ang + 0.42), toY - len * Math.sin(ang + 0.42));
+      ctx.lineTo(toX - len * Math.cos(ang - ARROW_HALF_ANGLE), toY - len * Math.sin(ang - ARROW_HALF_ANGLE));
+      ctx.lineTo(toX - len * Math.cos(ang + ARROW_HALF_ANGLE), toY - len * Math.sin(ang + ARROW_HALF_ANGLE));
       ctx.closePath();
       ctx.fill();
     };
-    // tangent at the end of the bezier ≈ direction from c2 to b
-    arrow(c2x, c2y, bx, by);
-    if (bidirectional) arrow(c1x, c1y, ax, ay);
+    arrow(drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
+    if (bidirectional) {
+      // Source head: tip at the exit crossing, pointing back INTO node a
+      // (opposite of the start tangent).
+      arrow(drawn.p1.x, drawn.p1.y, drawn.p0.x, drawn.p0.y);
+    }
     if (label) {
       const mx = (ax + bx) / 2, my = (ay + by) / 2;
       ctx.font = `600 12px system-ui, sans-serif`;

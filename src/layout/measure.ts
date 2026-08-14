@@ -127,6 +127,105 @@ export const IMAGE_GAP = 6;
  */
 export const BULLET_WIDTH_EM = 1.2;
 
+/** Arrowhead length for relationships, in world units at scale 1 (I9: the
+ *  canvas and the SVG export must draw the same head or the two diverge). */
+export const ARROW_LEN = 9;
+/** Half the arrowhead's spread, in radians. */
+export const ARROW_HALF_ANGLE = 0.42;
+
+/** A cubic Bézier, in world units. */
+export interface Bezier3 {
+  p0: { x: number; y: number };
+  p1: { x: number; y: number };
+  p2: { x: number; y: number };
+  p3: { x: number; y: number };
+}
+
+/** Point on a cubic Bézier at parameter t (0..1). */
+export function bezierPoint(b: Bezier3, t: number): { x: number; y: number } {
+  const mt = 1 - t;
+  const a = mt * mt * mt;
+  const bb = 3 * mt * mt * t;
+  const c = 3 * mt * t * t;
+  const d = t * t * t;
+  return {
+    x: a * b.p0.x + bb * b.p1.x + c * b.p2.x + d * b.p3.x,
+    y: a * b.p0.y + bb * b.p1.y + c * b.p2.y + d * b.p3.y,
+  };
+}
+
+/**
+ * The sub-curve of [t0, t1] as its own cubic Bézier (de Casteljau). Used to
+ * truncate a relationship curve exactly at the node borders, so the drawn
+ * line meets the arrowhead instead of running under it toward the centre.
+ * The tangents of the slice at its ends are the exact tangents of the
+ * original curve at t0 and t1.
+ */
+export function bezierSlice(b: Bezier3, t0: number, t1: number): Bezier3 {
+  const lerp = (a: { x: number; y: number }, c: { x: number; y: number }, t: number) => ({
+    x: a.x + (c.x - a.x) * t,
+    y: a.y + (c.y - a.y) * t,
+  });
+  // Subdivide at t0, keep the right part [t0, 1].
+  const q1 = lerp(b.p0, b.p1, t0);
+  const q2 = lerp(b.p1, b.p2, t0);
+  const q3 = lerp(b.p2, b.p3, t0);
+  const q4 = lerp(q1, q2, t0);
+  const q5 = lerp(q2, q3, t0);
+  const right: Bezier3 = { p0: lerp(q4, q5, t0), p1: q5, p2: q3, p3: b.p3 };
+  // Subdivide the right part at u = (t1 - t0) / (1 - t0). The left part of
+  // that subdivision is the slice: [R0, e1, f1, g] — using the second-level
+  // point f2 (r5) as p2 was the classic mistake and bent the slice's end
+  // tangent in the wrong direction.
+  const u = (t1 - t0) / (1 - t0);
+  const r1 = lerp(right.p0, right.p1, u); // e1
+  const r2 = lerp(right.p1, right.p2, u); // e2
+  const r3 = lerp(right.p2, right.p3, u); // e3
+  const r4 = lerp(r1, r2, u); // f1
+  const r6 = lerp(r4, lerp(r2, r3, u), u); // g = P(t1)
+  return { p0: right.p0, p1: r1, p2: r4, p3: r6 };
+}
+
+/**
+ * The parameter t where the curve crosses an axis-aligned rectangle. The
+ * relationship curve is monotonic in both axes (control points stay within
+ * the endpoints' span), so there is exactly one crossing. `enter` finds the
+ * FIRST point inside the rect (the curve ends at the target centre, which is
+ * inside); `exit` finds the FIRST point outside (the curve starts at the
+ * source centre, which is inside). Degenerate overlaps (two boxes that
+ * already touch) clamp to 0 / 1.
+ */
+function rectCrossing(b: Bezier3, x: number, y: number, w: number, h: number, exit: boolean): number {
+  const inside = (t: number): boolean => {
+    const p = bezierPoint(b, t);
+    return p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h;
+  };
+  const lo0 = inside(0);
+  const hi1 = inside(1);
+  // The search assumes the polarity flips once; if it already did not, the
+  // crossing is at the degenerate end.
+  if (lo0 === hi1) return exit ? 1 : 0;
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    // Same polarity as the start: the boundary is ahead; flipped: behind.
+    if (inside(mid) === lo0) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}
+
+/** First t where the curve (starting outside, ending inside) enters the rect. */
+export function bezierEnterRect(b: Bezier3, x: number, y: number, w: number, h: number): number {
+  return rectCrossing(b, x, y, w, h, false);
+}
+
+/** First t where the curve (starting inside, ending outside) leaves the rect. */
+export function bezierExitRect(b: Bezier3, x: number, y: number, w: number, h: number): number {
+  return rectCrossing(b, x, y, w, h, true);
+}
+
 const BULLET_CHARS = ["•", "◦", "▪"];
 
 /** Bullet marker for a list item at `depth` (1 = top level). */

@@ -21,18 +21,24 @@
  * colours, image bytes — so it runs in Node under a heuristic measurer and in
  * the browser under the canvas one.
  */
-import type { MindNode, Sheet, TextRun } from "../core/types";
+import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import {
+  ARROW_HALF_ANGLE,
+  ARROW_LEN,
   FONT_STACK,
   IMAGE_GAP,
   LINE_HEIGHT_FACTOR,
   MAX_IMAGE_W,
   TEXT_INSET,
+  bezierEnterRect,
+  bezierExitRect,
+  bezierSlice,
   imageResolver,
   measureNode,
   wrapRunLines,
+  type Bezier3,
   type TextMeasurer,
 } from "../layout/measure";
 
@@ -46,6 +52,8 @@ export interface SvgExportOptions {
   colorOf: (nodeId: string) => { fill: string; text: string } | null;
   /** Connector colour for a child node (its branch colour). */
   linkColorOf: (nodeId: string) => string;
+  /** Colour for a relationship (its own, else the theme's accent). */
+  relColorOf?: (relId: string) => string;
   /** Page background. Pass null for a transparent document. */
   background: string | null;
   /**
@@ -157,6 +165,62 @@ function connector(parent: Placed, child: Placed, sheet: Sheet, color: string): 
   const cp1x = sx + (childLeft ? -dx * 0.45 : dx * 0.45);
   const cp2x = ex + (childLeft ? dx * 0.45 : -dx * 0.45);
   return `<path d="M${n3(sx)},${n3(sy)}C${n3(cp1x)},${n3(sy)} ${n3(cp2x)},${n3(ey)} ${n3(ex)},${n3(ey)}" fill="none" stroke="${esc(color)}" stroke-width="1.7"/>`;
+}
+
+/** One arrowhead, tip at (toX, toY), flaring back toward the curve — the
+ *  same geometry the canvas paints (ARROW_LEN / ARROW_HALF_ANGLE are shared
+ *  in measure.ts, I9). */
+function arrowHead(fromX: number, fromY: number, toX: number, toY: number, color: string): string {
+  const ang = Math.atan2(toY - fromY, toX - fromX);
+  return (
+    `<polygon points="${n3(toX)},${n3(toY)} ` +
+    `${n3(toX - ARROW_LEN * Math.cos(ang - ARROW_HALF_ANGLE))},${n3(toY - ARROW_LEN * Math.sin(ang - ARROW_HALF_ANGLE))} ` +
+    `${n3(toX - ARROW_LEN * Math.cos(ang + ARROW_HALF_ANGLE))},${n3(toY - ARROW_LEN * Math.sin(ang + ARROW_HALF_ANGLE))}" ` +
+    `fill="${esc(color)}"/>`
+  );
+}
+
+/**
+ * A relationship, mirroring the renderer's drawRelationship: the same Bezier,
+ * truncated at exactly the two box borders, with arrowheads whose tip sits on
+ * the crossing and whose angle is the curve's real tangent there. A head that
+ * merely points at the centre would disagree with the line the moment the
+ * curve bends; and both exports must compute the same tip or they diverge.
+ */
+function relationship(rel: Relationship, byId: Map<string, Placed>, color: string): string {
+  const a = byId.get(rel.fromId);
+  const b = byId.get(rel.toId);
+  if (!a || !b) return "";
+  const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
+  const bx = b.x + b.w / 2, by = b.y + b.h / 2;
+  const curve: Bezier3 = {
+    p0: { x: ax, y: ay },
+    p1: { x: ax + (bx - ax) * 0.35, y: ay },
+    p2: { x: bx - (bx - ax) * 0.35, y: by },
+    p3: { x: bx, y: by },
+  };
+  const t0 = bezierExitRect(curve, a.x, a.y, a.w, a.h);
+  const t1 = bezierEnterRect(curve, b.x, b.y, b.w, b.h);
+  const drawn = t1 - t0 > 1e-6 ? bezierSlice(curve, t0, t1) : curve;
+  const dash =
+    rel.lineStyle === "dashed" ? ` stroke-dasharray="7 5"` : rel.lineStyle === "dotted" ? ` stroke-dasharray="2 4"` : "";
+  const parts = [
+    `<path d="M${n3(drawn.p0.x)},${n3(drawn.p0.y)}C${n3(drawn.p1.x)},${n3(drawn.p1.y)} ${n3(drawn.p2.x)},${n3(drawn.p2.y)} ${n3(drawn.p3.x)},${n3(drawn.p3.y)}" fill="none" stroke="${esc(color)}" stroke-width="1.5"${dash}/>`,
+  ];
+  parts.push(arrowHead(drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y, color));
+  if (rel.bidirectional) {
+    parts.push(arrowHead(drawn.p1.x, drawn.p1.y, drawn.p0.x, drawn.p0.y, color));
+  }
+  if (rel.label) {
+    const mx = (ax + bx) / 2, my = (ay + by) / 2;
+    // Width is estimated (the canvas measures it); close enough for a chip.
+    const w = rel.label.length * 7 + 10;
+    parts.push(`<rect x="${n3(mx - w / 2)}" y="${n3(my - 10)}" width="${n3(w)}" height="20" fill="#ffffff"/>`);
+    parts.push(
+      `<text x="${n3(mx)}" y="${n3(my + 0.5)}" text-anchor="middle" dominant-baseline="middle" font-size="12" font-weight="600" fill="${esc(color)}">${esc(rel.label)}</text>`
+    );
+  }
+  return parts.join("");
 }
 
 /**
@@ -355,7 +419,8 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     parts.push(`<rect x="${n3(minX)}" y="${n3(minY)}" width="${n3(width)}" height="${n3(height)}" fill="${esc(opts.background)}"/>`);
   }
 
-  // Connectors first, so every box paints over the line that reaches it.
+  // Connectors first, then relationships, so every box paints over the line
+  // that reaches it — the arrowheads sit at the borders and stay visible.
   parts.push("<g>");
   for (const p of placed) {
     if (!p.node.parentId) continue;
@@ -363,6 +428,20 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     if (parent) parts.push(connector(parent, p, sheet, opts.linkColorOf(p.node.id)));
   }
   parts.push("</g>");
+
+  let relationships = 0;
+  if (sheet.relationships.length > 0) {
+    parts.push("<g>");
+    for (const rel of sheet.relationships) {
+      const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
+      const el = relationship(rel, byId, color);
+      if (el) {
+        parts.push(el);
+        relationships++;
+      }
+    }
+    parts.push("</g>");
+  }
 
   let images = 0;
   let imagesMissing = 0;
@@ -407,7 +486,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     sheet,
     ms: performance.now() - t0,
     bytes: svg.length,
-    emitted: { nodes: placed.length, images, relationships: 0, boundaries: 0, summaries: 0 },
+    emitted: { nodes: placed.length, images, relationships, boundaries: 0, summaries: 0 },
     // Declared, not detected: an exporter cannot notice what it never thought
     // of, so it lists what it covers and the gap is computed against the
     // document. Everything absent here is a known omission.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BULLET_WIDTH_EM, IMAGE_GAP, imageResolver, MAX_IMAGE_W, measureNode, MIN_TOPIC_W, wrapRunLines, HEURISTIC_MEASURER } from "../src/layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, BULLET_WIDTH_EM, IMAGE_GAP, imageResolver, MAX_IMAGE_W, measureNode, MIN_TOPIC_W, wrapRunLines, bezierEnterRect, bezierExitRect, bezierPoint, bezierSlice, HEURISTIC_MEASURER, type Bezier3 } from "../src/layout/measure";
 import { DocumentModel } from "../src/core/doc";
 import { DEFAULT_STRUCTURE, type MindNode, type Sheet, type TextRun } from "../src/core/types";
 
@@ -252,5 +252,61 @@ describe("topic extent with an image (T12-1)", () => {
     const resolveImg = imageResolver(sheet);
     expect(resolveImg("a1")).toEqual({ w: 200, h: 100 });
     expect(resolveImg("missing")).toBeNull();
+  });
+});
+
+describe("relationship curve geometry (bezier truncation)", () => {
+  // The real relationship shape: controls at 0.35 of the span, y monotonic.
+  const CURVE: Bezier3 = { p0: { x: 0, y: 0 }, p1: { x: 35, y: 0 }, p2: { x: 65, y: 50 }, p3: { x: 100, y: 50 } };
+
+  it("bezierPoint evaluates the curve at the endpoints and the middle", () => {
+    expect(bezierPoint(CURVE, 0)).toEqual({ x: 0, y: 0 });
+    expect(bezierPoint(CURVE, 1)).toEqual({ x: 100, y: 50 });
+    const mid = bezierPoint(CURVE, 0.5);
+    // x is linear (controls collinear in x): 50; y = 50 * 0.5^2 * 2 = 25.
+    expect(mid.x).toBeCloseTo(50);
+    expect(mid.y).toBeCloseTo(25);
+  });
+
+  it("bezierSlice keeps the endpoints and the exact end tangent", () => {
+    const s = bezierSlice(CURVE, 0.5, 0.8);
+    expect(s.p0.x).toBeCloseTo(bezierPoint(CURVE, 0.5).x, 9);
+    expect(s.p0.y).toBeCloseTo(bezierPoint(CURVE, 0.5).y, 9);
+    expect(s.p3.x).toBeCloseTo(bezierPoint(CURVE, 0.8).x, 9);
+    expect(s.p3.y).toBeCloseTo(bezierPoint(CURVE, 0.8).y, 9);
+    // The slice's end segment direction is the curve's tangent at t=0.8: for
+    // this shape it points up-right — never along the chord to the centre.
+    const tangent = { x: s.p3.x - s.p2.x, y: s.p3.y - s.p2.y };
+    expect(tangent.y).toBeGreaterThan(0);
+    expect(tangent.x).toBeGreaterThan(0);
+  });
+
+  it("bezierEnterRect / bezierExitRect find the exact border crossings", () => {
+    // The target box x 90..110, y 40..60. The crossing sits on its left
+    // border, and the point flips from outside to inside exactly there.
+    const t1 = bezierEnterRect(CURVE, 90, 40, 20, 20);
+    const p1 = bezierPoint(CURVE, t1);
+    expect(p1.x).toBeCloseTo(90, 6);
+    expect(p1.y).toBeGreaterThanOrEqual(40 - 1e-6);
+    expect(p1.y).toBeLessThanOrEqual(60 + 1e-6);
+    expect(bezierPoint(CURVE, t1 - 1e-5).x).toBeLessThan(90);
+    expect(bezierPoint(CURVE, t1 + 1e-5).x).toBeGreaterThanOrEqual(90);
+    // The source box x -10..10, y -10..10: leaves on its right border.
+    const t0 = bezierExitRect(CURVE, -10, -10, 20, 20);
+    const p0 = bezierPoint(CURVE, t0);
+    expect(p0.x).toBeCloseTo(10, 6);
+    expect(p0.y).toBeGreaterThanOrEqual(-10 - 1e-6);
+    expect(p0.y).toBeLessThanOrEqual(10 + 1e-6);
+  });
+
+  it("a box that already contains the whole curve clamps instead of looping", () => {
+    expect(bezierEnterRect(CURVE, -50, -50, 300, 300)).toBe(0);
+    expect(bezierExitRect(CURVE, -50, -50, 300, 300)).toBe(1);
+  });
+
+  it("the shared arrowhead constants are positive and sane", () => {
+    expect(ARROW_LEN).toBeGreaterThan(0);
+    expect(ARROW_HALF_ANGLE).toBeGreaterThan(0);
+    expect(ARROW_HALF_ANGLE).toBeLessThan(Math.PI / 2);
   });
 });

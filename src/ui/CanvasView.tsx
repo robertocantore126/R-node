@@ -304,6 +304,7 @@ export function CanvasView(): JSX.Element {
           measurer: createCanvasTextMeasurer(),
           colorOf: (id) => renderer.nodeColors(rs, id),
           linkColorOf: (id) => renderer.branchColorOf(rs, id),
+          relColorOf: (relId) => renderer.relationshipColorOf(rs, relId),
           background: THEMES[s.theme].background,
           // The `small` level (256px), not `large` (1024px).
           //

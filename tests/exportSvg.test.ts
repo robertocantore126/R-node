@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sheetToSvg } from "../src/export/svg";
-import { HEURISTIC_MEASURER } from "../src/layout/measure";
+import { bezierEnterRect, bezierPoint, HEURISTIC_MEASURER, measureNode, type Bezier3 } from "../src/layout/measure";
 import { applyLayout } from "../src/layout/mindmap";
 import { DocumentModel } from "../src/core/doc";
 import type { MindNode, Sheet, TextRun } from "../src/core/types";
@@ -141,6 +141,57 @@ describe("SVG export", () => {
     });
     expect(calls).toBe(1);
     expect(out.images).toBe(5);
+  });
+
+  it("emits relationships with an arrowhead that stops at the target's border, not its centre", async () => {
+    const { sheet, add } = makeSheet();
+    const a = add(sheet.rootNodeId, "From");
+    const b = add(sheet.rootNodeId, "To");
+    sheet.relationships.push({ id: "r1", fromId: a.id, toId: b.id });
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+    const out = await sheetToSvg(sheet, { ...OPTS, relColorOf: () => "#ff0000" });
+
+    expect(out.report.coverage.relationships).toEqual({ present: 1, emitted: 1 });
+    // Connectors are paths only; the arrowhead is the one polygon.
+    expect(out.svg.match(/<polygon/g)).toHaveLength(1);
+
+    // The tip is the EXACT point where the curve crosses the target box.
+    const am = measureNode(a, HEURISTIC_MEASURER);
+    const bm = measureNode(b, HEURISTIC_MEASURER);
+    const ax = a.position.x + am.w / 2;
+    const ay = a.position.y + am.h / 2;
+    const bx = b.position.x + bm.w / 2;
+    const by = b.position.y + bm.h / 2;
+    const curve: Bezier3 = {
+      p0: { x: ax, y: ay },
+      p1: { x: ax + (bx - ax) * 0.35, y: ay },
+      p2: { x: bx - (bx - ax) * 0.35, y: by },
+      p3: { x: bx, y: by },
+    };
+    const t1 = bezierEnterRect(curve, b.position.x, b.position.y, bm.w, bm.h);
+    const tip = bezierPoint(curve, t1);
+    const m = /<polygon points="([-\d.]+),([-\d.]+)/.exec(out.svg);
+    expect(m).not.toBeNull();
+    expect(Number(m![1])).toBeCloseTo(tip.x, 2);
+    expect(Number(m![2])).toBeCloseTo(tip.y, 2);
+
+    // The line is truncated at the same point — the curve would otherwise
+    // run on under the head toward the centre. The tip coordinates appear
+    // again as the end of the relationship path's `d` attribute (the path
+    // carries more attributes after it, so the `d` ends with a bare quote).
+    const fmt = (v: number): string => String(Math.round(v * 1000) / 1000);
+    const tipPair = `${fmt(tip.x)},${fmt(tip.y)}`;
+    expect(out.svg.includes(` ${tipPair}"`)).toBe(true);
+  });
+
+  it("a bidirectional relationship gets an arrowhead on both ends", async () => {
+    const { sheet, add } = makeSheet();
+    const a = add(sheet.rootNodeId, "From");
+    const b = add(sheet.rootNodeId, "To");
+    sheet.relationships.push({ id: "r1", fromId: a.id, toId: b.id, bidirectional: true });
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+    const out = await sheetToSvg(sheet, { ...OPTS, relColorOf: () => "#ff0000" });
+    expect(out.svg.match(/<polygon/g)).toHaveLength(2);
   });
 
   it("leaves collapsed subtrees out, as the map does", async () => {
