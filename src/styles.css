@@ -295,6 +295,13 @@ textarea:focus {
   color: var(--accent);
 }
 
+/* Text buttons that enter a mode (Relationship while a target is pending)
+   light up the same way the icon toggles do. */
+.topbar .btn.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .topbar {
   display: flex;
   align-items: center;

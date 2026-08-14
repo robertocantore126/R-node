@@ -74,6 +74,29 @@ export function TopBar(): JSX.Element {
         </span>
       </div>
 
+      <div className="topbar-group">
+        <button
+          className={`btn${state.relFrom ? " on" : ""}`}
+          data-help="Relationship"
+          data-help-more="Links two topics with an arrow. Enabled with exactly one topic selected: click it, then click the target topic (Esc cancels)."
+          title="Link the selected topic to another (⇄)"
+          disabled={state.selection.length !== 1}
+          onClick={() => store.beginRelationship(state.selection[0])}
+        >
+          ⇄ Relationship
+        </button>
+        <button
+          className="btn"
+          data-help="Group"
+          data-help-more="Wraps the selected topics in a group box. Enabled with two or more topics selected."
+          title="Group the selected topics (❐)"
+          disabled={state.selection.length < 2}
+          onClick={() => store.createGroupFromSelection()}
+        >
+          ❐ Group
+        </button>
+      </div>
+
       <div className="topbar-group zoom-group">
         <button className="btn icon" data-help="Zoom out" data-help-more="Shrinks the view around the cursor (Ctrl+-)." title="Zoom out (Ctrl+-)" onClick={() => store.zoomStep(1 / 1.2, viewSize.w, viewSize.h)}>
           −
