@@ -2879,7 +2879,25 @@ export class EditorStore {
 
     const type: NodeType = anchorNode.type === "central" ? "main" : "subtopic";
     const origin = this.createNodePosition(anchorNode);
-    const ops = this.remapOps(nodes, anchorId, anchorNode.childrenIds.length, type, { origin, rootPos: srcRoot.position });
+    // Freeze each topic's box at the size it is born with.
+    //
+    // `position` is a top-left corner, so a topic that grows extends right and
+    // down and its CENTRE leaves the ring — which is what the eye reads as the
+    // structure collapsing when one node of a pentagon is given a paragraph.
+    // Nothing moves it: manual positions are preserved. The box changes shape
+    // around a fixed corner.
+    //
+    // Fixing width and height makes measureTopicUncached short-circuit, so the
+    // geometry the template drew survives whatever anyone types into it. The
+    // price is that a long title overflows its box instead of widening it, and
+    // the escape hatch already exists: clearing width/height in the Inspector
+    // returns the topic to growing normally.
+    const sized = nodes.map((n) => {
+      if (n.style.width && n.style.height) return n;
+      const e = measureNode(n, this.measurer);
+      return { ...n, style: { ...n.style, width: e.w, height: e.h } };
+    });
+    const ops = this.remapOps(sized, anchorId, anchorNode.childrenIds.length, type, { origin, rootPos: srcRoot.position });
     if (ops.length === 0) return trace.ignored("shape:insert", "template produced no topics", { shape: template.id });
 
     for (const rel of relationships) {

@@ -301,3 +301,44 @@ describe("shape nodes (T24)", () => {
   });
 });
 
+
+describe("a structure keeps its shape when a topic is written into", () => {
+  const adapter = { label: "test", async load() { return []; }, async save() { /* no-op */ } };
+
+  it("freezes each topic's box at insert, so a long title cannot move its centre", () => {
+    // `position` is a top-left corner: a topic that grows extends right and
+    // down, its CENTRE leaves the ring, and the eye reads that as the pentagon
+    // collapsing. Nothing moved it — the box changed shape around a fixed
+    // corner. A frozen box cannot.
+    const store = new EditorStore(adapter as never);
+    const t = saveShape("Triangolo", triangle());
+    store.insertShape(t, store.sheet.rootNodeId);
+
+    const inserted = Object.values(store.sheet.nodes).filter((n) => ["A", "B", "C"].includes(n.title));
+    expect(inserted).toHaveLength(3);
+    expect(inserted.every((n) => (n.style.width ?? 0) > 0 && (n.style.height ?? 0) > 0)).toBe(true);
+
+    const target = inserted.find((n) => n.title === "B")!;
+    const before = { w: target.style.width!, h: target.style.height!, x: target.position.x, y: target.position.y };
+
+    store.startEdit(target.id);
+    store.setEditingDraft("una didascalia molto piu lunga di prima, abbastanza da allargare una scatola libera di crescere");
+    store.commitEdit();
+
+    const after = store.doc.node(target.id)!;
+    expect(after.title.length).toBeGreaterThan(40); // the text really landed
+    expect(after.style.width).toBe(before.w);
+    expect(after.style.height).toBe(before.h);
+    expect(after.position.x).toBe(before.x);
+    expect(after.position.y).toBe(before.y);
+  });
+
+  it("leaves a topic that already carries an explicit size alone", () => {
+    const store = new EditorStore(adapter as never);
+    const t = saveShape("Fissa", triangle({ nodes: { b: { style: { width: 321, height: 123 } } } }));
+    store.insertShape(t, store.sheet.rootNodeId);
+    const b = Object.values(store.sheet.nodes).find((n) => n.title === "B")!;
+    expect(b.style.width).toBe(321);
+    expect(b.style.height).toBe(123);
+  });
+});
