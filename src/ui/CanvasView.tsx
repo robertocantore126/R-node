@@ -6,7 +6,7 @@ import { Renderer, type RenderState } from "../render/renderer";
 import { THEMES } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
 import { sheetToHtmlViewer } from "../export/htmlViewer";
-import { sheetToPdf } from "../dev/pdfProbe";
+import { sheetToPdf } from "../export/pdf";
 import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
@@ -448,8 +448,9 @@ export function CanvasView(): JSX.Element {
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
         store.toast(
-          `PDF — ${out.nodes} topics, ${out.images} images, ${out.ops.toLocaleString()} ops, ` +
-            `${(out.bytes / 1048576).toFixed(1)}MB, page ${Math.round(out.pageW)}×${Math.round(out.pageH)}`
+          `PDF — ${out.nodes.toLocaleString()} topics down ${out.mapPages} sheets, full width on each, ` +
+            `${out.report.units.percentOfTrueSize}% of true size (text ${out.report.units.minFontPt}pt), ` +
+            `${out.bytes < 1048576 ? `${Math.round(out.bytes / 1024)}KB` : `${(out.bytes / 1048576).toFixed(1)}MB`}`
         );
       } catch (e) {
         store.toast(`PDF export failed — ${String(e)}`);

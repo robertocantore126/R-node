@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
-import { runExportHtml } from "../editor/exportBridge";
+import { runExportHtml, runExportPdf } from "../editor/exportBridge";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
 
@@ -142,12 +142,16 @@ export function TopBar(): JSX.Element {
             <div className="menu">
               <button data-help="Export Markdown" data-help-more="The map as a bulleted Markdown outline. Text only." onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
               <button data-help="Interactive viewer" data-help-more="A self-contained HTML file with the renderer built in — open it anywhere, no R-node needed." onClick={() => { runExportHtml(); setExportOpen(false); }}>Interactive viewer (.html) — read on screen</button>
+              <button data-help="Export PDF" data-help-more="The map across A4 sheets at true size, with an index sheet and page numbers where a branch continues. Prints." onClick={() => { runExportPdf(); setExportOpen(false); }}>Pages (.pdf) — print or read on paper</button>
               {/* JSON, ZIP and image-carrying exports existed here but were
-                  removed from the GUI: this menu ships only Markdown and the
-                  HTML viewer. SVG / PNG / PDF exist in the code (src/export,
-                  src/dev/pdfProbe) but are not real yet: SVG stalls on large
-                  maps, PNG is the viewport only, PDF is an experiment with a
-                  blank-page history. Off the GUI until they are. */}
+                  removed from the GUI: this menu ships Markdown, the HTML
+                  viewer and the paginated PDF. SVG and PNG exist in the code
+                  but are not real yet: SVG stalls on large maps, PNG is the
+                  viewport only. Off the GUI until they are.
+                  PDF earned its way back: it no longer scales the map down to
+                  one sheet — the scale is fixed and the page count absorbs the
+                  size, so the text is 10.5pt on a 3,000-topic map instead of
+                  the 1.9pt the single-sheet version produced. */}
             </div>
           )}
         </div>
