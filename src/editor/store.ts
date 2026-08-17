@@ -1961,6 +1961,39 @@ export class EditorStore {
     });
   }
 
+  /**
+   * Hand `node` and every manual descendant back to the layout engine.
+   *
+   * A drop that names a SLOT — child of X, before/after Y — asks for a position
+   * only the layout can compute, so a manual pin left on the node silently wins:
+   * `applyLayout` skips manual nodes, so the `moveNode` op reorders
+   * `childrenIds` and nothing on screen moves. That is invisible for an ordinary
+   * topic, which has no pin, and total for a special one — `insertShape` stamps
+   * `manual: true` on every topic it creates, so a shape or code topic could be
+   * reordered all day without ever appearing to move.
+   *
+   * Descendants go too, for the reason the floating branch below already gives:
+   * a subtree must re-flow around its root's new position instead of staying
+   * pinned to the old one and tearing away from it.
+   */
+  private releaseManualSubtree(node: MindNode): Op[] {
+    const ops: Op[] = [];
+    const self = this.releaseManualPosition(node);
+    if (self) ops.push(self);
+    for (const descId of this.collectManualDescendants(node.id)) {
+      const d = this.model.node(descId);
+      if (!d) continue;
+      ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", {
+        id: descId,
+        x: d.position.x,
+        y: d.position.y,
+        manual: false,
+        prev: { ...d.position },
+      }));
+    }
+    return ops;
+  }
+
   /** Resolve a drop of `draggedId` over `targetId`/empty space. */
   dropAt(draggedId: string, targetId: string | null, mode: "child" | "before" | "after" | "floating", worldX: number, worldY: number): void {
     const node = this.model.node(draggedId);
@@ -1982,8 +2015,7 @@ export class EditorStore {
           toParentId: targetId,
           toIndex: target.childrenIds.length,
         })];
-        const release = this.releaseManualPosition(node);
-        if (release) ops.push(release);
+        ops.push(...this.releaseManualSubtree(node));
         this.execOps(ops);
       } else if (mode === "before" || mode === "after") {
         if (!target.parentId) {
@@ -2006,8 +2038,19 @@ export class EditorStore {
           toParentId: target.parentId,
           toIndex: finalIdx,
         })];
-        const release = node.parentId !== target.parentId ? this.releaseManualPosition(node) : null;
-        if (release) ops.push(release);
+        // Only a main topic (root child) or a floating one may hold a free
+        // position; anything deeper belongs to the auto layout — the same rule
+        // CanvasView applies when it decides a drag may float.
+        //
+        // So a reparent always releases, and a same-parent reorder releases
+        // only when the slot is deeper than a main topic. That was the gap:
+        // `insertShape` stamps `manual: true` at every depth, so a shape or
+        // code topic sitting among subtopics carried a pin the layout is
+        // required to honour. The drop reordered `childrenIds` and the node
+        // never moved. A pinned MAIN topic still survives its reorder, which
+        // is deliberate and pinned by a test.
+        const deeperThanMain = target.parentId !== this.sheet.rootNodeId;
+        if (node.parentId !== target.parentId || deeperThanMain) ops.push(...this.releaseManualSubtree(node));
         this.execOps(ops);
       }
     } else if (mode === "floating") {

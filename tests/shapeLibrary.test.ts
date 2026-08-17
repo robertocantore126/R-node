@@ -4,6 +4,7 @@ import { listShapes, prepareShape, removeShape, saveShape, ShapeRejected } from 
 import { runsToPlain } from "../src/core/text";
 import { validateSheet } from "../src/core/validate";
 import { EditorStore } from "../src/editor/store";
+import { applyLayout } from "../src/layout/mindmap";
 import type { MindNode, Relationship, Style, TextRun } from "../src/core/types";
 
 function node(id: string, over: Partial<MindNode> = {}): MindNode {
@@ -440,5 +441,84 @@ describe("deleting a special node cannot corrupt the map", () => {
     expect(listShapes()).toEqual([]);
     expect(Object.values(store.sheet.nodes).filter((n) => ["A", "B", "C"].includes(n.title))).toHaveLength(3);
     expect(() => validateSheet(store.sheet)).not.toThrow();
+  });
+});
+
+describe("dropping a special node into a sibling slot", () => {
+  const adapter = { label: "test", async load() { return []; }, async save() { /* no-op */ } };
+
+  const crestTemplate = () => saveShape("Stemma", { app: "r-node", payload: { rootId: "a", nodes: [node("a")], relationships: [] } });
+
+  /** A main topic with two subtopics, plus a shape dropped in as a third. */
+  function branchWithCrest() {
+    const store = new EditorStore(adapter as never);
+    const branch = store.createChildOf(store.sheet.rootNodeId)!;
+    store.cancelEdit();
+    const first = store.createChildOf(branch)!;
+    store.cancelEdit();
+    const second = store.createChildOf(branch)!;
+    store.cancelEdit();
+    crestTemplate();
+    store.insertShape(listShapes()[0], branch);
+    const crest = Object.values(store.sheet.nodes).find((n) => n.title === "A")!;
+    return { store, branch, first, second, crest };
+  }
+
+  it("hands the node back to the layout, so the reorder actually moves it", () => {
+    // From a user trace: eight drags, eight moveNode ops, nothing moved on
+    // screen. insertShape stamps `manual: true` at EVERY depth, and applyLayout
+    // skips manual nodes — so the sibling order changed underneath a subtopic
+    // that stayed pinned exactly where it had landed.
+    const { store, branch, first, second, crest } = branchWithCrest();
+    expect(crest.position.manual).toBe(true); // pinned when it lands
+    const before = { ...crest.position };
+
+    store.dropAt(crest.id, first, "after", 0, 0);
+
+    const parent = store.sheet.nodes[branch];
+    expect(parent.childrenIds.indexOf(crest.id)).toBe(parent.childrenIds.indexOf(first) + 1);
+    expect(parent.childrenIds.indexOf(crest.id)).toBeLessThan(parent.childrenIds.indexOf(second));
+
+    // The pin is gone, so the layout owns the slot. That is the whole fix:
+    // while `manual` stayed true the reorder was invisible.
+    expect(store.sheet.nodes[crest.id].position.manual).toBe(false);
+
+    // Proven with the real engine, not by assertion: a pinned node is skipped
+    // by applyLayout, an unpinned one is placed.
+    applyLayout(store.sheet, false);
+    const placed = store.sheet.nodes[crest.id].position;
+    expect({ x: placed.x, y: placed.y }).not.toEqual({ x: before.x, y: before.y });
+  });
+
+  it("undoes the release together with the move", () => {
+    const { store, first, crest } = branchWithCrest();
+    const pinned = { ...crest.position };
+
+    store.dropAt(crest.id, first, "after", 0, 0);
+    store.undo();
+
+    const back = store.sheet.nodes[crest.id].position;
+    expect(back.manual).toBe(true);
+    expect(back.x).toBeCloseTo(pinned.x, 5);
+    expect(back.y).toBeCloseTo(pinned.y, 5);
+  });
+
+  it("still leaves a pinned MAIN topic pinned — only deeper topics are the layout's", () => {
+    // The other half of the rule: a main topic may hold a free position, so a
+    // reorder among root children must not drag it back into the auto layout.
+    const store = new EditorStore(adapter as never);
+    const root = store.sheet.rootNodeId;
+    const a = store.createChildOf(root)!;
+    store.cancelEdit();
+    const b = store.createChildOf(root)!;
+    store.cancelEdit();
+
+    store.sheet.nodes[a].position = { x: 200, y: 100, manual: true };
+    store.dropAt(a, b, "after", 250, 100);
+
+    const moved = store.sheet.nodes[a].position;
+    expect(moved.manual).toBe(true);
+    expect(moved.x).toBe(200);
+    expect(moved.y).toBe(100);
   });
 });
