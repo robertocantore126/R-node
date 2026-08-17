@@ -3518,6 +3518,11 @@ export class EditorStore {
       else {
         this.model = new DocumentModel(DocumentModel.blank());
         this.state = this.makeState();
+        // The replacement blank belongs to NO file: the adapter must not keep
+        // pointing at the deleted document's file, or the next Ctrl+S would
+        // try to write the blank over it — and the overwrite guard would
+        // refuse, stranding the new document.
+        this.applyDocFile(null);
       }
     }
     this.state.sync = "dirty";
@@ -3531,9 +3536,9 @@ export class EditorStore {
    * the pointer, making their first save a "Save as…" instead of an
    * overwrite of whatever file was open before.
    */
-  private applyDocFile(id: string): void {
+  private applyDocFile(id: string | null): void {
     if (!(this.adapter instanceof TauriStorageAdapter)) return;
-    const path = this.docFilePaths.get(id) ?? null;
+    const path = id ? (this.docFilePaths.get(id) ?? null) : null;
     this.adapter.setRoot(path);
     const assetStore = getAssetStore();
     if (assetStore instanceof TauriAssetStore) assetStore.setRoot(path);

@@ -117,9 +117,9 @@ function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { 
           </button>
         )}
         <button
-          data-help="Delete permanently"
-          data-help-more="Removes the document from the app storage. Not undoable."
-          title="Delete permanently"
+          data-help="Close document"
+          data-help-more="Removes the document from the open list. The file on disk is kept."
+          title="Close document"
           onClick={(e) => { e.stopPropagation(); store.deleteDocument(doc.documentId); }}
         >
           🗑

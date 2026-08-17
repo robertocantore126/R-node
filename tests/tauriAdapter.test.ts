@@ -492,6 +492,26 @@ describe("per-document files (two open maps cannot overwrite each other)", () =>
     expect(JSON.parse(bk.files["C:/Taken.rnode"]).documentId).toBe("doc-b");
   });
 
+  it("deleting the only open document clears the file pointer — the replacement blank saves as a NEW file", async () => {
+    const bk = memoryBackend({});
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    bk.queuePick("C:/A.rnode");
+    await store.saveNow(); // sample -> A.rnode (adapter root = A.rnode)
+    const aFile = bk.files["C:/A.rnode"];
+    // Trash the only open map: a fresh blank replaces it. It must NOT keep
+    // pointing at A.rnode, or Ctrl+S would try to write the blank over the
+    // old map (and the overwrite guard would refuse, stranding the new doc).
+    store.deleteDocument(store.getSnapshot().activeDocId);
+    bk.queuePick("C:/Fresh.rnode");
+    await store.saveNow(); // must be a Save-as to a NEW file
+    const writes = bk.calls.filter((c) => c.cmd === "write_document");
+    expect(writes[writes.length - 1].args.path).toBe("C:/Fresh.rnode");
+    // The old map's file is untouched — deleting only closes the document.
+    expect(bk.files["C:/A.rnode"]).toBe(aFile);
+    expect(store.getSnapshot().sync).toBe("saved");
+  });
+
   it("renaming a NON-active document renames its own file and leaves the active one's file alone", async () => {
     const bk = memoryBackend({ "C:/B.rnode": docB });
     const store = new EditorStore(new TauriStorageAdapter());
