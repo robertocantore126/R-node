@@ -311,3 +311,39 @@ describe("the rings drawn around a topic", () => {
     expect(y + h).toBeGreaterThan(BOX.y + BOX.h);
   });
 });
+
+describe("hitTest — what a drag is allowed to land on", () => {
+  /**
+   * A tall topic overlapping a short one below it: the geometry of a special
+   * node (box frozen at insert size, often 300px+) dragged over a normal
+   * topic. Later in the array means painted later, so `tall` is on top and
+   * wins an unfiltered hit test even where it only overlaps.
+   */
+  function rendererWith(placed: unknown[]): Renderer {
+    const r = new Renderer(makeFakeCanvas(make2dCtx()));
+    (r as unknown as { placedNodes: () => unknown[] }).placedNodes = () => placed;
+    return r;
+  }
+
+  const small = { node: { id: "small" }, x: 0, y: 300, w: 120, h: 40, visible: true };
+  const tall = { node: { id: "tall" }, x: 0, y: 0, w: 200, h: 400, visible: true };
+  // Inside both boxes, in the LOWER half of `small` — the "drop after" zone.
+  const PX = 60;
+  const PY = 332;
+
+  it("returns the topmost topic when nothing is skipped", () => {
+    expect(rendererWith([small, tall]).hitTest({} as never, PX, PY)).toBe("tall");
+  });
+
+  it("finds the topic behind the one being dragged", () => {
+    // The dragged node tracks the cursor, so it sits under the pointer for the
+    // whole gesture. Answering its own hit test made the drop fall through to
+    // "floating", which kept it following, which kept it covering: a tall node
+    // could be dropped ABOVE a topic but never below one.
+    expect(rendererWith([small, tall]).hitTest({} as never, PX, PY, (id) => id === "tall")).toBe("small");
+  });
+
+  it("still reports nothing when the skipped node was the only candidate", () => {
+    expect(rendererWith([tall]).hitTest({} as never, PX, PY, (id) => id === "tall")).toBeNull();
+  });
+});

@@ -1532,10 +1532,19 @@ export class Renderer {
   // Hit testing
   // -------------------------------------------------------------------------
 
-  hitTest(state: RenderState, worldX: number, worldY: number): string | null {
+  /**
+   * The topmost visible topic under the point, or null.
+   *
+   * `skip` drops candidates before the box test, so the topic *behind* an
+   * excluded one can win. A drag passes the node it is moving: that node
+   * tracks the cursor, so without this it answers its own hit test and hides
+   * whatever it is being dragged onto.
+   */
+  hitTest(state: RenderState, worldX: number, worldY: number, skip?: (id: string) => boolean): string | null {
     const placed = this.placedNodes(state).filter((p) => p.visible);
     for (let i = placed.length - 1; i >= 0; i--) {
       const p = placed[i];
+      if (skip?.(p.node.id)) continue;
       if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
     }
     return null;

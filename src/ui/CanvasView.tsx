@@ -842,10 +842,22 @@ export function CanvasView(): JSX.Element {
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
-    const hit = renderer.hitTest(rs, world.x, world.y);
+    // The dragged topic and its subtree travel with the cursor, so they must
+    // not answer the hit test — the target has to be something that stayed put.
+    //
+    // This is invisible for a normal topic (~40px tall) and fatal for a special
+    // one: a shape or a code topic has its box frozen at insert size, so the
+    // crest you grabbed near its crown still covers 300px BELOW the cursor.
+    // That body hid every topic underneath, the drop fell through to
+    // "floating", the node kept following the cursor, and it kept covering —
+    // so the lower ("after") half of a topic below could never be reached and
+    // the node could only ever be dropped above one.
+    const dragging = drag.dragging; // narrowed by the guard above; a closure cannot re-narrow the ref field
+    const movesWithCursor = (id: string): boolean => id === dragging || isDescendantOf(store.doc, dragging, id);
+    const hit = renderer.hitTest(rs, world.x, world.y, movesWithCursor);
 
     let dropMode: "child" | "before" | "after" | "floating" | "none" = "none";
-    if (hit && hit !== drag.dragging && !isDescendantOf(store.doc, drag.dragging, hit)) {
+    if (hit) {
       const r = renderer.nodeWorldRect(rs, hit);
       if (r) {
         const relY = (world.y - r.y) / r.h;
