@@ -1568,6 +1568,21 @@ export class EditorStore {
     }
   }
 
+  /**
+   * Which side of the root a topic sits on, by the same rule the layout uses
+   * (`childSide` in `src/layout/mindmap.ts`): compare box centres, not corners.
+   *
+   * Only `mindmap` has two sides — every other structure stacks one way, and
+   * freeform has no layout at all — so callers ask for this only there.
+   */
+  private sideOfRoot(node: MindNode): -1 | 1 {
+    const root = this.model.rootNode;
+    if (!root || root.id === node.id) return 1;
+    const rootCx = root.position.x + measureNode(root, this.measurer).w / 2;
+    const nodeCx = node.position.x + measureNode(node, this.measurer).w / 2;
+    return nodeCx >= rootCx ? 1 : -1;
+  }
+
   private createNodePosition(parent: MindNode): { x: number; y: number; manual: boolean } {
     const base = parent.position;
     const st = this.sheet.structure;
@@ -1575,7 +1590,18 @@ export class EditorStore {
     const estimatedW = 140;
     const offsetX = parent.type === "central" ? pSize.w / 2 + st.spacing + estimatedW / 2 + 20 : pSize.w / 2 + st.spacing + estimatedW / 2 + 10;
     const offsetY = parent.type === "central" ? parent.childrenIds.length * (pSize.h + st.branchSpacing) - (parent.childrenIds.length > 0 ? pSize.h / 2 : 0) : parent.childrenIds.length * (pSize.h + st.branchSpacing);
-    return { x: base.x + offsetX, y: base.y + offsetY, manual: false };
+    // Mirror the offset on a left-hand branch, or the topic is born on the far
+    // side of its own parent.
+    //
+    // For an ordinary topic this is cosmetic — it is created `manual: false`,
+    // so the next layout pass overwrites x entirely and the branch's side wins.
+    // For a SPECIAL node it is the final answer: `insertShape` uses this as the
+    // origin the whole template is translated onto, and `remapOps` stamps those
+    // topics `manual: true` so the layout never touches them again. An
+    // unmirrored origin left every shape and code topic stranded to the right
+    // of a left-hand anchor, pointing back across the map.
+    const side = st.structureType === "mindmap" ? this.sideOfRoot(parent) : 1;
+    return { x: base.x + side * offsetX, y: base.y + offsetY, manual: false };
   }
 
   createSibling(): void {

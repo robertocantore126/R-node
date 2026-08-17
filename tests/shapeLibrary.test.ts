@@ -211,6 +211,31 @@ describe("insertShape", () => {
     expect(b.position.y - a.position.y).toBeCloseTo(100, 5);
   });
 
+  it("lands on the anchor's side of the root, not always to the right", () => {
+    // The origin createNodePosition hands a template is FINAL: remapOps stamps
+    // every inserted topic `manual: true`, so the layout never corrects it the
+    // way it corrects an ordinary topic. Unmirrored, a shape dropped on a
+    // left-hand branch is born across the root, pointing back at the map.
+    const store = freshStore();
+    const root = store.sheet.rootNodeId;
+
+    // Enough main topics that autoBalance has to use both sides.
+    for (let i = 0; i < 4; i++) {
+      store.createChildOf(root);
+      store.cancelEdit();
+    }
+
+    const rootNode = store.sheet.nodes[root];
+    const left = Object.values(store.sheet.nodes).find((n) => n.parentId === root && n.position.x < rootNode.position.x);
+    expect(left, "autoBalance should send at least one main topic left").toBeDefined();
+
+    const t = saveShape("Stemma", triangle());
+    store.insertShape(t, left!.id);
+
+    const a = Object.values(store.sheet.nodes).find((n) => n.title === "A")!;
+    expect(a.position.x).toBeLessThan(left!.position.x);
+  });
+
   it("recreates the edges as straight segments between the NEW ids", () => {
     const store = freshStore();
     const t = saveShape("Triangolo", triangle());
