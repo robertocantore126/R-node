@@ -401,3 +401,115 @@ describe("desktop save flow", () => {
     expect(calls.filter((c) => c.cmd === "write_document")).toHaveLength(2);
   });
 });
+
+describe("per-document files (two open maps cannot overwrite each other)", () => {
+  const docB = {
+    documentId: "doc-b",
+    title: "B",
+    sheets: [{ rootNodeId: "r", nodes: { r: { id: "r", title: "B", childrenIds: [] } } }],
+  };
+
+  /**
+   * A tiny path-addressed backend that mirrors the stateless Rust side:
+   * read/write/rename take the path from the caller and files persist in a
+   * closure the test can assert on.
+   */
+  function memoryBackend(seed: Record<string, unknown>) {
+    const files: Record<string, string> = {};
+    for (const [p, d] of Object.entries(seed)) files[p] = JSON.stringify(d);
+    const picks: string[] = [];
+    const calls = installTauri(async (cmd, args) => {
+      if (cmd === "pick_document_file") return picks.shift() ?? null;
+      if (cmd === "read_document") return files[args.path as string] ?? null;
+      if (cmd === "write_document") {
+        files[args.path as string] = args.data as string;
+        return null;
+      }
+      if (cmd === "rename_document") {
+        const from = args.from as string;
+        const to = args.to as string;
+        if (files[to] !== undefined) throw new Error(`a file already exists at ${to}`);
+        if (files[from] === undefined) throw new Error(`no file at ${from}`);
+        files[to] = files[from];
+        delete files[from];
+        return null;
+      }
+      return null;
+    });
+    return { calls, files, queuePick: (p: string) => picks.push(p) };
+  }
+
+  it("saving a previously opened document writes to ITS OWN file, not the last opened one", async () => {
+    const bk = memoryBackend({ "C:/B.rnode": docB });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    // First document: the sample, saved as A.rnode.
+    bk.queuePick("C:/A.rnode");
+    await store.saveNow();
+    // Second document: B, opened from B.rnode.
+    bk.queuePick("C:/B.rnode");
+    await store.openDesktop();
+    // Switch back to the first document and press Ctrl+S. The OLD behaviour
+    // wrote the first document into B.rnode and renamed the file away; the
+    // fixed behaviour writes the document's OWN file.
+    const aId = store.getSnapshot().docs.find((d) => d.documentId !== "doc-b")!.documentId;
+    store.switchToDoc(aId);
+    await store.saveNow();
+    const writes = bk.calls.filter((c) => c.cmd === "write_document");
+    expect(writes[writes.length - 1].args.path).toBe("C:/A.rnode");
+    // B.rnode still holds B — untouched.
+    expect(JSON.parse(bk.files["C:/B.rnode"]).documentId).toBe("doc-b");
+    expect(store.getSnapshot().sync).toBe("saved");
+  });
+
+  it("a brand-new document never inherits the previous file — its first save is a Save-as", async () => {
+    const bk = memoryBackend({});
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    bk.queuePick("C:/A.rnode");
+    await store.saveNow(); // sample -> A.rnode
+    const aFile = bk.files["C:/A.rnode"];
+    store.newDocument(); // never saved, has no file of its own
+    bk.queuePick("C:/New.rnode");
+    await store.saveNow(); // must open the picker again, not write A.rnode
+    expect(bk.calls.filter((c) => c.cmd === "pick_document_file")).toHaveLength(2);
+    const writes = bk.calls.filter((c) => c.cmd === "write_document");
+    expect(writes[writes.length - 1].args.path).toBe("C:/New.rnode");
+    // A.rnode still holds the first document's bytes.
+    expect(bk.files["C:/A.rnode"]).toBe(aFile);
+  });
+
+  it("Save-as refuses a file that already contains a different document", async () => {
+    const bk = memoryBackend({ "C:/Taken.rnode": docB });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    bk.queuePick("C:/Taken.rnode");
+    await store.saveNow();
+    expect(bk.calls.filter((c) => c.cmd === "write_document")).toHaveLength(0);
+    expect(store.getSnapshot().sync).toBe("dirty");
+    expect(store.getSnapshot().message).toMatch(/different document/);
+    // B is still intact in its file.
+    expect(JSON.parse(bk.files["C:/Taken.rnode"]).documentId).toBe("doc-b");
+  });
+
+  it("renaming a NON-active document renames its own file and leaves the active one's file alone", async () => {
+    const bk = memoryBackend({ "C:/B.rnode": docB });
+    const store = new EditorStore(new TauriStorageAdapter());
+    await store.init();
+    bk.queuePick("C:/A.rnode");
+    await store.saveNow(); // sample -> A.rnode
+    bk.queuePick("C:/B.rnode");
+    await store.openDesktop(); // active is now B, root = B.rnode
+    const aId = store.getSnapshot().docs.find((d) => d.documentId !== "doc-b")!.documentId;
+    store.renameDocument(aId, "Renamed"); // rename the OTHER document
+    await Promise.resolve();
+    await Promise.resolve();
+    const renames = bk.calls.filter((c) => c.cmd === "rename_document");
+    expect(renames).toHaveLength(1);
+    expect(renames[0].args).toMatchObject({ from: "C:/A.rnode", to: "C:/Renamed.rnode" });
+    // The active document (B) still saves to B.rnode — its root was not dragged.
+    await store.saveNow();
+    const writes = bk.calls.filter((c) => c.cmd === "write_document");
+    expect(writes[writes.length - 1].args.path).toBe("C:/B.rnode");
+  });
+});

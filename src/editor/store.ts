@@ -188,6 +188,16 @@ export class EditorStore {
    * silently renamed on the first save. Null = no desktop root yet.
    */
   private fileHandles = new Map<string, FileSystemFileHandle>();
+  /**
+   * File path of every open document that has one (desktop .rnode files,
+   * keyed by documentId). The storage adapter holds ONE current file; this
+   * map is the memory of which file belongs to which document, so switching
+   * documents moves the adapter to the right file and Ctrl+S can never write
+   * one document into another document's file. Documents with no entry yet
+   * (new, duplicated, imported from a portable file) have no file: their
+   * first save is a "Save as…".
+   */
+  private docFilePaths = new Map<string, string>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -428,6 +438,12 @@ export class EditorStore {
     }
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
+      // The restored document keeps its file for the whole session: switching
+      // away and back must bring the adapter to THIS file, not wherever the
+      // last open/save left it.
+      if (this.adapter instanceof TauriStorageAdapter && this.adapter.currentPath) {
+        this.docFilePaths.set(docs[0].documentId, this.adapter.currentPath);
+      }
     } else {
       // First run: start from the sample map. Nothing is persisted until the
       // user presses Save / Ctrl+S — the sample acts as an in-memory draft.
@@ -583,17 +599,33 @@ export class EditorStore {
         this.beginLongOp("Saving document…", false);
         try {
           if (!this.adapter.hasRoot) {
-            const ok = await this.saveAsDesktop();
-            if (!ok) {
-              this.state.sync = "dirty";
-              this.toast("Save cancelled — no file chosen");
-              return;
-            }
-          } else {
+          const ok = await this.saveAsDesktop();
+          if (ok === "refused") return; // refused: the toast already says why
+          if (!ok) {
+            this.state.sync = "dirty";
+            this.toast("Save cancelled — no file chosen");
+            return;
+          }
+        } else {
             // The GUI rename already renamed the file. This second call is the
             // net under it: if that rename failed (collision, locked file), the
             // save is the next chance to bring the two names back together.
             await this.syncFileNameToTitle();
+            const target = this.adapter.currentPath;
+            if (target) {
+              // Last line of defence against the two-documents overwrite: the
+              // adapter's current file must be THIS document's file. If it now
+              // holds a different document, writing would destroy that map —
+              // refuse and stay dirty so the user sees the mismatch.
+              const existing = await this.adapter.readDocumentAt(target).catch(() => null);
+              if (existing && existing.documentId !== this.model.doc.documentId) {
+                this.state.sync = "dirty";
+                this.toast(
+                  `Not saved — "${titleFromDocPath(target)}" now contains a different document; refusing to overwrite it`
+                );
+                return;
+              }
+            }
             this.setOpProgress("Writing document…", 0.9);
             await this.adapter.save([this.model.doc]);
           }
@@ -639,7 +671,7 @@ export class EditorStore {
    * instance, so it starts reading the new file without any re-instantiation
    * (the T19 trap, unchanged).
    */
-  async saveAsDesktop(): Promise<boolean> {
+  async saveAsDesktop(): Promise<boolean | "refused"> {
     // The save dialog already knows the name: pre-fill it with the document
     // title typed in the GUI, so the real file takes that name.
     const file = await this.pickDesktopFile("save", docFileBaseName(this.model.doc.title));
@@ -648,6 +680,15 @@ export class EditorStore {
     if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
       return false;
     }
+    // Overwrite protection: "Save as…" onto a file that already holds a
+    // DIFFERENT document would destroy that map. The same document (a
+    // re-save) or an empty file is fine.
+    const existing = await this.adapter.readDocumentAt(file).catch(() => null);
+    if (existing && existing.documentId !== this.model.doc.documentId) {
+      this.toast(`"${titleFromDocPath(file)}" contains a different document — saving here would overwrite it`);
+      return "refused";
+    }
+    this.docFilePaths.set(this.model.doc.documentId, file);
     // adoptFile reads from the current path FIRST, then switches: the assets
     // are never re-written into the same store before the file exists. Its
     // return value counts the referenced assets that could not be copied
@@ -719,17 +760,27 @@ export class EditorStore {
    * gone, and reports failure for an operation that in fact succeeded. Queueing
    * makes the save observe the path the rename just installed.
    */
-  private syncFileNameToTitle(): Promise<void> {
-    this.renameChain = this.renameChain.then(() => this.renameFileToTitleOnce());
+  private syncFileNameToTitle(doc?: RnodeDocument): Promise<void> {
+    this.renameChain = this.renameChain.then(() => this.renameFileToTitleOnce(doc));
     return this.renameChain;
   }
 
-  private async renameFileToTitleOnce(): Promise<void> {
+  /**
+   * Rename `doc`'s own file to match its title. Runs on the rename itself,
+   * not at the next save — and for EVERY document, not just the active one:
+   * renaming a map in the sidebar must rename its file even when another map
+   * is on screen.
+   *
+   * The adapter/asset-store roots follow only when they already point at the
+   * file being renamed (i.e. it belongs to the active document). Renaming
+   * another open document must not drag the active document's file with it.
+   */
+  private async renameFileToTitleOnce(doc: RnodeDocument = this.model.doc): Promise<void> {
     if (!(this.adapter instanceof TauriStorageAdapter)) return;
-    const current = this.adapter.currentPath;
+    const current = this.docFilePaths.get(doc.documentId);
     if (!current) return; // never saved: the first "Save as…" chooses the name
     if (typeof window === "undefined" || !window.__TAURI__) return;
-    const base = docFileBaseName(this.model.doc.title);
+    const base = docFileBaseName(doc.title);
     const target = pathDirname(current) + base + ".rnode";
     if (target.toLowerCase() === current.toLowerCase()) return;
     try {
@@ -739,9 +790,12 @@ export class EditorStore {
       this.toast(`Could not rename the file to "${base}.rnode" — it is still "${titleFromDocPath(current)}.rnode"`);
       return;
     }
-    this.adapter.setRoot(target);
-    const assetStore = getAssetStore();
-    if (assetStore instanceof TauriAssetStore) assetStore.setRoot(target);
+    if (this.adapter.currentPath === current) {
+      this.adapter.setRoot(target);
+      const assetStore = getAssetStore();
+      if (assetStore instanceof TauriAssetStore) assetStore.setRoot(target);
+    }
+    this.docFilePaths.set(doc.documentId, target);
     this.toast(`Renamed to "${base}.rnode"`);
     this.notify();
   }
@@ -772,8 +826,10 @@ export class EditorStore {
       this.toast("Not a valid R-node document in that file");
       return false;
     }
-    assetStore.setRoot(file);
-    this.adapter.setRoot(file);
+    // The file becomes THIS document's file before switchToDoc runs (inside
+    // importDocumentFromJson): the switch points the adapter and the asset
+    // store at it — both roots always move together (the T19 trap).
+    this.docFilePaths.set(doc.documentId, file);
     this.importDocumentFromJson(JSON.stringify(doc));
     // The file's name IS the document's name from here on. Nothing is renamed
     // on disk — the title simply stops disagreeing with the file it came from.
@@ -3435,11 +3491,12 @@ export class EditorStore {
     // GUI name becomes the real file's name.
     if (this.state.activeDocId === id) {
       this.model.doc.title = title;
-      // Desktop: the file on disk takes the new name NOW, not at the next
-      // save. Fire-and-forget — the rename reports its own outcome and must
-      // not make renaming in the GUI feel like a blocking operation.
-      void this.syncFileNameToTitle();
     }
+    // Desktop: the file on disk takes the new name NOW, for any document,
+    // not at the next save. Fire-and-forget — the rename reports its own
+    // outcome and must not make renaming in the GUI feel like a blocking
+    // operation.
+    void this.syncFileNameToTitle(doc);
     this.state.sync = "dirty";
     this.notify();
   }
@@ -3454,6 +3511,7 @@ export class EditorStore {
 
   deleteDocument(id: string): void {
     this.state.docs = this.state.docs.filter((d) => d.documentId !== id);
+    this.docFilePaths.delete(id);
     if (this.state.activeDocId === id) {
       const next = this.state.docs[0];
       if (next) this.switchToDoc(next.documentId);
@@ -3466,12 +3524,32 @@ export class EditorStore {
     this.notify();
   }
 
+  /**
+   * Point the desktop adapter and the asset store at the file that belongs
+   * to `id` — both roots always move together (the T19 trap). Documents
+   * without a file (new, duplicated, imported from a portable file) clear
+   * the pointer, making their first save a "Save as…" instead of an
+   * overwrite of whatever file was open before.
+   */
+  private applyDocFile(id: string): void {
+    if (!(this.adapter instanceof TauriStorageAdapter)) return;
+    const path = this.docFilePaths.get(id) ?? null;
+    this.adapter.setRoot(path);
+    const assetStore = getAssetStore();
+    if (assetStore instanceof TauriAssetStore) assetStore.setRoot(path);
+  }
+
   switchToDoc(id: string): void {
     this.commitDraftOnLeave();
     const doc = this.state.docs.find((d) => d.documentId === id);
     if (!doc) return;
     this.model = new DocumentModel(doc);
     this.history.clear();
+    // Each document keeps its own file: switching moves the single-file
+    // adapter (and the asset store with it) to this document's file, or
+    // clears it when the document has no file yet — so a never-saved
+    // document can never write over another document's file.
+    this.applyDocFile(id);
     this.state.activeDocId = id;
     this.state.selection = [];
     this.state.editingId = null;
