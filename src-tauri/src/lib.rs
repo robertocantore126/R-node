@@ -420,6 +420,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // CORS-free HTTP for images dragged from a browser page (text/uri-list).
         .plugin(tauri_plugin_http::init())
+        // One instance per machine: a second launch must not open a second
+        // window (both would write the same .rnode files). It focuses the
+        // already-running window instead — the second process exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             put_asset,
             get_asset,
