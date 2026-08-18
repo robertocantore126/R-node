@@ -42,14 +42,6 @@ export function nodeImageIds(n: MindNode): string[] {
   for (const item of n.style.gallery?.items ?? []) {
     if (item.id) out.push(item.id);
   }
-  const tier = n.style.tierList;
-  if (tier) {
-    // The pool counts exactly as much as a ranked row: a card waiting to be
-    // placed is still a card the document references, and leaving it out would
-    // have the GC delete the picture of anything not yet ranked.
-    for (const row of tier.rows) for (const item of row.items) if (item.id) out.push(item.id);
-    for (const item of tier.pool) if (item.id) out.push(item.id);
-  }
   return out;
 }
 

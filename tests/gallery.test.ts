@@ -63,43 +63,44 @@ const cells = (n: number): GalleryItem[] => Array.from({ length: n }, (_, i) => 
 
 describe("gallery geometry", () => {
   it("is nothing at all when the node has no gallery, or an empty one", () => {
-    expect(galleryExtent(galleryNode([]), resolve())).toBeNull();
+    expect(galleryExtent(galleryNode([]))).toBeNull();
     const plain = galleryNode([]);
     delete plain.style.gallery;
-    expect(galleryExtent(plain, resolve())).toBeNull();
+    expect(galleryExtent(plain)).toBeNull();
   });
 
-  it("lays six default cells in one row and sizes the grid from them", () => {
-    const g = galleryExtent(galleryNode(cells(6)), resolve())!;
-    expect(g.cols).toBe(6);
-    expect(g.rows).toBe(1);
-    expect(g.w).toBe(6 * GALLERY_CELL_W + 5 * GALLERY_GAP);
-    expect(g.h).toBe(GALLERY_CELL_W);
+  it("wraps six default cells at five per row and sizes the grid from them", () => {
+    const g = galleryExtent(galleryNode(cells(6)))!;
+    expect(g.cols).toBe(5);
+    expect(g.rows).toBe(2); // 5 + 1
+    expect(g.w).toBe(5 * GALLERY_CELL_W + 4 * GALLERY_GAP);
+    expect(g.h).toBe(2 * GALLERY_CELL_W + GALLERY_GAP);
     expect(g.captionH).toBe(0);
   });
 
   it("wraps to the column count when one is set", () => {
-    const g = galleryExtent(galleryNode(cells(7), { cols: 3 }), resolve())!;
+    const g = galleryExtent(galleryNode(cells(7), { cols: 3 }))!;
     expect(g.cols).toBe(3);
     expect(g.rows).toBe(3); // 3 + 3 + 1
     expect(g.h).toBe(3 * GALLERY_CELL_W + 2 * GALLERY_GAP);
   });
 
   it("never opens more columns than it has pictures", () => {
-    expect(galleryExtent(galleryNode(cells(2), { cols: 8 }), resolve())!.cols).toBe(2);
+    expect(galleryExtent(galleryNode(cells(2), { cols: 8 }))!.cols).toBe(2);
   });
 
-  it("wraps into an explicit node width instead of overflowing it", () => {
-    // 200px of box, 10px padding either side: three 40px cells fit, forty do not.
-    const g = galleryExtent(galleryNode(cells(40), { cellW: 40, width: 200 }), resolve())!;
-    expect(g.cols).toBeLessThanOrEqual(4);
-    expect(g.rows).toBe(Math.ceil(40 / g.cols));
+  it("keeps the fixed five per row regardless of node width", () => {
+    // 40px cells at five per row outgrow a 200px box — that is the point: the
+    // default column count is a constant of the node, not a fit to its width.
+    const g = galleryExtent(galleryNode(cells(40), { cellW: 40, width: 200 }))!;
+    expect(g.cols).toBe(5);
+    expect(g.rows).toBe(8);
   });
 
   it("reserves the caption band on EVERY cell as soon as ONE is captioned", () => {
     const items = cells(4);
     items[2].caption = "Batman";
-    const g = galleryExtent(galleryNode(items), resolve())!;
+    const g = galleryExtent(galleryNode(items))!;
     const band = GALLERY_CAPTION_GAP + Math.round(GALLERY_CAPTION_SIZE * LINE_HEIGHT_FACTOR);
     expect(g.captionH).toBe(band);
     // The pitch of a row grows by the band — a grid whose rows are staggered
@@ -110,7 +111,7 @@ describe("gallery geometry", () => {
   it("treats a whitespace-only caption as no caption", () => {
     const items = cells(2);
     items[0].caption = "   ";
-    expect(galleryExtent(galleryNode(items), resolve())!.captionH).toBe(0);
+    expect(galleryExtent(galleryNode(items))!.captionH).toBe(0);
   });
 
   it("derives the columns from the node alone, never from the placed box", () => {
@@ -394,6 +395,40 @@ describe("gallery editing", () => {
   });
 });
 
+describe("gallery creation and the read-only body", () => {
+  it("creates a topic that is born a gallery, even before any picture lands", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createGalleryTopic();
+    const id = store.getSnapshot().selection[0];
+    const node = store.doc.node(id)!;
+    // The empty gallery is a declared state (creation), not a lingering one:
+    // the node is a drop target for files and the Inspector says "Add images".
+    expect(node.style.gallery).toEqual({ items: [] });
+    // ...and one undo removes the whole topic again.
+    store.undo();
+    expect(store.doc.node(id)).toBeUndefined();
+  });
+
+  it("never opens the editor on a gallery topic, from any entry point", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createGalleryTopic();
+    const id = store.getSnapshot().selection[0];
+    store.startEdit(id);
+    expect(store.getSnapshot().editingId).toBeNull();
+    store.typeToEdit("typing replaces the title");
+    expect(store.getSnapshot().editingId).toBeNull();
+    expect(store.getSnapshot().selection).toEqual([id]); // the refusal still selects
+  });
+
+  it("opens the editor on a plain topic as before — only galleries are refused", () => {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const id = firstChild(store);
+    store.startEdit(id);
+    expect(store.getSnapshot().editingId).toBe(id);
+  });
+});
+
 describe("uniform cell shape", () => {
   it("gives every cell the same rect whatever the pictures are", () => {
     // The property the tier list depends on: three sources at three aspect
@@ -409,19 +444,19 @@ describe("uniform cell shape", () => {
   });
 
   it("makes cells square by default", () => {
-    const g = galleryExtent(galleryNode(cells(2)), resolve())!;
+    const g = galleryExtent(galleryNode(cells(2)))!;
     expect(g.cellPicH).toBe(g.cellW);
   });
 
   it("takes the height from the aspect when one is set", () => {
-    const g = galleryExtent(galleryNode(cells(2), { cellW: 120, aspect: 4 / 3 }), resolve())!;
+    const g = galleryExtent(galleryNode(cells(2), { cellW: 120, aspect: 4 / 3 }))!;
     expect(g.cellW).toBe(120);
     expect(g.cellPicH).toBe(90);
   });
 
   it("falls back to square on a nonsense aspect rather than dividing by zero", () => {
     for (const aspect of [0, -2, Number.NaN]) {
-      const g = galleryExtent(galleryNode(cells(1), { cellW: 80, aspect }), resolve())!;
+      const g = galleryExtent(galleryNode(cells(1), { cellW: 80, aspect }))!;
       expect(g.cellPicH).toBe(80);
     }
   });

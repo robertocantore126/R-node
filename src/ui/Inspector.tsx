@@ -4,7 +4,7 @@ import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } f
 import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
 import { plainToRuns } from "../core/text";
-import { GALLERY_ASPECT, GALLERY_CELL_W, MAX_IMAGE_W, TIER_CELL_W, TIER_COLS } from "../layout/measure";
+import { GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
@@ -69,6 +69,8 @@ export function Inspector(): JSX.Element {
         <input
           className="inspector-title"
           value={title}
+          data-help="Topic title"
+          data-help-more={node.style.gallery ? "The title stays above the grid. Rename it here — double-clicking the topic cannot open an editor, because its body is pictures." : "Double-click the topic to edit it in place; it is also editable here."}
           onChange={(e) => setTitle(e.target.value)}
           onBlur={() => { if (title !== node.title) store.execOps([makeOp<Op & { type: "setTitle" }>("setTitle", { id: node.id, title, prev: node.title, titleRuns: plainToRuns(title), prevRuns: node.titleRuns })]); }}
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
@@ -190,8 +192,6 @@ export function Inspector(): JSX.Element {
         )}
       </div>
 
-      <TierListSection nodeId={node.id} />
-
       <GallerySection nodeId={node.id} />
 
       <div className="inspector-section">
@@ -282,231 +282,6 @@ function SheetControls(): JSX.Element {
 }
 
 // ---------------------------------------------------------------------------
-// Tier list (T26)
-// ---------------------------------------------------------------------------
-
-/**
- * The structure of a tier-list topic: its rank bands, and the cards waiting in
- * the pool.
- *
- * Ranking happens on the CANVAS by dragging — that is the gesture the chart
- * exists for and no panel should compete with it. This panel is for the things
- * a drag cannot express: adding and deleting rows, reordering the ladder,
- * renaming a rank, picking its colour, and getting cards into the pool in the
- * first place.
- */
-function TierListSection({ nodeId }: { nodeId: string }): JSX.Element {
-  const store = useStore();
-  const node = store.selectionNode;
-  const fileRef = useRef<HTMLInputElement | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
-  const [draft, setDraft] = useState("");
-
-  const tier = node?.style.tierList;
-
-  const pick = async (list: FileList | null): Promise<void> => {
-    if (!list || list.length === 0) return;
-    setBusy(true);
-    setNote("");
-    const res = await store.addTierImageFiles(nodeId, Array.from(list), -1);
-    setBusy(false);
-    if (res.failed > 0) setNote(`${res.added} added, ${res.failed} refused${res.reason ? ` — ${res.reason}` : ""}`);
-    else if (res.added > 0) setNote(`${res.added} card${res.added === 1 ? "" : "s"} in the pool`);
-  };
-
-  if (!tier) {
-    return (
-      <div className="inspector-section">
-        <div
-          className="inspector-label"
-          data-help="Tier list"
-          data-help-more="Turns the topic into a ranked chart: coloured rank rows, plus a pool of cards not yet ranked. Drag cards between rows on the canvas."
-        >
-          Tier list
-        </div>
-        <p className="muted">Make this topic a tier list — ranked rows plus a pool of unranked cards.</p>
-        <button className="btn small" onClick={() => store.createTierList(nodeId)}>
-          Make a tier list
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="inspector-section">
-      <div
-        className="inspector-label"
-        data-help="Tier list"
-        data-help-more="Drag cards between rows on the canvas to rank them. This panel edits the rows themselves and fills the pool."
-      >
-        Tier list
-      </div>
-
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp"
-        multiple
-        style={{ display: "none" }}
-        onChange={(e) => {
-          void pick(e.target.files);
-          e.target.value = "";
-        }}
-      />
-
-      <ul className="gallery-list">
-        {tier.rows.map((row, i) => (
-          <TierRowControls key={row.id} nodeId={nodeId} index={i} last={i === tier.rows.length - 1} label={row.label} color={row.color} count={row.items.length} />
-        ))}
-      </ul>
-      <div className="field">
-        <button className="btn small" onClick={() => store.addTierRow(nodeId)}>
-          Add row
-        </button>
-        <span className="muted">{tier.rows.length} rank{tier.rows.length === 1 ? "" : "s"}</span>
-      </div>
-
-      <div className="inspector-label" style={{ marginTop: 10 }}>Pool</div>
-      <div className="field">
-        <button className="btn small" disabled={busy} onClick={() => fileRef.current?.click()}>
-          {busy ? "Adding…" : "Upload images…"}
-        </button>
-        <span className="muted">{tier.pool.length} waiting</span>
-      </div>
-      {note && <p className="muted">{note}</p>}
-      <div className="field">
-        <input
-          className="gallery-row-caption"
-          type="text"
-          value={draft}
-          placeholder="text card…"
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && draft.trim()) {
-              store.addTierTextItem(nodeId, draft);
-              setDraft("");
-            }
-          }}
-          title="A card with no picture — type a name and press Enter"
-        />
-        <button
-          className="btn small"
-          disabled={!draft.trim()}
-          onClick={() => {
-            store.addTierTextItem(nodeId, draft);
-            setDraft("");
-          }}
-        >
-          Add
-        </button>
-      </div>
-
-      <div className="field">
-        <span>Card size</span>
-        <input
-          type="range"
-          min={24}
-          max={160}
-          step={4}
-          value={tier.cellW ?? TIER_CELL_W}
-          onChange={(e) => store.setTierLayout(nodeId, { cellW: Number(e.target.value) })}
-        />
-        <span className="muted">{tier.cellW ?? TIER_CELL_W}px</span>
-      </div>
-      <div className="field">
-        <span>Card shape</span>
-        <select
-          value={String(tier.aspect ?? GALLERY_ASPECT)}
-          onChange={(e) => store.setTierLayout(nodeId, { aspect: Number(e.target.value) })}
-        >
-          {CELL_SHAPES.map(([label, value]) => (
-            <option key={label} value={String(value)}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="field">
-        <span>Download</span>
-        <button className="btn small" onClick={() => runExportNodeImage(nodeId, "image/png")} title="This chart alone, as a PNG at 2x — no page chrome, no neighbouring topics">
-          PNG
-        </button>
-        <button className="btn small" onClick={() => runExportNodeImage(nodeId, "image/jpeg")} title="This chart alone, as a JPEG at 2x on the page background">
-          JPEG
-        </button>
-      </div>
-
-      <div className="field">
-        <span>Per row</span>
-        <input
-          type="number"
-          min={1}
-          max={40}
-          value={tier.cols ?? TIER_COLS}
-          onChange={(e) => store.setTierLayout(nodeId, { cols: Math.max(1, Number(e.target.value) || 1) })}
-          title="Cards before a row wraps — every row keeps the same width, so a full row grows taller"
-        />
-      </div>
-    </div>
-  );
-}
-
-/** One rank band: its label, its colour, its place in the ladder. */
-function TierRowControls({
-  nodeId,
-  index,
-  last,
-  label,
-  color,
-  count,
-}: {
-  nodeId: string;
-  index: number;
-  last: boolean;
-  label: string;
-  color: string;
-  count: number;
-}): JSX.Element {
-  const store = useStore();
-  const [text, setText] = useState(label);
-  useEffect(() => setText(label), [label, index]);
-
-  return (
-    <li className="gallery-row">
-      <input
-        type="color"
-        value={color}
-        onChange={(e) => store.setTierRow(nodeId, index, { color: e.target.value })}
-        title="Rank colour — it is content, not theming: S is red and D is green by convention"
-      />
-      <input
-        className="gallery-row-caption"
-        type="text"
-        value={text}
-        placeholder="rank"
-        onChange={(e) => setText(e.target.value)}
-        onBlur={() => { if (text !== label) store.setTierRow(nodeId, index, { label: text }); }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-          if (e.key === "Escape") setText(label);
-        }}
-      />
-      <span className="gallery-row-name" title={`${count} card${count === 1 ? "" : "s"}`}>{count}</span>
-      <button className="btn tiny" title="Move up" disabled={index === 0} onClick={() => store.moveTierRow(nodeId, index, index - 1)}>
-        ↑
-      </button>
-      <button className="btn tiny" title="Move down" disabled={last} onClick={() => store.moveTierRow(nodeId, index, index + 1)}>
-        ↓
-      </button>
-      <button className="btn tiny" title="Delete this rank — its cards go back to the pool" onClick={() => store.removeTierRow(nodeId, index)}>
-        ✕
-      </button>
-    </li>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Gallery (T25)
 // ---------------------------------------------------------------------------
 
@@ -529,8 +304,26 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
   const store = useStore();
   const node = store.selectionNode;
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // One caption field per cell, keyed by cell index — a click on a caption on
+  // the canvas asks for exactly one of these by index (see GalleryRow).
+  const captionRefs = useRef<(HTMLInputElement | null)[]>([]);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
+
+  // The canvas dispatches this when a caption band is clicked: focus the
+  // matching field here, with the text selected so typing replaces it.
+  useEffect(() => {
+    const onCaptionFocus = (e: Event): void => {
+      const detail = (e as CustomEvent<{ nodeId: string; index: number }>).detail;
+      if (detail.nodeId !== nodeId) return;
+      const el = captionRefs.current[detail.index];
+      if (!el) return;
+      el.focus();
+      el.select();
+    };
+    window.addEventListener("r-node:focus-gallery-caption", onCaptionFocus);
+    return () => window.removeEventListener("r-node:focus-gallery-caption", onCaptionFocus);
+  }, [nodeId]);
 
   const gallery = node?.style.gallery;
   const items = gallery?.items ?? [];
@@ -613,14 +406,23 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
               type="number"
               min={0}
               max={40}
-              value={gallery?.cols ?? 0}
+              value={gallery?.cols ?? GALLERY_COLS}
               onChange={(e) => {
                 const v = Number(e.target.value);
                 store.setGalleryLayout(nodeId, { cols: v > 0 ? Math.floor(v) : undefined });
               }}
-              title="0 wraps the grid to the topic's width"
+              title="Cells per row before wrapping — empty uses the default of 5"
             />
-            <span className="muted">{gallery?.cols ? "fixed" : "auto"}</span>
+            <span className="muted">{gallery?.cols ? "fixed" : `${GALLERY_COLS} default`}</span>
+          </div>
+          <div className="field">
+            <span>Download</span>
+            <button className="btn small" onClick={() => runExportNodeImage(nodeId, "image/png")} title="This grid alone, as a PNG at 2x — no page chrome, no neighbouring topics">
+              PNG
+            </button>
+            <button className="btn small" onClick={() => runExportNodeImage(nodeId, "image/jpeg")} title="This grid alone, as a JPEG at 2x on the page background">
+              JPEG
+            </button>
           </div>
 
           <ul className="gallery-list">
@@ -632,6 +434,9 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
                 last={i === items.length - 1}
                 caption={item.caption ?? ""}
                 name={store.sheet.attachments.find((a) => a.id === item.id)?.name ?? item.id.slice(0, 8)}
+                inputRef={(el) => {
+                  captionRefs.current[i] = el;
+                }}
               />
             ))}
           </ul>
@@ -648,12 +453,15 @@ function GalleryRow({
   last,
   caption,
   name,
+  inputRef,
 }: {
   nodeId: string;
   index: number;
   last: boolean;
   caption: string;
   name: string;
+  /** Receives the caption input element, so GallerySection can focus it by index. */
+  inputRef?: (el: HTMLInputElement | null) => void;
 }): JSX.Element {
   const store = useStore();
   const [text, setText] = useState(caption);
@@ -672,6 +480,7 @@ function GalleryRow({
         {name}
       </span>
       <input
+        ref={inputRef}
         className="gallery-row-caption"
         type="text"
         value={text}

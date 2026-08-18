@@ -11,7 +11,7 @@ import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, ellipsizeToWidth, FONT_STACK, GALLERY_CAPTION_SIZE, GALLERY_GAP, galleryInsertIndex, positionedTierList, TIER_BORDER, TIER_LABEL_SIZE, TIER_TEXT_SIZE, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer, type TierCell } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, ellipsizeToWidth, FONT_STACK, GALLERY_CAPTION_SIZE, GALLERY_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -52,12 +52,6 @@ export interface RenderState {
    * to the cell count inclusive — `cells.length` is "after the last one".
    */
   galleryDrop?: { nodeId: string; index: number } | null;
-  /**
-   * Where a dragged tier-list card would land (T26): `rowIndex` -1 is the
-   * pool, and `index` counts the GAPS between cards, so it runs from 0 to the
-   * row's card count inclusive.
-   */
-  tierDrop?: { nodeId: string; rowIndex: number; index: number } | null;
   /**
    * Marquee drag preview: ids of the topics inside the drag box — they wear
    * the selection ring BEFORE the release commits them (the box itself is a
@@ -367,7 +361,6 @@ export class Renderer {
     // 6) ghost preview of an image being dragged (internal reassignment) —
     // on top of everything, centered on the cursor, before the drop lands.
     if (state.galleryDrop) this.drawGalleryDrop(theme, state);
-    if (state.tierDrop) this.drawTierDrop(theme, state);
     if (state.ghostImage) this.drawGhostImage(theme, state, state.ghostImage);
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -748,7 +741,6 @@ export class Renderer {
       } else {
         this.drawImage(p);
         this.drawGallery(theme, p);
-        this.drawTierList(theme, p);
         this.drawText(theme, p, textColor);
       }
     }
@@ -1625,246 +1617,13 @@ export class Renderer {
   }
 
   /**
-   * Paint a tier-list topic (T26): the ranked bands with their own colours and
-   * rank labels, the cards in each, and the unranked pool beneath.
+   * One topic as an image: redraw the node into an offscreen canvas of the
+   * node's own size at 2x and hand back the blob. No DOM rasteriser — I1
+   * means the topic is already pixels, so this is a replay, not a capture.
    *
-   * Colours come from the ROW, not the theme, because in a tier list the
-   * colour is content — S is red and D is green by convention, and a theme
-   * that reassigned them would change what the chart says. Everything else
-   * (the chart's ground, the hairlines, the label text) is themed as usual.
-   */
-  private drawTierList(theme: RenderTheme, p: Placed): void {
-    const l = positionedTierList(p, p.node, this.resolveImage);
-    if (!l) return;
-    const ctx = this.ctx;
-
-    // The chart's ground, behind everything: it is what the empty part of a
-    // row reads as, and it is what makes a row look like a row.
-    ctx.save();
-    ctx.fillStyle = theme.name === "light" ? "#1f2126" : "#1f2126";
-    ctx.fillRect(l.rows[0]?.x ?? l.pool.x, l.rows[0]?.y ?? l.pool.y, l.w, (l.pool.y - (l.rows[0]?.y ?? l.pool.y)));
-
-    for (const row of l.rows) {
-      // Rank column in the row's own colour, then the label centred on it.
-      ctx.fillStyle = row.color;
-      ctx.fillRect(row.x, row.y, row.labelW, row.h);
-      ctx.fillStyle = "#111827"; // fixed: it must contrast with the ROW colour
-      ctx.font = `600 ${TIER_LABEL_SIZE}px ${FONT_STACK}`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(
-        ellipsizeToWidth(row.label, row.labelW - 8, (t) => ctx.measureText(t).width),
-        row.x + row.labelW / 2,
-        row.y + row.h / 2,
-      );
-      // Hairline under the band.
-      ctx.fillStyle = "#000000";
-      ctx.fillRect(row.x, row.y + row.h, row.w, TIER_BORDER);
-      for (const c of row.cells) this.drawTierCell(theme, p, c);
-    }
-
-    // The pool: a staging strip, drawn flatter than a rank band so it never
-    // reads as another tier.
-    ctx.fillStyle = theme.name === "light" ? "#e5e7eb" : "#2a2d33";
-    ctx.fillRect(l.pool.x, l.pool.y, l.pool.w, l.pool.h);
-    ctx.strokeStyle = theme.nodeBorder;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(l.pool.x + 0.5, l.pool.y + 0.5, l.pool.w - 1, l.pool.h - 1);
-    ctx.restore();
-    for (const c of l.pool.cells) this.drawTierCell(theme, p, c);
-  }
-
-  /** One card: its picture cropped to cover the cell, or its text centred. */
-  private drawTierCell(theme: RenderTheme, p: Placed, c: TierCell): void {
-    const ctx = this.ctx;
-    if (c.id && c.crop) {
-      this.paintSlot(p, c.id, c.w, c.h, c.x, c.y, c.crop);
-      if (c.text) {
-        // A caption band ON the picture, not under it: a tier row is already
-        // as tall as its cards, and reserving a strip beneath every card would
-        // make every row taller for the sake of the few that are labelled.
-        const band = Math.min(c.h / 3, TIER_TEXT_SIZE + 4);
-        ctx.save();
-        ctx.fillStyle = "rgba(0,0,0,0.62)";
-        ctx.fillRect(c.x, c.y + c.h - band, c.w, band);
-        ctx.fillStyle = "#ffffff";
-        ctx.font = `${TIER_TEXT_SIZE}px ${FONT_STACK}`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(
-          ellipsizeToWidth(c.text, c.w - 4, (t) => ctx.measureText(t).width),
-          c.x + c.w / 2,
-          c.y + c.h - band / 2,
-        );
-        ctx.restore();
-      }
-      return;
-    }
-    // A text card, or a picture whose asset is missing.
-    ctx.save();
-    ctx.fillStyle = c.id ? "transparent" : theme.background;
-    if (!c.id) {
-      this.roundRect(ctx, c.x, c.y, c.w, c.h, 4);
-      ctx.fill();
-      ctx.strokeStyle = theme.nodeBorder;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.fillStyle = theme.text;
-      ctx.font = `${TIER_TEXT_SIZE}px ${FONT_STACK}`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const lines = this.wrapCardText(c.text, c.w - 6, 3);
-      const lh = TIER_TEXT_SIZE * 1.2;
-      const top = c.y + c.h / 2 - ((lines.length - 1) * lh) / 2;
-      lines.forEach((line, i) => ctx.fillText(line, c.x + c.w / 2, top + i * lh));
-    } else {
-      // Referenced picture with no asset: keep the space and say so.
-      ctx.strokeStyle = theme.textMuted;
-      ctx.globalAlpha = 0.4;
-      ctx.setLineDash([4, 3]);
-      ctx.lineWidth = 1;
-      ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
-    }
-    ctx.restore();
-  }
-
-  /**
-   * Greedy word wrap for a text card, capped at `maxLines`. Its own tiny
-   * wrapper rather than `wrapRunLines`: that function implements the §3 parity
-   * contract for editable rich text, and a card is neither editable nor rich —
-   * pulling it onto that path would put a fixed-size label under rules written
-   * for something else.
-   */
-  private wrapCardText(text: string, maxW: number, maxLines: number): string[] {
-    const ctx = this.ctx;
-    if (!text) return [];
-    const words = text.split(/\s+/).filter(Boolean);
-    const lines: string[] = [];
-    let cur = "";
-    for (const w of words) {
-      const next = cur ? `${cur} ${w}` : w;
-      if (ctx.measureText(next).width <= maxW || !cur) cur = next;
-      else {
-        lines.push(cur);
-        cur = w;
-        if (lines.length === maxLines) break;
-      }
-    }
-    if (lines.length < maxLines && cur) lines.push(cur);
-    if (lines.length === 0) return [];
-    const last = lines.length - 1;
-    lines[last] = ellipsizeToWidth(lines[last], maxW, (t) => ctx.measureText(t).width);
-    return lines;
-  }
-
-  /**
-   * The caret showing where a dragged card would be inserted (T26) — a bar in
-   * the gap between two cards, exactly like the gallery's. An empty row gets a
-   * ring around its whole item area, since there is no gap to point at yet.
-   */
-  private drawTierDrop(theme: RenderTheme, state: RenderState): void {
-    const target = state.tierDrop;
-    if (!target) return;
-    const p = this.placedNodes(state).find((q) => q.node.id === target.nodeId);
-    if (!p) return;
-    const l = positionedTierList(p, p.node, this.resolveImage);
-    if (!l) return;
-    const band = target.rowIndex < 0 ? l.pool : l.rows[target.rowIndex];
-    if (!band) return;
-    const cells = target.rowIndex < 0 ? l.pool.cells : l.rows[target.rowIndex].cells;
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.strokeStyle = theme.dropIndicator;
-    ctx.lineWidth = 3;
-    ctx.setLineDash([]);
-    if (cells.length === 0) {
-      const x = target.rowIndex < 0 ? band.x : band.x + l.labelW;
-      const w = target.rowIndex < 0 ? band.w : band.w - l.labelW;
-      ctx.strokeRect(x + 2, band.y + 2, w - 4, band.h - 4);
-    } else {
-      const i = Math.max(0, Math.min(cells.length, target.index));
-      const at = i < cells.length ? cells[i] : cells[cells.length - 1];
-      const x = i < cells.length ? at.x - GALLERY_GAP / 2 : at.x + at.w + GALLERY_GAP / 2;
-      ctx.beginPath();
-      ctx.moveTo(x, at.y - 2);
-      ctx.lineTo(x, at.y + at.h + 2);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  /**
-   * The card under the point, or null. Like the gallery cells, checked before
-   * the node body so the specific target answers first.
-   */
-  hitTestTierCell(
-    state: RenderState,
-    worldX: number,
-    worldY: number,
-  ): { nodeId: string; rowIndex: number; index: number; rect: { x: number; y: number; w: number; h: number } } | null {
-    const placed = this.placedNodes(state).filter((q) => q.visible);
-    for (let i = placed.length - 1; i >= 0; i--) {
-      const l = positionedTierList(placed[i], placed[i].node, this.resolveImage);
-      if (!l) continue;
-      const all = [...l.rows.flatMap((r) => r.cells), ...l.pool.cells];
-      for (const c of all) {
-        if (worldX >= c.x && worldX <= c.x + c.w && worldY >= c.y && worldY <= c.y + c.h) {
-          return { nodeId: placed[i].node.id, rowIndex: c.rowIndex, index: c.index, rect: { x: c.x, y: c.y, w: c.w, h: c.h } };
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Which band of a tier list the point falls in, and where among its cards a
-   * drop would go. `rowIndex` -1 is the pool; null means the point is not over
-   * a tier list at all.
-   */
-  tierDropAt(
-    state: RenderState,
-    nodeId: string,
-    worldX: number,
-    worldY: number,
-  ): { rowIndex: number; index: number } | null {
-    const p = this.placedNodes(state).find((q) => q.node.id === nodeId);
-    if (!p) return null;
-    const l = positionedTierList(p, p.node, this.resolveImage);
-    if (!l) return null;
-    for (const row of l.rows) {
-      if (worldY >= row.y && worldY <= row.y + row.h) {
-        return { rowIndex: row.index, index: galleryInsertIndex(row.cells, worldX, worldY) };
-      }
-    }
-    // Anywhere else inside the topic counts as the pool — including the gap
-    // between the rows and the strip. A drop that lands in a margin should
-    // still do something predictable rather than nothing.
-    return { rowIndex: -1, index: galleryInsertIndex(l.pool.cells, worldX, worldY) };
-  }
-
-  /**
-   * The caret showing where a dragged cell would be inserted (T25): a bar in
-   * the gap between two cells, or hugging the first/last one at the ends.
-   *
-   * A caret rather than a highlighted cell, because the drop lands BETWEEN
-   * pictures — highlighting the neighbour would leave "before it or after it"
-   * unanswered, which is the whole question when reordering a tier.
-   */
-  /**
-   * Rasterise ONE topic to a PNG/JPEG blob at `scale` — the "download my tier
-   * list as an image" button (T26).
-   *
-   * There is no DOM to snapshot here and so no html2canvas-shaped problem to
-   * solve: invariant I1 means a topic is already pixels on a canvas, drawn by
-   * the code below. This re-runs that same painter into an offscreen surface
-   * of the node's own size, so the file is the node — no page chrome, no
-   * neighbours, no screenshot cropping.
-   *
-   * It PRE-DECODES every picture first. The live path is deliberately
-   * fire-and-forget (`paintSlot` starts a decode and draws nothing until it
-   * lands, because a frame must never block), which for an export would
-   * silently produce a chart full of holes. An export can afford to wait, so
-   * it waits.
+   * The live paint path is deliberately fire-and-forget (a frame that misses
+   * its decode just paints late); an export cannot inherit that, or the
+   * picture comes out full of holes — hence the preload below.
    */
   async renderNodeImage(
     state: RenderState,
@@ -1911,7 +1670,7 @@ export class Renderer {
       target.scale(scale, scale);
       target.translate(-placed.x, -placed.y);
       // A clean copy: no selection ring, no hover, no drop caret, no ghost —
-      // the picture is of the chart, not of the editor looking at it.
+      // the picture is of the topic, not of the editor looking at it.
       this.drawNode(THEMES[state.themeName], placed, {
         ...state,
         selection: new Set<string>(),
@@ -1922,7 +1681,6 @@ export class Renderer {
         marqueeSel: null,
         ghostImage: null,
         galleryDrop: null,
-        tierDrop: null,
       });
       target.restore();
     } finally {
@@ -1943,12 +1701,6 @@ export class Renderer {
     const pos = positionedImageSlots(placed, placed.node, this.resolveImage);
     for (const it of pos.items) wanted.push({ id: it.id, w: it.size.w });
     for (const c of pos.cells) wanted.push({ id: c.id, w: c.w, crop: c.crop });
-    const tier = positionedTierList(placed, placed.node, this.resolveImage);
-    if (tier) {
-      for (const c of [...tier.rows.flatMap((r) => r.cells), ...tier.pool.cells]) {
-        if (c.id) wanted.push({ id: c.id, w: c.w, crop: c.crop });
-      }
-    }
     await Promise.all(
       wanted.map(async ({ id, w, crop }) => {
         // Same bucket arithmetic paintSlot uses, so the draw finds these
@@ -1976,6 +1728,14 @@ export class Renderer {
     );
   }
 
+  /**
+   * The caret showing where a dragged cell would be inserted (T25): a bar in
+   * the gap between two cells, or hugging the first/last one at the ends.
+   *
+   * A caret rather than a highlighted cell, because the drop lands BETWEEN
+   * pictures — highlighting the neighbour would leave "before it or after it"
+   * unanswered, which is the whole question when reordering a tier.
+   */
   private drawGalleryDrop(theme: RenderTheme, state: RenderState): void {
     const target = state.galleryDrop;
     if (!target) return;
@@ -2156,22 +1916,30 @@ export class Renderer {
    *
    * Checked BEFORE the slot and body tests: a cell sits inside its topic's
    * box, so whichever test runs first wins, and the specific target has to be
-   * the one that answers. The picture's rect alone is the target — the caption
-   * band under it belongs to the node, so a click there still selects the
-   * topic.
+   * the one that answers.
+   *
+   * The caption band under a picture is a target of its own — `part` says
+   * which one was hit. Both still select the topic and start the same cell
+   * drag; the caption variant additionally tells the caller the user aimed
+   * at the label, so it can focus the caption field in the Inspector.
    */
   hitTestGalleryCell(
     state: RenderState,
     worldX: number,
     worldY: number,
-  ): { nodeId: string; index: number; rect: { x: number; y: number; w: number; h: number } } | null {
+  ): { nodeId: string; index: number; part: "picture" | "caption"; rect: { x: number; y: number; w: number; h: number } } | null {
     const placed = this.placedNodes(state).filter((p) => p.visible);
     for (let i = placed.length - 1; i >= 0; i--) {
       const { cells } = positionedImageSlots(placed[i], placed[i].node, this.resolveImage);
       for (let k = 0; k < cells.length; k++) {
         const c = cells[k];
         if (worldX >= c.x && worldX <= c.x + c.w && worldY >= c.y && worldY <= c.y + c.h) {
-          return { nodeId: placed[i].node.id, index: k, rect: { x: c.x, y: c.y, w: c.w, h: c.h } };
+          return { nodeId: placed[i].node.id, index: k, part: "picture", rect: { x: c.x, y: c.y, w: c.w, h: c.h } };
+        }
+        // The caption band only exists when some cell in the grid is
+        // captioned — a bandless grid has nothing to hit.
+        if (c.captionH > 0 && worldX >= c.x && worldX <= c.x + c.w && worldY >= c.captionY && worldY <= c.captionY + c.captionH) {
+          return { nodeId: placed[i].node.id, index: k, part: "caption", rect: { x: c.x, y: c.captionY, w: c.w, h: c.captionH } };
         }
       }
     }

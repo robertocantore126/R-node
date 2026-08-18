@@ -96,6 +96,9 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
       <button role="menuitem" onClick={act(() => store.createCodeTopic(node.id))}>
         New code topic
       </button>
+      <button role="menuitem" onClick={act(() => store.createGalleryTopic(node.id))}>
+        New gallery topic
+      </button>
       <div className="ctx-sep" />
       <button
         role="menuitem"

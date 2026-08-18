@@ -20,12 +20,18 @@ export function resolveFetcher(): FetchFn {
   return tauri ? tauriFetch : window.fetch.bind(window);
 }
 
+/** Every `image/*` entry in the dropped file list, in order. */
+export function imageFiles(files: FileList | File[]): File[] {
+  const out: File[] = [];
+  for (const f of files) {
+    if (f.type.startsWith("image/")) out.push(f);
+  }
+  return out;
+}
+
 /** First `image/*` entry in the dropped file list, or null. */
 export function firstImageFile(files: FileList | File[]): File | null {
-  for (const f of files) {
-    if (f.type.startsWith("image/")) return f;
-  }
-  return null;
+  return imageFiles(files)[0] ?? null;
 }
 
 /**

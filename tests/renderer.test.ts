@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Renderer } from "../src/render/renderer";
-import type { MindNode } from "../src/core/types";
+import type { GalleryItem, MindNode } from "../src/core/types";
+import { positionedImageSlots } from "../src/layout/measure";
 import { THEMES } from "../src/render/theme";
 
 /**
@@ -345,5 +346,61 @@ describe("hitTest — what a drag is allowed to land on", () => {
 
   it("still reports nothing when the skipped node was the only candidate", () => {
     expect(rendererWith([tall]).hitTest({} as never, PX, PY, (id) => id === "tall")).toBeNull();
+  });
+});
+
+describe("hitTestGalleryCell — the caption band is a target of its own (T25)", () => {
+  function rendererWithGalleryNode(items: GalleryItem[]): Renderer {
+    const node = makeNode("g");
+    node.style = { gallery: { items } };
+    const r = new Renderer(makeFakeCanvas(make2dCtx()));
+    (r as unknown as { placedNodes: () => unknown[] }).placedNodes = () => [
+      { node, x: 0, y: 0, w: 500, h: 300, visible: true },
+    ];
+    return r;
+  }
+
+  function cellRect(): { x: number; y: number; w: number; h: number; captionY: number; captionH: number } {
+    const node = makeNode("g");
+    node.style = { gallery: { items: [{ id: "a0", caption: "Velma" }] } };
+    const { cells } = positionedImageSlots({ x: 0, y: 0, w: 500, h: 300 }, node, () => ({ w: 200, h: 100 }));
+    return cells[0];
+  }
+
+  it("reports the picture part on the picture itself", () => {
+    const r = rendererWithGalleryNode([{ id: "a0", caption: "Velma" }]);
+    const c = cellRect();
+    const hit = r.hitTestGalleryCell({} as never, c.x + c.w / 2, c.y + c.h / 2);
+    expect(hit?.nodeId).toBe("g");
+    expect(hit?.index).toBe(0);
+    expect(hit?.part).toBe("picture");
+  });
+
+  it("reports the caption part on the caption band under the picture", () => {
+    const r = rendererWithGalleryNode([{ id: "a0", caption: "Velma" }]);
+    const c = cellRect();
+    expect(c.captionH).toBeGreaterThan(0);
+    const hit = r.hitTestGalleryCell({} as never, c.x + c.w / 2, c.captionY + c.captionH / 2);
+    expect(hit?.index).toBe(0);
+    expect(hit?.part).toBe("caption");
+  });
+
+  it("is null in the gap between cells, so a drop between pictures still lands in the topic", () => {
+    const r = rendererWithGalleryNode([{ id: "a0", caption: "Velma" }, { id: "a1" }]);
+    const node = makeNode("g");
+    node.style = { gallery: { items: [{ id: "a0", caption: "Velma" }, { id: "a1" }] } };
+    const { cells } = positionedImageSlots({ x: 0, y: 0, w: 500, h: 300 }, node, () => ({ w: 200, h: 100 }));
+    const mid = (cells[0].x + cells[0].w + cells[1].x) / 2;
+    expect(r.hitTestGalleryCell({} as never, mid, cells[0].y + cells[0].h / 2)).toBeNull();
+  });
+
+  it("has no caption band to hit when no cell is captioned", () => {
+    const r = rendererWithGalleryNode([{ id: "a0" }]);
+    const node = makeNode("g");
+    node.style = { gallery: { items: [{ id: "a0" }] } };
+    const { cells } = positionedImageSlots({ x: 0, y: 0, w: 500, h: 300 }, node, () => ({ w: 200, h: 100 }));
+    const c = cells[0];
+    expect(c.captionH).toBe(0);
+    expect(r.hitTestGalleryCell({} as never, c.x + c.w / 2, c.y + c.h + 4)).toBeNull();
   });
 });

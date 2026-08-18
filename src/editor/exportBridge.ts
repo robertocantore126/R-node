@@ -50,8 +50,8 @@ export function runExportPng(): void {
   pngHandler?.();
 }
 
-// One TOPIC as an image (T26): the "download this tier list" button. Same seam
-// again — only the renderer can draw a node, and it lives in the view.
+// One TOPIC as an image: the "download this gallery" button. Same seam again —
+// only the renderer can draw a node, and it lives in the view.
 let nodeImageHandler: ((nodeId: string, type: "image/png" | "image/jpeg") => Promise<void>) | null = null;
 
 export function setExportNodeImageHandler(

@@ -16,10 +16,10 @@ import { History } from "../core/history";
 import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun, type TierItem } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
-import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, TIER_DEFAULT_ROWS, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
@@ -1406,18 +1406,20 @@ export class EditorStore {
     this.commitDraftOnLeave();
     const node = this.model.node(id);
     if (!node) return;
-    // A code topic is read-only by design (T22): mounting the Lexical overlay
-    // would be a second renderer over the source, and the §3 parity contract
-    // exists precisely because two renderers over one title drift. The refusal
-    // still selects the topic, so the double-click shows what it acted on; a
-    // mute return would be indistinguishable from a defect (§4bis).
-    if (node.style.code) {
+    // A code topic is read-only by design (T22) and a gallery topic's body
+    // is pictures (T25): mounting the Lexical overlay would be a second
+    // renderer over the source, and the §3 parity contract exists precisely
+    // because two renderers over one title drift. The refusal still selects
+    // the topic, so the double-click shows what it acted on; a mute return
+    // would be indistinguishable from a defect (§4bis).
+    if (node.style.code || node.style.gallery) {
       this.state.selection = [id];
       this.state.editingId = null;
       this.state.pendingInsert = null;
       this.state.imageSel = null;
       this.state.imageSlot = null;
-      return trace.ignored("edit:start", "code topic is read-only", { nodeId: id });
+      const why = node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+      return trace.ignored("edit:start", why, { nodeId: id });
     }
     this.state.selection = [id];
     this.state.editingId = id;
@@ -1441,8 +1443,12 @@ export class EditorStore {
     const node = this.selectionNode;
     if (!node) return;
     // Same refusal as startEdit: a code topic never enters the editor, not
-    // even through type/paste-to-edit (T22).
-    if (node.style.code) return trace.ignored("paste-to-edit:trigger", "code topic is read-only", { nodeId: node.id });
+    // even through type/paste-to-edit (T22), and neither does a gallery
+    // topic, whose body is pictures (T25).
+    if (node.style.code || node.style.gallery) {
+      const why = node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+      return trace.ignored("paste-to-edit:trigger", why, { nodeId: node.id });
+    }
     trace.applied("paste-to-edit:trigger", {
       nodeId: node.id,
       chars: text.length,
@@ -1817,6 +1823,41 @@ export class EditorStore {
     this.settleLayoutNow();
     this.select(id);
     trace.applied("code:create-empty", { nodeId: id, parentId: parent.id });
+  }
+
+  /**
+   * Create an EMPTY gallery topic under the selection (or a given parent) —
+   * the context menu's "New gallery topic" (T25). The node is born with
+   * `gallery: { items: [] }`, not without the field, because the user
+   * DECLARED it a gallery: the Inspector shows its "Add images…" state and a
+   * file dropped on it routes into the grid instead of an edge slot.
+   *
+   * That is a deliberate exception to putGallery's empty-drop rule. The rule
+   * governs EDITS — a grid that empties collapses back to a plain topic, so
+   * "no gallery" and "a gallery of nothing" never linger as two states
+   * galleryExtent has to tell apart. Creation is the one moment the intent is
+   * explicit and the state is transient (it lasts until the first image, or
+   * until the user deletes the topic).
+   */
+  createGalleryTopic(parentId?: string): void {
+    const parent = parentId ? this.model.node(parentId) : this.selectionNode ?? this.model.rootNode;
+    if (!parent) return;
+    const type: NodeType = parent.type === "central" ? "main" : "subtopic";
+    const id = uid("n");
+    const position = this.createNodePosition(parent);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id,
+      nodeType: type,
+      parentId: parent.id,
+      index: parent.childrenIds.length,
+      title: "",
+      titleRuns: [],
+      style: { gallery: { items: [] } },
+      position,
+    })]);
+    this.settleLayoutNow();
+    this.select(id);
+    trace.applied("gallery:create-empty", { nodeId: id, parentId: parent.id });
   }
 
   /**
@@ -2773,212 +2814,6 @@ export class EditorStore {
       }
     }
     return res;
-  }
-
-  // -------------------------------------------------------------------------
-  // Tier lists (T26)
-  // -------------------------------------------------------------------------
-
-  /**
-   * Every tier-list edit goes through here, as one `setStyle`.
-   *
-   * Same reasoning as `putGallery`: `setStyle` already carries `prev`, so it
-   * inverts itself (I7) and undo covers rows, cards, colours and labels from
-   * the day they exist. Rows are NOT dropped when empty — an empty tier is a
-   * meaningful part of a ranking and a drop target — but the whole chart is
-   * dropped when it has no rows and no pool, so "not a tier list" and "a tier
-   * list of nothing" do not become two states.
-   */
-  private putTierList(nodeId: string, next: NonNullable<Style["tierList"]>): void {
-    const empty = next.rows.length === 0 && next.pool.length === 0;
-    this.setNodeStyle(nodeId, { tierList: empty ? undefined : next });
-    this.settleLayoutNow();
-    this.notify();
-  }
-
-  /** A deep-enough copy to mutate freely before handing it to putTierList. */
-  private tierOf(nodeId: string): NonNullable<Style["tierList"]> | null {
-    const t = this.model.node(nodeId)?.style.tierList;
-    if (!t) return null;
-    return {
-      ...t,
-      rows: t.rows.map((r) => ({ ...r, items: r.items.map((i) => ({ ...i })) })),
-      pool: t.pool.map((i) => ({ ...i })),
-    };
-  }
-
-  /**
-   * Turn a topic into a tier list, seeded with the S–D ladder everyone already
-   * knows. Starting from a blank chart would make the first thing every user
-   * does be "type five labels and pick five colours".
-   */
-  createTierList(nodeId: string): void {
-    const node = this.model.node(nodeId);
-    if (!node || node.style.tierList) return;
-    this.putTierList(nodeId, {
-      rows: TIER_DEFAULT_ROWS.map((r) => ({ id: uid("tr"), label: r.label, color: r.color, items: [] })),
-      pool: [],
-    });
-    trace.applied("tier:create", { id: nodeId });
-  }
-
-  /** Add a rank band. Appended at the bottom, above the pool. */
-  addTierRow(nodeId: string, at?: number): void {
-    const t = this.tierOf(nodeId);
-    if (!t) return;
-    const index = at === undefined ? t.rows.length : Math.max(0, Math.min(t.rows.length, at));
-    const palette = TIER_DEFAULT_ROWS[index % TIER_DEFAULT_ROWS.length];
-    t.rows.splice(index, 0, { id: uid("tr"), label: "", color: palette.color, items: [] });
-    this.putTierList(nodeId, t);
-  }
-
-  /**
-   * Delete a rank band. Its cards go BACK TO THE POOL rather than with it:
-   * losing a row is a ranking decision, losing the pictures in it is not, and
-   * a delete that silently discarded them would be the one edit undo has to
-   * rescue people from.
-   */
-  removeTierRow(nodeId: string, index: number): void {
-    const t = this.tierOf(nodeId);
-    if (!t || index < 0 || index >= t.rows.length) return;
-    const [gone] = t.rows.splice(index, 1);
-    t.pool.push(...gone.items);
-    this.putTierList(nodeId, t);
-  }
-
-  /** Move a rank band up or down — the ranking IS the row order. */
-  moveTierRow(nodeId: string, from: number, to: number): void {
-    const t = this.tierOf(nodeId);
-    if (!t || from < 0 || from >= t.rows.length) return;
-    const dest = Math.max(0, Math.min(t.rows.length - 1, to));
-    if (dest === from) return;
-    const [row] = t.rows.splice(from, 1);
-    t.rows.splice(dest, 0, row);
-    this.putTierList(nodeId, t);
-  }
-
-  /** Rename a rank, or recolour it. */
-  setTierRow(nodeId: string, index: number, patch: { label?: string; color?: string }): void {
-    const t = this.tierOf(nodeId);
-    if (!t || index < 0 || index >= t.rows.length) return;
-    const row = t.rows[index];
-    if (patch.label !== undefined) row.label = patch.label;
-    if (patch.color !== undefined) row.color = patch.color;
-    this.putTierList(nodeId, t);
-  }
-
-  /** The chart's proportions: card size, card shape, cards per row, rank column. */
-  setTierLayout(nodeId: string, patch: { cellW?: number; aspect?: number; cols?: number; labelW?: number }): void {
-    const t = this.tierOf(nodeId);
-    if (!t) return;
-    this.putTierList(nodeId, { ...t, ...patch });
-  }
-
-  /** Read a band's cards: `rowIndex` -1 is the pool, everywhere. */
-  private tierBand(t: NonNullable<Style["tierList"]>, rowIndex: number): TierItem[] | null {
-    if (rowIndex < 0) return t.pool;
-    return t.rows[rowIndex]?.items ?? null;
-  }
-
-  /**
-   * Move a card to a position in a band — another rank, the pool, or a new
-   * place in the band it is already in.
-   *
-   * This is the gesture the whole feature exists for, and all three cases are
-   * one method because to the document they are the same edit: lift a card out
-   * of a list, put it into a list, which may be the same list. `toIndex`
-   * counts the GAPS before the lift, so a move rightward inside one band
-   * shifts down by one once the card is out — the classic off-by-one that
-   * makes a drag land one slot past where the caret promised.
-   */
-  moveTierItem(nodeId: string, fromRow: number, fromIndex: number, toRow: number, toIndex: number): void {
-    const t = this.tierOf(nodeId);
-    if (!t) return;
-    const src = this.tierBand(t, fromRow);
-    const dst = this.tierBand(t, toRow);
-    if (!src || !dst || fromIndex < 0 || fromIndex >= src.length) return;
-    let dest = Math.max(0, Math.min(dst.length, toIndex));
-    if (src === dst) {
-      dest -= toIndex > fromIndex ? 1 : 0;
-      if (dest === fromIndex) return;
-    }
-    const [card] = src.splice(fromIndex, 1);
-    dst.splice(dest, 0, card);
-    this.putTierList(nodeId, t);
-    trace.applied("tier:move", { id: nodeId, fromRow, fromIndex, toRow, toIndex });
-  }
-
-  /** Drop a card entirely. The asset card stays — gcOrphans is the collector. */
-  removeTierItem(nodeId: string, rowIndex: number, index: number): void {
-    const t = this.tierOf(nodeId);
-    if (!t) return;
-    const band = this.tierBand(t, rowIndex);
-    if (!band || index < 0 || index >= band.length) return;
-    band.splice(index, 1);
-    this.putTierList(nodeId, t);
-  }
-
-  /** Retitle a card. On a picture this is its caption; on a text card it IS the card. */
-  setTierItemText(nodeId: string, rowIndex: number, index: number, text: string): void {
-    const t = this.tierOf(nodeId);
-    if (!t) return;
-    const band = this.tierBand(t, rowIndex);
-    if (!band || index < 0 || index >= band.length) return;
-    const next = text.trim();
-    if ((band[index].text ?? "") === next) return;
-    band[index] = next ? { ...band[index], text: next } : { id: band[index].id };
-    this.putTierList(nodeId, t);
-  }
-
-  /** Add a text-only card to the pool — an entrant with no picture yet. */
-  addTierTextItem(nodeId: string, text: string): void {
-    const t = this.tierOf(nodeId);
-    const label = text.trim();
-    if (!t || !label) return;
-    t.pool.push({ text: label });
-    this.putTierList(nodeId, t);
-  }
-
-  /**
-   * Import image files as cards, landing in a band at a given gap — the pool
-   * by default, which is where an unranked entrant belongs.
-   */
-  async addTierImageFiles(
-    nodeId: string,
-    files: (Blob & { name?: string })[],
-    rowIndex = -1,
-    at?: number,
-  ): Promise<{ added: number; failed: number; reason?: string }> {
-    const t = this.tierOf(nodeId);
-    if (!t) return { added: 0, failed: 0 };
-    const band = this.tierBand(t, rowIndex);
-    if (!band) return { added: 0, failed: 0 };
-    let added = 0;
-    let failed = 0;
-    let reason: string | undefined;
-    const fresh: TierItem[] = [];
-    for (const file of files) {
-      const res = await this.importToCard(file);
-      if (!res.ok) {
-        failed++;
-        if (reason === undefined) reason = res.reason;
-        continue;
-      }
-      if (!this.sheet.attachments.some((a) => a.id === res.card.id)) {
-        this.sheet.attachments.push({ ...res.card });
-      }
-      // Same rule as a gallery cell: the file name is the first caption, and
-      // it is an ordinary editable value from then on.
-      fresh.push({ id: res.card.id, text: captionFromFileName(res.card.name) });
-      added++;
-    }
-    if (added > 0) {
-      band.splice(at === undefined ? band.length : Math.max(0, Math.min(band.length, at)), 0, ...fresh);
-      this.putTierList(nodeId, t);
-      trace.applied("tier:add-images", { added, failed, rowIndex });
-    }
-    this.notify();
-    return { added, failed, reason };
   }
 
   /** Cell size, column count and cell shape — the knobs that reshape the grid. */
@@ -4118,12 +3953,6 @@ export class EditorStore {
     return out;
   }
 
-  /** Hand a generated file to the user. Public so the view-side exporters
-   *  (SVG, PDF, and one topic as an image) can reuse the one implementation. */
-  downloadBlob(blob: Blob, filename: string): void {
-    this.download(blob, filename);
-  }
-
   private download(blob: Blob, filename: string): void {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -4131,5 +3960,10 @@ export class EditorStore {
     a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /** Public wrapper: the view exports a single topic as an image through it. */
+  downloadBlob(blob: Blob, filename: string): void {
+    this.download(blob, filename);
   }
 }
