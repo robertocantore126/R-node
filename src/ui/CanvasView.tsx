@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { viewSize } from "../editor/view";
-import { setExportPngHandler, setExportSvgHandler, setExportPdfHandler, setExportHtmlHandler } from "../editor/exportBridge";
+import { setExportPngHandler, setExportSvgHandler, setExportPdfHandler, setExportHtmlHandler, setExportNodeImageHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
 import { THEMES } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
@@ -104,6 +104,10 @@ interface DragState {
   cellDragFrom: { nodeId: string; index: number } | null;
   /** Where it would land: topic and insertion index (a gap, not a cell). */
   cellDropTo: { nodeId: string; index: number } | null;
+  /** Tier-list card move (T26): which card of which band is in hand. */
+  tierDragFrom: { nodeId: string; rowIndex: number; index: number } | null;
+  /** Where it would land: band and insertion gap. */
+  tierDropTo: { nodeId: string; rowIndex: number; index: number } | null;
   /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
   marqueeStartX: number | null;
   marqueeStartY: number | null;
@@ -159,6 +163,8 @@ export function CanvasView(): JSX.Element {
     imgDropSlot: "top",
     cellDragFrom: null,
     cellDropTo: null,
+    tierDragFrom: null,
+    tierDropTo: null,
     marqueeStartX: null,
     marqueeStartY: null,
     marqueeActive: false,
@@ -203,6 +209,8 @@ export function CanvasView(): JSX.Element {
   const extDropSideRef = useRef<ImageSlot | null>(null);
   /** Live insertion caret for a gallery cell drag (T25) — see RenderState. */
   const galleryDropRef = useRef<{ nodeId: string; index: number } | null>(null);
+  /** Live insertion caret for a tier-list card drag (T26). */
+  const tierDropRef = useRef<{ nodeId: string; rowIndex: number; index: number } | null>(null);
   const [extGhostSrc, setExtGhostSrc] = useState<string | null>(null);
 
   const paint = useCallback(() => {
@@ -229,6 +237,7 @@ export function CanvasView(): JSX.Element {
       imageSlot: s.imageSlot,
       ghostImage: ghostRef.current,
       galleryDrop: galleryDropRef.current,
+      tierDrop: tierDropRef.current,
       marqueeSel: marqueeSelRef.current,
     };
     renderer.render(rs);
@@ -310,6 +319,32 @@ export function CanvasView(): JSX.Element {
       store.toast("Exported as PNG");
     });
 
+    // One topic as an image (T26). No DOM rasteriser: the topic is already
+    // pixels on this canvas, so the renderer redraws it into an offscreen
+    // surface of exactly the node's size.
+    setExportNodeImageHandler(async (nodeId, type) => {
+      const renderer = rendererRef.current;
+      if (!renderer) return;
+      const node = store.doc.node(nodeId);
+      if (!node) return;
+      store.beginExport(type === "image/jpeg" ? "Building JPEG…" : "Building PNG…");
+      try {
+        const blob = await renderer.renderNodeImage(currentRenderState(), nodeId, {
+          scale: 2,
+          type,
+          background: type === "image/jpeg" ? THEMES[store.getSnapshot().theme].background : null,
+        });
+        if (!blob) {
+          store.toast("Could not render that topic");
+          return;
+        }
+        const stem = (node.title.trim() || "tier-list").replace(/[^\w-]+/g, "_").slice(0, 60);
+        store.downloadBlob(blob, `${stem}.${type === "image/jpeg" ? "jpg" : "png"}`);
+        store.toast(`Topic exported as ${type === "image/jpeg" ? "JPEG" : "PNG"}`);
+      } finally {
+        store.endExport();
+      }
+    });
     setExportSvgHandler(async () => {
       const s = store.getSnapshot();
       const rs: RenderState = {
@@ -640,6 +675,27 @@ export function CanvasView(): JSX.Element {
     // moves it onto another node. Skipped while picking a relationship
     // target, like the resize handles. The exact SLOT is remembered so the
     // move removes the right one and the ring marks the right one.
+    // Tier-list card hit (T26), first of all the in-node targets: a card sits
+    // inside a row which sits inside the topic, so the innermost thing has to
+    // be asked first or the topic answers on its behalf.
+    const tierHit = s.relFrom ? null : renderer.hitTestTierCell(rs, world.x, world.y);
+    if (tierHit) {
+      drag.grabOffsetX = world.x - tierHit.rect.x;
+      drag.grabOffsetY = world.y - tierHit.rect.y;
+      drag.tierDragFrom = { nodeId: tierHit.nodeId, rowIndex: tierHit.rowIndex, index: tierHit.index };
+      drag.tierDropTo = null;
+      drag.dragging = null;
+      drag.marqueeStartX = null;
+      store.select(tierHit.nodeId, { additive: false });
+      trace.applied("pointerdown:tier-card", {
+        id: tierHit.nodeId,
+        row: tierHit.rowIndex,
+        index: tierHit.index,
+        wasEditing,
+      });
+      return;
+    }
+
     // Gallery cell hit (T25), before the slot and body tests: a cell lives
     // INSIDE its topic's box, so the most specific target has to be asked
     // first or the topic answers for it. A drag moves the picture to another
@@ -823,6 +879,34 @@ export function CanvasView(): JSX.Element {
     // target. Threshold before feedback, same as node dragging. The ghost
     // preview follows the cursor (set BEFORE setDrop — the store change
     // repaints synchronously and must already see it).
+    // A tier-list card in flight. The target band is resolved from the topic
+    // under the cursor, so dragging from row D up to row A, or out to the
+    // pool, or to a new place in the same row, are all the same gesture.
+    if (drag.tierDragFrom) {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const rs = currentRenderState();
+      const from = drag.tierDragFrom;
+      const src = store.doc.node(from.nodeId)?.style.tierList;
+      const band = from.rowIndex < 0 ? src?.pool : src?.rows[from.rowIndex]?.items;
+      const card = band?.[from.index];
+      const hit = rendererRef.current!.hitTest(rs, world.x, world.y);
+      const at = hit ? rendererRef.current!.tierDropAt(rs, hit, world.x, world.y) : null;
+      if (hit && at) {
+        drag.tierDropTo = { nodeId: hit, rowIndex: at.rowIndex, index: at.index };
+        tierDropRef.current = drag.tierDropTo;
+      } else {
+        drag.tierDropTo = null;
+        tierDropRef.current = null;
+      }
+      // Only a picture has a ghost; a text card is carried by the caret alone.
+      ghostRef.current = card?.id ? { imageId: card.id, x: world.x, y: world.y, nodeId: from.nodeId } : null;
+      schedule();
+      return;
+    }
+
     // A gallery cell in flight: the ghost follows the cursor and the caret
     // marks the gap it would drop into. The target may be ANY topic — moving a
     // face from one tier to another is the same gesture as reordering inside
@@ -978,6 +1062,23 @@ export function CanvasView(): JSX.Element {
       setPanning(false);
       return;
     }
+    // Tier-list card dropped (T26). A plain click never moves anything — the
+    // threshold in pointermove separates a grab from a click, as everywhere.
+    if (drag.tierDragFrom) {
+      const from = drag.tierDragFrom;
+      const to = drag.tierDropTo;
+      if (drag.moved && to && to.nodeId === from.nodeId) {
+        store.moveTierItem(from.nodeId, from.rowIndex, from.index, to.rowIndex, to.index);
+      }
+      drag.tierDragFrom = null;
+      drag.tierDropTo = null;
+      drag.moved = false;
+      tierDropRef.current = null;
+      ghostRef.current = null;
+      schedule();
+      return;
+    }
+
     // Gallery cell dropped (T25). A plain click never moves anything: the
     // threshold in pointermove is what separates "grabbed it" from "clicked
     // near it", exactly as for the slot images.
@@ -1168,6 +1269,7 @@ export function CanvasView(): JSX.Element {
       imageSlot: s.imageSlot,
       ghostImage: ghostRef.current,
       galleryDrop: galleryDropRef.current,
+      tierDrop: tierDropRef.current,
       marqueeSel: marqueeSelRef.current,
     };
   };
@@ -1375,6 +1477,15 @@ export function CanvasView(): JSX.Element {
               store.toast("Could not load the image from its URL");
               return;
             }
+          }
+          // A tier list takes the file into the band under the cursor — drop a
+          // face on row A and it is ranked A, drop it on the strip and it waits
+          // in the pool.
+          if (store.doc.node(target)?.style.tierList) {
+            const at = rendererRef.current?.tierDropAt(currentRenderState(), target, world.x, world.y) ?? null;
+            const res = await store.addTierImageFiles(target, [file], at?.rowIndex ?? -1, at?.index);
+            if (res.added === 0) store.toast(res.reason ?? "Could not import image");
+            return;
           }
           // A topic that already IS a gallery takes the file into its grid, at
           // the gap under the cursor — dropping a face onto a tier row means

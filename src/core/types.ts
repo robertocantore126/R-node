@@ -101,6 +101,41 @@ export interface GalleryItem {
   caption?: string;
 }
 
+/**
+ * One card in a tier list (T26): either a picture or a piece of text.
+ *
+ * The two are one type rather than a union of two, because everything that
+ * moves a card — drag, drop, reorder, undo — treats them identically, and a
+ * union would fork every one of those paths for a difference that only the
+ * painter cares about. A card with an `id` draws its picture; one without
+ * draws its `text` in the cell. `text` doubles as the caption under a picture,
+ * so a card always has something a human can read.
+ */
+export interface TierItem {
+  /** SHA-256 of the asset. Absent = a text-only card. */
+  id?: string;
+  /** Caption under a picture, or the whole card when there is no picture. */
+  text?: string;
+}
+
+/** One rank band of a tier list: its label, its colour, and its cards. */
+export interface TierRow {
+  /** Stable id, so a row survives being reordered or renamed. */
+  id: string;
+  /** Rank label drawn in the coloured column ("S", "A", "Buffed"). */
+  label: string;
+  /**
+   * Row colour, stored as a hex string.
+   *
+   * Colour is CONTENT here, exactly as in `Style.shapeParts` and unlike
+   * everywhere else in this schema: S being red and D being green is the
+   * convention a reader brings to a tier list, and a theme that reassigned
+   * those would be changing what the chart says, not how it looks.
+   */
+  color: string;
+  items: TierItem[];
+}
+
 export interface Style {
   fill?: string;
   stroke?: string;
@@ -142,6 +177,37 @@ export interface Style {
    * edge and no fixed count, so it is a different thing wearing the same
    * word. The two compose: a gallery topic may still carry side images.
    */
+  /**
+   * Turns the topic into a TIER LIST (T26): ranked rows of cards plus the
+   * pool of cards not yet ranked.
+   *
+   * A presentation variant on `Style` like `code`, `shapeParts` and `gallery`,
+   * for the reason spelled out on `code`: `NodeType` drives topology and
+   * layout of the TREE, and a chart drawn inside one box changes neither.
+   *
+   * Why this exists next to `gallery` rather than replacing it. A gallery is
+   * an unstructured grid of pictures — a mood board, a cast list — and has no
+   * ranks, no per-row colour and no pool. A tier list is a chart with a
+   * meaning: which row a card is in IS the content. Collapsing them would give
+   * the gallery three fields it never uses and the tier list a shape that
+   * cannot say what it needs to. They share their geometry (`coverCrop`, the
+   * cell constants) so there is still only one implementation of "cards in a
+   * wrapping grid".
+   */
+  tierList?: {
+    /** Rank bands, best first. Order is meaning: it is the ranking. */
+    rows: TierRow[];
+    /** Cards not yet ranked, drawn under the rows. */
+    pool: TierItem[];
+    /** Card width in world units. Absent = TIER_CELL_W. */
+    cellW?: number;
+    /** Card width ÷ height. Absent = square, as in a gallery. */
+    aspect?: number;
+    /** Cards per row before wrapping. Absent = TIER_COLS. */
+    cols?: number;
+    /** Width of the coloured rank column. Absent = TIER_LABEL_W. */
+    labelW?: number;
+  };
   gallery?: {
     /** Cells in paint order. An empty array is a gallery with no pictures yet. */
     items: GalleryItem[];

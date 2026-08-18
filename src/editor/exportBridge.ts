@@ -50,6 +50,20 @@ export function runExportPng(): void {
   pngHandler?.();
 }
 
+// One TOPIC as an image (T26): the "download this tier list" button. Same seam
+// again — only the renderer can draw a node, and it lives in the view.
+let nodeImageHandler: ((nodeId: string, type: "image/png" | "image/jpeg") => Promise<void>) | null = null;
+
+export function setExportNodeImageHandler(
+  fn: ((nodeId: string, type: "image/png" | "image/jpeg") => Promise<void>) | null,
+): void {
+  nodeImageHandler = fn;
+}
+
+export function runExportNodeImage(nodeId: string, type: "image/png" | "image/jpeg" = "image/png"): void {
+  void nodeImageHandler?.(nodeId, type);
+}
+
 // SVG export. Same seam as the PNG one: the exporter needs the RENDERER for
 // branch colours and the canvas measurer, both of which live in the view.
 let svgHandler: (() => Promise<void>) | null = null;

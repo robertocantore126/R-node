@@ -152,6 +152,40 @@ export const GALLERY_CAPTION_GAP = 2;
 export const MAX_GALLERY_W = 720;
 
 /**
+ * Tier lists (T26). Same four readers as the gallery constants above (I9), and
+ * the cards are laid out by the same helper — a tier row IS a wrapping grid of
+ * cells, so `gridCells` serves both and neither owns a second copy.
+ */
+/** Card width when `Style.tierList.cellW` says nothing. */
+export const TIER_CELL_W = 72;
+/** Cards per row before wrapping, when `cols` says nothing. */
+export const TIER_COLS = 8;
+/** Width of the coloured rank column, when `labelW` says nothing. */
+export const TIER_LABEL_W = 72;
+/** Font size of a rank label. Scales with nothing: the column is fixed. */
+export const TIER_LABEL_SIZE = 15;
+/** Hairline between rows, and around the whole chart. */
+export const TIER_BORDER = 1;
+/** Padding inside a row band, above and below the cards. */
+export const TIER_ROW_PAD = 3;
+/** Gap between the ranked rows and the pool below them. */
+export const TIER_POOL_GAP = 10;
+/** Font size of a text card's own text. */
+export const TIER_TEXT_SIZE = 11;
+
+/**
+ * The default ladder for a new tier list — the one every reader already knows.
+ * Colours are content (see `TierRow.color`), so they are stated, not themed.
+ */
+export const TIER_DEFAULT_ROWS: { label: string; color: string }[] = [
+  { label: "S", color: "#ff7f7f" },
+  { label: "A", color: "#ffbf7f" },
+  { label: "B", color: "#ffdf7f" },
+  { label: "C", color: "#ffff7f" },
+  { label: "D", color: "#bfff7f" },
+];
+
+/**
  * Width of the bullet column, in em of the list item's font size. Shared with
  * the overlay as `--rnode-bullet-w`: the canvas indents the text by exactly
  * this and the CSS hangs the item by exactly this, so a wrapped list item
@@ -667,6 +701,35 @@ export interface GalleryCell {
 }
 
 /**
+ * Lay `count` cells into a wrapping grid of `cols` columns, in reading order.
+ *
+ * The one implementation of "cards in a grid", shared by the gallery and by
+ * every row of a tier list. Both had the same three-line arithmetic and both
+ * would have drifted the first time the gap changed.
+ */
+export function gridCells(
+  count: number,
+  cols: number,
+  cellW: number,
+  cellH: number,
+  gap: number,
+  originX: number,
+  originY: number,
+): { x: number; y: number; w: number; h: number }[] {
+  const out: { x: number; y: number; w: number; h: number }[] = [];
+  const perRow = Math.max(1, cols);
+  for (let i = 0; i < count; i++) {
+    out.push({
+      x: originX + (i % perRow) * (cellW + gap),
+      y: originY + Math.floor(i / perRow) * (cellH + gap),
+      w: cellW,
+      h: cellH,
+    });
+  }
+  return out;
+}
+
+/**
  * Clip a caption to `maxW`, ending it with an ellipsis when it does not fit.
  *
  * Shared by the canvas, the SVG export and the PDF export (I9). The obvious
@@ -829,20 +892,21 @@ export interface TextInsets {
  * never reads these numbers, but it narrows the editing overlay's text column
  * and re-wraps the text the instant a topic with an image is double-clicked.
  *
- * `galleryH` is the grid of a gallery topic (T25), which stacks BELOW the text
- * and so reserves from the bottom on exactly the same terms as a bottom image.
- * Folding it in here rather than at each call site is what makes the four
- * readers — the measure, the canvas, the SVG and the PDF — place the title of
- * a gallery topic identically without any of them knowing what a gallery is.
+ * `belowH` is whatever stacks BELOW the text inside the box — a gallery grid
+ * (T25) or a tier-list chart (T26) — and it reserves from the bottom on
+ * exactly the same terms as a bottom image. Folding it in here rather than at
+ * each call site is what makes the four readers — the measure, the canvas, the
+ * SVG and the PDF — place the title of such a topic identically without any of
+ * them knowing what a gallery or a tier list is.
  *
  * Consumed by measureTopic, positionedImageSlots, the RichEditor overlay and
  * the parity harness: all four have to agree on where the text may go.
  */
-export function textInsets(slots: SlotSizes, galleryH = 0): TextInsets {
+export function textInsets(slots: SlotSizes, belowH = 0): TextInsets {
   const reserve = (v: number | undefined): number => (v && v > 0 ? v + IMAGE_GAP : 0);
   return {
     top: reserve(slots.top?.h),
-    bottom: reserve(slots.bottom?.h) + reserve(galleryH),
+    bottom: reserve(slots.bottom?.h) + reserve(belowH),
     left: reserve(slots.left?.w),
     right: reserve(slots.right?.w),
   };
@@ -870,7 +934,8 @@ export function positionedImageSlots(
 } {
   const slots = slotSizes(n, resolveImage);
   const gallery = galleryExtent(n, resolveImage);
-  const insets = textInsets(slots, gallery?.h ?? 0);
+  const tier = tierListLayout(n, resolveImage);
+  const insets = textInsets(slots, (gallery?.h ?? 0) + (tier?.h ?? 0));
   const sidePadW = insets.left + insets.right;
   const pad = n.style.padding ?? 10;
   const midL = box.x + pad + insets.left;
@@ -916,6 +981,168 @@ export function positionedImageSlots(
   return { slots, insets, sidePadW, midL, midW, items, gallery, cells };
 }
 
+// ---------------------------------------------------------------------------
+// Tier lists (T26)
+// ---------------------------------------------------------------------------
+
+/** One placed card. `rowIndex` is -1 for the pool, which is how every caller
+ *  names the two places a card can be without a second type. */
+export interface TierCell {
+  rowIndex: number;
+  index: number;
+  /** Asset id when the card is a picture; absent for a text-only card. */
+  id?: string;
+  /** Caption under the picture, or the card's whole content when there is none. */
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Cover crop of the picture, normalised — null for a text card. */
+  crop: { sx: number; sy: number; sw: number; sh: number } | null;
+}
+
+export interface TierRowLayout {
+  index: number;
+  label: string;
+  color: string;
+  /** The whole band, label column included. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** The coloured rank column at its left. */
+  labelW: number;
+  cells: TierCell[];
+}
+
+export interface TierListLayout {
+  /** Extent of the whole chart, pool included. */
+  w: number;
+  h: number;
+  cellW: number;
+  cellH: number;
+  cols: number;
+  labelW: number;
+  rows: TierRowLayout[];
+  /** The unranked pool, drawn under the rows. Its cells carry rowIndex -1. */
+  pool: { x: number; y: number; w: number; h: number; cols: number; cells: TierCell[] };
+}
+
+/**
+ * The chart a tier-list topic wants, or null when the node is not one.
+ *
+ * Sized from the NODE ALONE, never from the placed box — the same rule
+ * `galleryExtent` documents, and for the same reason: the column count decides
+ * the width, so reading the width back to decide the columns is a loop, and
+ * resolving it differently in the measure and in the painter is how the canvas
+ * and the export come to disagree.
+ *
+ * Every row is the same width whatever it holds, because that is what makes
+ * the rows comparable — the thing a tier list is for. A row with more cards
+ * than `cols` grows TALLER, it never grows wider.
+ */
+export function tierListLayout(
+  n: MindNode,
+  resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
+): TierListLayout | null {
+  const t = n.style.tierList;
+  if (!t) return null;
+  const cellW = Math.max(16, t.cellW ?? TIER_CELL_W);
+  const aspect = t.aspect && t.aspect > 0 ? t.aspect : GALLERY_ASPECT;
+  const cellH = Math.max(8, Math.round(cellW / aspect));
+  const cols = Math.max(1, Math.floor(t.cols ?? TIER_COLS));
+  const labelW = Math.max(24, t.labelW ?? TIER_LABEL_W);
+
+  const itemsW = cols * cellW + (cols - 1) * GALLERY_GAP;
+  const totalW = labelW + TIER_BORDER + itemsW + TIER_ROW_PAD * 2;
+
+  const cellOf = (item: { id?: string; text?: string }, rowIndex: number, index: number, r: { x: number; y: number; w: number; h: number }): TierCell => ({
+    rowIndex,
+    index,
+    id: item.id,
+    text: (item.text ?? "").trim(),
+    x: r.x,
+    y: r.y,
+    w: r.w,
+    h: r.h,
+    crop: item.id ? coverCrop(resolveImage?.(item.id) ?? null, cellW / cellH) : null,
+  });
+
+  const rows: TierRowLayout[] = [];
+  let y = 0;
+  for (let ri = 0; ri < t.rows.length; ri++) {
+    const row = t.rows[ri];
+    // An empty row still stands one card tall: a tier you have not filled yet
+    // has to remain a visible drop target, which is most of what it is for.
+    const lines = Math.max(1, Math.ceil(row.items.length / cols));
+    const h = lines * cellH + (lines - 1) * GALLERY_GAP + TIER_ROW_PAD * 2;
+    const rects = gridCells(row.items.length, cols, cellW, cellH, GALLERY_GAP, labelW + TIER_BORDER + TIER_ROW_PAD, y + TIER_ROW_PAD);
+    rows.push({
+      index: ri,
+      label: row.label,
+      color: row.color,
+      x: 0,
+      y,
+      w: totalW,
+      h,
+      labelW,
+      cells: row.items.map((it, i) => cellOf(it, ri, i, rects[i])),
+    });
+    y += h + TIER_BORDER;
+  }
+
+  // The pool spans the full width — it has no rank column to give up, and a
+  // staging area that wrapped at the rows' column count would waste the strip
+  // the label column occupies.
+  const poolCols = Math.max(1, Math.floor((totalW - TIER_ROW_PAD * 2 + GALLERY_GAP) / (cellW + GALLERY_GAP)));
+  const poolLines = Math.max(1, Math.ceil(t.pool.length / poolCols));
+  const poolH = poolLines * cellH + (poolLines - 1) * GALLERY_GAP + TIER_ROW_PAD * 2;
+  const poolY = y + (t.rows.length > 0 ? TIER_POOL_GAP - TIER_BORDER : 0);
+  const poolRects = gridCells(t.pool.length, poolCols, cellW, cellH, GALLERY_GAP, TIER_ROW_PAD, poolY + TIER_ROW_PAD);
+
+  return {
+    w: totalW,
+    h: poolY + poolH,
+    cellW,
+    cellH,
+    cols,
+    labelW,
+    rows,
+    pool: {
+      x: 0,
+      y: poolY,
+      w: totalW,
+      h: poolH,
+      cols: poolCols,
+      cells: t.pool.map((it, i) => cellOf(it, -1, i, poolRects[i])),
+    },
+  };
+}
+
+/**
+ * The chart placed into a box: the same layout, offset to where the topic
+ * actually sits, and centred in the middle column like the gallery grid.
+ * Single source of truth for the renderer, the hit tests and the exports.
+ */
+export function positionedTierList(
+  box: { x: number; y: number; w: number; h: number },
+  n: MindNode,
+  resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
+): TierListLayout | null {
+  const l = tierListLayout(n, resolveImage);
+  if (!l) return null;
+  const pad = n.style.padding ?? 10;
+  const dx = box.x + pad + Math.max(0, (box.w - pad * 2 - l.w) / 2);
+  const dy = box.y + box.h - pad - l.h;
+  const moveCell = (c: TierCell): TierCell => ({ ...c, x: c.x + dx, y: c.y + dy });
+  return {
+    ...l,
+    rows: l.rows.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy, cells: r.cells.map(moveCell) })),
+    pool: { ...l.pool, x: l.pool.x + dx, y: l.pool.y + dy, cells: l.pool.cells.map(moveCell) },
+  };
+}
+
 /**
  * Observable model:
  *   width(topic)  = width(text, wrapped) + paddingLeft + paddingRight + shapeAllowance
@@ -957,7 +1184,15 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
   const gal = g
     ? `${g.items.length}:${g.cellW ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}`
     : "";
-  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
+  // A tier list contributes its SHAPE: how many cards sit in each row (which
+  // decides how many lines that row wraps to), the pool's count, and the four
+  // size knobs. Which picture is on a card, and what its text says, move
+  // nothing — and including them would mint a cache entry per keystroke.
+  const t = s.tierList;
+  const tier = t
+    ? `${t.rows.map((r) => r.items.length).join(",")}|${t.pool.length}|${t.cellW ?? ""}:${t.aspect ?? ""}:${t.cols ?? ""}:${t.labelW ?? ""}`
+    : "";
+  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}|${tier}`;
 }
 
 /**
@@ -1058,7 +1293,11 @@ function measureTopicUncached(
   // separates each present block from the next but never appears when nothing
   // is on that side — text-only nodes keep their exact old height.
   const gallery = galleryExtent(n, resolveImage);
-  const galH = gallery?.h ?? 0;
+  const tier = tierListLayout(n, resolveImage);
+  // A gallery and a tier list are alternative bodies, but summing rather than
+  // choosing keeps the box correct for a node that somehow carries both
+  // instead of silently dropping one of them off the bottom.
+  const galH = (gallery?.h ?? 0) + (tier?.h ?? 0);
   let midH = topH + botH + galH;
   if (topH > 0 && (hasText || galH > 0 || botH > 0)) midH += IMAGE_GAP; // top image → next block
   if (hasText && (galH > 0 || botH > 0)) midH += IMAGE_GAP; // text → grid or bottom image
@@ -1078,7 +1317,7 @@ function measureTopicUncached(
   // (the side columns are already part of sidePadW). The grid's own width is
   // already capped — by MAX_GALLERY_W, or by an explicit style.width it was
   // told to wrap into — so this widens the box without unbounding it.
-  const maxTopBotW = Math.max(slots.top?.w ?? 0, slots.bottom?.w ?? 0, gallery?.w ?? 0);
+  const maxTopBotW = Math.max(slots.top?.w ?? 0, slots.bottom?.w ?? 0, gallery?.w ?? 0, tier?.w ?? 0);
   if (maxTopBotW > 0) w = Math.max(w, maxTopBotW + pad * 2 + sidePadW);
   // ... and it can never collapse below the minimum text width.
   w = Math.max(w, sidePadW + (24 + TEXT_INSET) + pad * 2);

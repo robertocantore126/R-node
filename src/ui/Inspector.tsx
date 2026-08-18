@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../editor/context";
 import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
 import { makeOp, type Op } from "../core/ops";
+import { runExportNodeImage } from "../editor/exportBridge";
 import { plainToRuns } from "../core/text";
-import { GALLERY_ASPECT, GALLERY_CELL_W, MAX_IMAGE_W } from "../layout/measure";
+import { GALLERY_ASPECT, GALLERY_CELL_W, MAX_IMAGE_W, TIER_CELL_W, TIER_COLS } from "../layout/measure";
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
@@ -189,6 +190,8 @@ export function Inspector(): JSX.Element {
         )}
       </div>
 
+      <TierListSection nodeId={node.id} />
+
       <GallerySection nodeId={node.id} />
 
       <div className="inspector-section">
@@ -275,6 +278,231 @@ function SheetControls(): JSX.Element {
       </div>
       <div className="muted count" data-help="Visible topics" data-help-more="How many topics the map contains (hidden/collapsed subtrees excluded).">Visible topics: {store.doc.visibleNodeCount}</div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tier list (T26)
+// ---------------------------------------------------------------------------
+
+/**
+ * The structure of a tier-list topic: its rank bands, and the cards waiting in
+ * the pool.
+ *
+ * Ranking happens on the CANVAS by dragging — that is the gesture the chart
+ * exists for and no panel should compete with it. This panel is for the things
+ * a drag cannot express: adding and deleting rows, reordering the ladder,
+ * renaming a rank, picking its colour, and getting cards into the pool in the
+ * first place.
+ */
+function TierListSection({ nodeId }: { nodeId: string }): JSX.Element {
+  const store = useStore();
+  const node = store.selectionNode;
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [draft, setDraft] = useState("");
+
+  const tier = node?.style.tierList;
+
+  const pick = async (list: FileList | null): Promise<void> => {
+    if (!list || list.length === 0) return;
+    setBusy(true);
+    setNote("");
+    const res = await store.addTierImageFiles(nodeId, Array.from(list), -1);
+    setBusy(false);
+    if (res.failed > 0) setNote(`${res.added} added, ${res.failed} refused${res.reason ? ` — ${res.reason}` : ""}`);
+    else if (res.added > 0) setNote(`${res.added} card${res.added === 1 ? "" : "s"} in the pool`);
+  };
+
+  if (!tier) {
+    return (
+      <div className="inspector-section">
+        <div
+          className="inspector-label"
+          data-help="Tier list"
+          data-help-more="Turns the topic into a ranked chart: coloured rank rows, plus a pool of cards not yet ranked. Drag cards between rows on the canvas."
+        >
+          Tier list
+        </div>
+        <p className="muted">Make this topic a tier list — ranked rows plus a pool of unranked cards.</p>
+        <button className="btn small" onClick={() => store.createTierList(nodeId)}>
+          Make a tier list
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="inspector-section">
+      <div
+        className="inspector-label"
+        data-help="Tier list"
+        data-help-more="Drag cards between rows on the canvas to rank them. This panel edits the rows themselves and fills the pool."
+      >
+        Tier list
+      </div>
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          void pick(e.target.files);
+          e.target.value = "";
+        }}
+      />
+
+      <ul className="gallery-list">
+        {tier.rows.map((row, i) => (
+          <TierRowControls key={row.id} nodeId={nodeId} index={i} last={i === tier.rows.length - 1} label={row.label} color={row.color} count={row.items.length} />
+        ))}
+      </ul>
+      <div className="field">
+        <button className="btn small" onClick={() => store.addTierRow(nodeId)}>
+          Add row
+        </button>
+        <span className="muted">{tier.rows.length} rank{tier.rows.length === 1 ? "" : "s"}</span>
+      </div>
+
+      <div className="inspector-label" style={{ marginTop: 10 }}>Pool</div>
+      <div className="field">
+        <button className="btn small" disabled={busy} onClick={() => fileRef.current?.click()}>
+          {busy ? "Adding…" : "Upload images…"}
+        </button>
+        <span className="muted">{tier.pool.length} waiting</span>
+      </div>
+      {note && <p className="muted">{note}</p>}
+      <div className="field">
+        <input
+          className="gallery-row-caption"
+          type="text"
+          value={draft}
+          placeholder="text card…"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && draft.trim()) {
+              store.addTierTextItem(nodeId, draft);
+              setDraft("");
+            }
+          }}
+          title="A card with no picture — type a name and press Enter"
+        />
+        <button
+          className="btn small"
+          disabled={!draft.trim()}
+          onClick={() => {
+            store.addTierTextItem(nodeId, draft);
+            setDraft("");
+          }}
+        >
+          Add
+        </button>
+      </div>
+
+      <div className="field">
+        <span>Card size</span>
+        <input
+          type="range"
+          min={24}
+          max={160}
+          step={4}
+          value={tier.cellW ?? TIER_CELL_W}
+          onChange={(e) => store.setTierLayout(nodeId, { cellW: Number(e.target.value) })}
+        />
+        <span className="muted">{tier.cellW ?? TIER_CELL_W}px</span>
+      </div>
+      <div className="field">
+        <span>Card shape</span>
+        <select
+          value={String(tier.aspect ?? GALLERY_ASPECT)}
+          onChange={(e) => store.setTierLayout(nodeId, { aspect: Number(e.target.value) })}
+        >
+          {CELL_SHAPES.map(([label, value]) => (
+            <option key={label} value={String(value)}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <span>Download</span>
+        <button className="btn small" onClick={() => runExportNodeImage(nodeId, "image/png")} title="This chart alone, as a PNG at 2x — no page chrome, no neighbouring topics">
+          PNG
+        </button>
+        <button className="btn small" onClick={() => runExportNodeImage(nodeId, "image/jpeg")} title="This chart alone, as a JPEG at 2x on the page background">
+          JPEG
+        </button>
+      </div>
+
+      <div className="field">
+        <span>Per row</span>
+        <input
+          type="number"
+          min={1}
+          max={40}
+          value={tier.cols ?? TIER_COLS}
+          onChange={(e) => store.setTierLayout(nodeId, { cols: Math.max(1, Number(e.target.value) || 1) })}
+          title="Cards before a row wraps — every row keeps the same width, so a full row grows taller"
+        />
+      </div>
+    </div>
+  );
+}
+
+/** One rank band: its label, its colour, its place in the ladder. */
+function TierRowControls({
+  nodeId,
+  index,
+  last,
+  label,
+  color,
+  count,
+}: {
+  nodeId: string;
+  index: number;
+  last: boolean;
+  label: string;
+  color: string;
+  count: number;
+}): JSX.Element {
+  const store = useStore();
+  const [text, setText] = useState(label);
+  useEffect(() => setText(label), [label, index]);
+
+  return (
+    <li className="gallery-row">
+      <input
+        type="color"
+        value={color}
+        onChange={(e) => store.setTierRow(nodeId, index, { color: e.target.value })}
+        title="Rank colour — it is content, not theming: S is red and D is green by convention"
+      />
+      <input
+        className="gallery-row-caption"
+        type="text"
+        value={text}
+        placeholder="rank"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => { if (text !== label) store.setTierRow(nodeId, index, { label: text }); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") setText(label);
+        }}
+      />
+      <span className="gallery-row-name" title={`${count} card${count === 1 ? "" : "s"}`}>{count}</span>
+      <button className="btn tiny" title="Move up" disabled={index === 0} onClick={() => store.moveTierRow(nodeId, index, index - 1)}>
+        ↑
+      </button>
+      <button className="btn tiny" title="Move down" disabled={last} onClick={() => store.moveTierRow(nodeId, index, index + 1)}>
+        ↓
+      </button>
+      <button className="btn tiny" title="Delete this rank — its cards go back to the pool" onClick={() => store.removeTierRow(nodeId, index)}>
+        ✕
+      </button>
+    </li>
   );
 }
 
