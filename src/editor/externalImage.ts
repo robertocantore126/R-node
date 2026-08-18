@@ -20,16 +20,34 @@ export function resolveFetcher(): FetchFn {
   return tauri ? tauriFetch : window.fetch.bind(window);
 }
 
-/** Every `image/*` entry in the dropped file list, in order. */
+/** Extensions that identify a typeless file as a picture — see isImageEntry. */
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
+
+/**
+ * An OS/browser file is an image when it SAYS so, or when its NAME says so.
+ *
+ * A cross-application drag — an image dragged from a web browser into this
+ * app — materializes as a temporary file with an EMPTY type: the platform
+ * writes the picture to disk and never bothers to label it. Files dragged
+ * from Explorer carry a real MIME type, which is why those always worked and
+ * browser drags looked broken. `text/uri-list` is no fallback here either —
+ * that format only exists WITHIN one browser, not across applications.
+ */
+function isImageEntry(f: File): boolean {
+  if (f.type.startsWith("image/")) return true;
+  return f.type === "" && IMAGE_EXT_RE.test(f.name ?? "");
+}
+
+/** Every image entry in the dropped file list, in order. */
 export function imageFiles(files: FileList | File[]): File[] {
   const out: File[] = [];
   for (const f of files) {
-    if (f.type.startsWith("image/")) out.push(f);
+    if (isImageEntry(f)) out.push(f);
   }
   return out;
 }
 
-/** First `image/*` entry in the dropped file list, or null. */
+/** First image entry in the dropped file list, or null. */
 export function firstImageFile(files: FileList | File[]): File | null {
   return imageFiles(files)[0] ?? null;
 }

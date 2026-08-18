@@ -26,6 +26,21 @@ export function isAllowedImageMime(mime: string): boolean {
   return IMAGE_MIME_ALLOWLIST.includes(mime);
 }
 
+/** Extension → MIME, for files whose type the platform forgot to set. */
+const EXT_TO_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
+/** The MIME a file NAME claims, or null when the extension is unknown. */
+export function mimeFromName(name: string): string | null {
+  const ext = name.toLowerCase().split(".").pop() ?? "";
+  return EXT_TO_MIME[ext] ?? null;
+}
+
 export type ImageSourceValidation = { ok: true } | { ok: false; reason: string };
 
 /** Reject unsupported formats and oversized files BEFORE any decoding. */
@@ -58,7 +73,7 @@ export interface ImportedImage {
  * Run the import in a Web Worker. Resolves with the three levels ready for
  * AssetStore.put; rejects with a message when the source is unusable.
  */
-export function importImageFile(file: Blob & { name?: string }): Promise<ImportedImage> {
+export function importImageFile(file: Blob & { name?: string }, mime = file.type): Promise<ImportedImage> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL("./imageImport.worker.ts", import.meta.url), { type: "module" });
     worker.onmessage = (e: MessageEvent) => {
@@ -71,6 +86,6 @@ export function importImageFile(file: Blob & { name?: string }): Promise<Importe
       worker.terminate();
       reject(new Error(e.message ?? "image import worker crashed"));
     };
-    worker.postMessage({ blob: file, mime: file.type, name: file.name });
+    worker.postMessage({ blob: file, mime, name: file.name });
   });
 }

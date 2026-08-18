@@ -4,6 +4,7 @@ import {
   IMAGE_MIME_ALLOWLIST,
   isAllowedImageMime,
   MAX_SOURCE_BYTES,
+  mimeFromName,
   validateImageSource,
 } from "../src/editor/imageImport";
 
@@ -30,6 +31,21 @@ describe("image source validation (T13-1)", () => {
       reason: `too large ${MAX_SOURCE_BYTES + 1} bytes`,
     });
     expect(validateImageSource("image/png", MAX_SOURCE_BYTES)).toEqual({ ok: true });
+  });
+});
+
+describe("mimeFromName (T13-1)", () => {
+  it("sniffs a MIME from a known image extension, case-insensitively", () => {
+    expect(mimeFromName("photo.png")).toBe("image/png");
+    expect(mimeFromName("PHOTO.JPG")).toBe("image/jpeg");
+    expect(mimeFromName("pic.jpeg")).toBe("image/jpeg");
+    expect(mimeFromName("anim.gif")).toBe("image/gif");
+    expect(mimeFromName("sticker.webp")).toBe("image/webp");
+  });
+
+  it("returns null for an unknown extension or no extension", () => {
+    expect(mimeFromName("archive.zip")).toBeNull();
+    expect(mimeFromName("noext")).toBeNull();
   });
 });
 

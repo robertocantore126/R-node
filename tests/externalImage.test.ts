@@ -15,6 +15,23 @@ describe("firstImageFile", () => {
     expect(firstImageFile([new File(["a"], "doc.pdf", { type: "application/pdf" })])).toBeNull();
     expect(firstImageFile([])).toBeNull();
   });
+
+  it("accepts a typeless file whose NAME says it is a picture — the cross-app browser drag", () => {
+    // A web browser dragged into the app materializes the image as a temp
+    // file with an EMPTY type; only the name identifies it. Explorer files
+    // carry a real type and are untouched by this.
+    const files = [
+      new File(["a"], "notes.txt", { type: "text/plain" }),
+      new File(["b"], "photo.png"), // no type at all
+      new File(["c"], "pic.jpg", { type: "image/jpeg" }),
+    ];
+    expect(firstImageFile(files)?.name).toBe("photo.png");
+  });
+
+  it("does not mistake a typeless non-image file for a picture", () => {
+    expect(firstImageFile([new File(["a"], "archive.zip")])).toBeNull();
+    expect(firstImageFile([new File(["a"], "notes.txt")])).toBeNull();
+  });
 });
 
 describe("firstUriFromList", () => {

@@ -26,7 +26,7 @@ import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode, type ZipPhase } from "./exportBridge";
-import { importImageFile, validateImageSource, type ImportedImage } from "./imageImport";
+import { importImageFile, mimeFromName, validateImageSource, type ImportedImage } from "./imageImport";
 import { viewSize } from "./view";
 
 declare global {
@@ -2583,18 +2583,22 @@ export class EditorStore {
   private async importToCard(
     file: Blob & { name?: string },
   ): Promise<{ ok: true; card: AttachmentInfo } | { ok: false; reason: string }> {
-    const v = validateImageSource(file.type, file.size);
+    // A cross-app drag (web browser → app) delivers the picture as a temp file
+    // with an EMPTY type — only the name says what it is. Sniff it before the
+    // allowlist, or every browser drag is refused as "unsupported mime".
+    const mime = file.type || mimeFromName(file.name ?? "") || "";
+    const v = validateImageSource(mime, file.size);
     if (!v.ok) {
       trace.ignored(
         "drop",
         v.reason.startsWith("unsupported") ? "unsupported mime" : "too large",
-        { mime: file.type, bytes: file.size }
+        { mime, bytes: file.size }
       );
       return { ok: false, reason: v.reason };
     }
     let imported: ImportedImage;
     try {
-      imported = await importImageFile(file);
+      imported = await importImageFile(file, mime);
     } catch (err) {
       trace.ignored("drop", "decode failed", { error: String(err) });
       return { ok: false, reason: String(err) };
