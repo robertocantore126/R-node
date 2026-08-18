@@ -7,6 +7,7 @@
  *  - SQLite via the Rust document engine: desktop (Tauri commands).
  */
 import type { RnodeDocument } from "../core/types";
+import { trace } from "../dev/trace";
 
 export interface StorageAdapter {
   readonly label: string;
@@ -93,6 +94,9 @@ export class LocalStorageAdapter implements StorageAdapter {
       const raw = localStorage.getItem(KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
+        // Tracer 2.0: the persistence boundary speaks — read + deserialize.
+        trace.mark("persist", "persist:load", { via: "localStorage", docs: Array.isArray(parsed) ? parsed.length : 0 });
+        trace.mark("data", "data:deserialize", { via: "localStorage" });
         if (!Array.isArray(parsed)) return [];
         return parsed.filter((d) => d && typeof d === "object" && Array.isArray(d.sheets));
       }
@@ -103,6 +107,7 @@ export class LocalStorageAdapter implements StorageAdapter {
       if (!Array.isArray(parsed)) return [];
       const docs = parsed.filter((d) => d && typeof d === "object" && Array.isArray(d.sheets));
       docs.forEach(migrateSample);
+      trace.mark("data", "data:migrate", { from: LEGACY_KEY, docs: docs.length });
       if (docs.length > 0) {
         try {
           localStorage.setItem(KEY, JSON.stringify(docs));
@@ -122,7 +127,13 @@ export class LocalStorageAdapter implements StorageAdapter {
 
   async save(docs: RnodeDocument[]): Promise<void> {
     try {
-      localStorage.setItem(KEY, JSON.stringify(docs));
+      const json = JSON.stringify(docs);
+      localStorage.setItem(KEY, json);
+      // Tracer 2.0: serialize + write + the persist boundary event that the
+      // gap detector resets on. The save IS the state→persist crossing.
+      trace.mark("data", "data:serialize", { via: "localStorage", chars: json.length });
+      trace.mark("data", "data:write", { via: "localStorage", docs: docs.length });
+      trace.mark("persist", "persist:save", { via: "localStorage", docs: docs.length });
     } catch (e) {
       console.error("localStorage save failed", e);
       throw e;
@@ -215,6 +226,7 @@ export class TauriStorageAdapter implements StorageAdapter {
   async readDocumentAt(path: string): Promise<RnodeDocument | null> {
     let text: string | null;
     try {
+      trace.mark("persist", "persist:read", { path });
       text = (await this.invoke("read_document", { path })) as string | null;
     } catch (e) {
       throw classifyTauriReadError(path, e);
@@ -250,6 +262,9 @@ export class TauriStorageAdapter implements StorageAdapter {
     const doc = docs[0];
     if (!doc) return;
     if (!this.root) throw new Error("TauriStorageAdapter: no document file chosen");
-    await this.invoke("write_document", { path: this.root, data: JSON.stringify(doc) });
+    const json = JSON.stringify(doc);
+    await this.invoke("write_document", { path: this.root, data: json });
+    // The persist boundary event the gap detector resets on (desktop side).
+    trace.mark("persist", "persist:save", { via: "document file (rust)", path: this.root, chars: json.length });
   }
 }

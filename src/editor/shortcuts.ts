@@ -6,6 +6,7 @@
  * inline, the editor overlay owns the keyboard and shortcuts are skipped.
  */
 import type { EditorStore } from "./store";
+import { trace } from "../dev/trace";
 
 export interface ShortcutProfile {
   [key: string]: string; // canonical combo -> action id
@@ -90,6 +91,10 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
 
   // Tab is special: never let it move focus out of the canvas.
   if (e.key === "Tab" || e.key === "Enter") e.preventDefault();
+
+  // Tracer 2.0 ui:keyboard-shortcut — every dispatched shortcut, at the one
+  // choke point every key passes through (tracer 2.0).
+  trace.applied("ui:shortcut", { combo, action });
 
   switch (action) {
     case "create-sibling":

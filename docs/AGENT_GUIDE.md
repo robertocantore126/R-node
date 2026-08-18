@@ -234,6 +234,26 @@ per il renderer: se salti qualcosa, conta quanto ne hai saltato.
 Il tracer è disattivato nelle build di produzione: ogni chiamata esce su un
 booleano. Istruzioni per catturare: [README](../README.md#reporting-a-bug).
 
+### Tracer 2.0: il contratto di copertura
+
+Dalla versione 2.0 ogni evento porta il **sottosistema** (`sub`: ui, cmd,
+state, persist, data, files, render, layout, async, err, rust) e la cattura
+aggiunge tre sezioni:
+
+- `coverage` — il TRACE COVERAGE CONTRACT, live: quali `area:item` sono stati
+  osservati e quali mai (es. `async:worker` resta non osservato: l'app non ha
+  worker — e ora la cattura lo dice);
+- `transitions` — la matrice dei passaggi fra sottosistemi (es. `ui->cmd`,
+  `cmd->state`): una catena che si interrompe è una transizione mancante;
+- `gaps.stateToPersist` — quante mutazioni di stato non hanno avuto seguito di
+  persistenza: la forma «State: node removed / Persistence: NO EVENT».
+
+Tre strati di strumentazione: chiamate esplicite (`trace.mark`/`trace.span`),
+strumentazione automatica (il wrapper di `__TAURI__.core.invoke`, il patch di
+`IDBObjectStore`, i listener DOM: focus, context menu, drag/drop, click) e
+derivazione dalla cronologia (transizioni e gap). Contratto completo e mappa
+evento→riga in [TRACER_COVERAGE.md](TRACER_COVERAGE.md).
+
 ---
 
 ## 5. Cosa NON fare (già fatto o inesistente)
