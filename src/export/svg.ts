@@ -29,12 +29,13 @@ import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
   FONT_STACK,
-  IMAGE_GAP,
+  GALLERY_CAPTION_SIZE,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
   bezierEnterRect,
   bezierExitRect,
   bezierSlice,
+  ellipsizeToWidth,
   imageResolver,
   measureNode,
   wrapRunLines,
@@ -250,11 +251,17 @@ function title(
 
   // Same placement as the canvas drawText: the middle column, between the
   // top/bottom images and the side ones.
-  const topBlock = (pos.slots.top?.h ?? 0) + (pos.slots.top ? IMAGE_GAP : 0);
-  const botBlock = pos.slots.bottom ? IMAGE_GAP + pos.slots.bottom.h : 0;
+  //
+  // Read from the INSETS, not by re-deriving the blocks from the slots. The
+  // two agreed exactly while images were the only thing that reserved space,
+  // which is why the duplicate survived; a gallery grid also reserves from the
+  // bottom, and only the insets know that. The canvas drawText already reads
+  // them for the same reason.
+  const topBlock = pos.insets.top;
+  const botBlock = pos.insets.bottom;
   const midH = topBlock + totalH + botBlock;
   const startY = p.y + pad + topBlock + Math.max(0, (p.h - pad * 2 - midH) / 2);
-  const startX = p.x + pad + (pos.slots.left ? pos.slots.left.w + IMAGE_GAP : 0);
+  const startX = p.x + pad + pos.insets.left;
 
   const baseWeight = n.style.fontWeight ?? 400;
   const nodeItalic = n.style.italic ?? false;
@@ -475,6 +482,36 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
         // (the layout already accounted for it) but would leave a silent hole.
         parts.push(`<rect x="${n3(it.x)}" y="${n3(it.y)}" width="${n3(it.size.w)}" height="${n3(it.size.h)}" fill="none" stroke="${esc(text)}" stroke-opacity="0.25" stroke-dasharray="4 3"/>`);
         imagesMissing++;
+      }
+    }
+    // Gallery cells (T25). "slice" is SVG's own cover: the picture scales to
+    // fill the cell and the overflow is clipped to the <image> viewport, which
+    // is exactly the centred square crop the canvas computes — expressed once,
+    // by the renderer that has it built in, instead of arithmetic that could
+    // drift from the canvas's.
+    for (const c of pos.cells) {
+      const uri = uris.get(c.id) ?? null;
+      if (uri) {
+        parts.push(
+          `<image x="${n3(c.x)}" y="${n3(c.y)}" width="${n3(c.w)}" height="${n3(c.h)}" href="${uri}" preserveAspectRatio="xMidYMid slice"/>`
+        );
+        images++;
+      } else {
+        parts.push(
+          `<rect x="${n3(c.x)}" y="${n3(c.y)}" width="${n3(c.w)}" height="${n3(c.h)}" fill="none" stroke="${esc(text)}" stroke-opacity="0.25" stroke-dasharray="4 3"/>`
+        );
+        imagesMissing++;
+      }
+      if (c.caption && c.captionH > 0) {
+        // Centred under the cell, on the caption band's own baseline. No
+        // wrapping and no runs: a caption is one plain line by construction,
+        // cut with the same ellipsis the canvas uses.
+        const label = ellipsizeToWidth(c.caption, c.w, (s) =>
+          opts.measurer.measure(s, { fontSize: GALLERY_CAPTION_SIZE, fontFamily: FONT_STACK }).width
+        );
+        parts.push(
+          `<text x="${n3(c.x + c.w / 2)}" y="${n3(c.captionY + GALLERY_CAPTION_SIZE)}" font-family="${esc(FONT_STACK)}" font-size="${n3(GALLERY_CAPTION_SIZE)}" fill="${esc(text)}" fill-opacity="0.7" text-anchor="middle">${esc(label)}</text>`
+        );
       }
     }
     parts.push(title(p, text, pos, opts.measurer));

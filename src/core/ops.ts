@@ -22,12 +22,25 @@ export function slotKey(slot: ImageSlot): "image" | "imageBottom" | "imageLeft" 
   return slot === "top" ? "image" : slot === "bottom" ? "imageBottom" : slot === "left" ? "imageLeft" : "imageRight";
 }
 
-/** All attachment ids currently referenced by a node's image slots. */
+/**
+ * Every attachment id a node references — the four edge slots AND the cells
+ * of a gallery topic (T25).
+ *
+ * The gallery half is not optional politeness. This function is what
+ * `referencedAssetIds` (persist/assets.ts) treats as the root set of the
+ * asset garbage collector: an id missing here is an id no node claims, and
+ * the GC deletes the bytes. It is also what the renderer uses to decide which
+ * decoded bitmaps may stay in the cache. Both failures are silent and both
+ * arrive long after the edit that caused them.
+ */
 export function nodeImageIds(n: MindNode): string[] {
   const out: string[] = [];
   for (const slot of ["top", "bottom", "left", "right"] as const) {
     const id = n.style[slotKey(slot)];
     if (id) out.push(id);
+  }
+  for (const item of n.style.gallery?.items ?? []) {
+    if (item.id) out.push(item.id);
   }
   return out;
 }

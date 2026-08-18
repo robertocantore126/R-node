@@ -61,12 +61,14 @@ import { nodeRuns } from "../core/text";
 import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
-  IMAGE_GAP,
+  FONT_STACK,
+  GALLERY_CAPTION_SIZE,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
   bezierEnterRect,
   bezierExitRect,
   bezierSlice,
+  ellipsizeToWidth,
   imageResolver,
   measureNode,
   positionedImageSlots,
@@ -360,7 +362,9 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   if (opts.jpegBytes) {
     const ids = new Set<string>();
     for (const p of placed) {
-      for (const it of positionedImageSlots(p, p.node, resolveImage).items) ids.add(it.id);
+      const pos = positionedImageSlots(p, p.node, resolveImage);
+      for (const it of pos.items) ids.add(it.id);
+      for (const c of pos.cells) ids.add(c.id);
     }
     for (const id of ids) {
       const jpg = await opts.jpegBytes(id);
@@ -430,11 +434,14 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
 
     let totalH = 0;
     for (const line of lines) totalH += (line.height ?? size * LINE_HEIGHT_FACTOR) + (line.gapPx ?? 0);
-    const topBlock = (pos.slots.top?.h ?? 0) + (pos.slots.top ? IMAGE_GAP : 0);
-    const botBlock = pos.slots.bottom ? IMAGE_GAP + pos.slots.bottom.h : 0;
+    // From the INSETS, not re-derived from the slots — same reason as the SVG
+    // export and the canvas: a gallery grid reserves from the bottom too, and
+    // only the insets account for it.
+    const topBlock = pos.insets.top;
+    const botBlock = pos.insets.bottom;
     const midH = topBlock + totalH + botBlock;
     const startY = p.y + padNode + topBlock + Math.max(0, (p.h - padNode * 2 - midH) / 2);
-    const startX = p.x + padNode + (pos.slots.left ? pos.slots.left.w + IMAGE_GAP : 0);
+    const startX = p.x + padNode + pos.insets.left;
 
     cmds.push("BT", `${rgb(color)} rg`);
     ops += 2;
@@ -465,8 +472,74 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     ops += 1;
   };
 
+  /**
+   * The captions under a gallery topic's cells (T25). Its own text run rather
+   * than part of drawTitle: the title is rich text laid out by `wrapRunLines`
+   * under the §3 contract, and a caption is a plain single line at a fixed
+   * size that must never be pulled into that machinery.
+   *
+   * Centred by measuring the string, because PDF has no text-anchor — the
+   * canvas gets `textAlign = "center"` and the SVG gets `text-anchor`, so this
+   * is the one painter that has to do the arithmetic itself.
+   */
+  const drawCaptions = (cmds: string[], p: Placed, color: string, fr: Frame): void => {
+    const pos = positionedImageSlots(p, p.node, resolveImage);
+    if (!pos.gallery || pos.gallery.captionH <= 0) return;
+    const measure = (s: string): number =>
+      opts.measurer.measure(s, { fontSize: GALLERY_CAPTION_SIZE, fontFamily: FONT_STACK }).width;
+    let opened = false;
+    for (const c of pos.cells) {
+      if (!c.caption) continue;
+      const label = ellipsizeToWidth(c.caption, c.w, measure);
+      if (!label) continue;
+      if (!opened) {
+        cmds.push("BT", `${rgb(color)} rg`);
+        ops += 2;
+        opened = true;
+      }
+      const pt = Math.max(0.01, GALLERY_CAPTION_SIZE * fr.s);
+      fontSizes.push(pt);
+      const x = c.x + (c.w - measure(label)) / 2;
+      cmds.push(
+        `/F1 ${f(pt)} Tf`,
+        `1 0 0 1 ${f(fr.X(x))} ${f(fr.Y(c.captionY + GALLERY_CAPTION_SIZE))} Tm`,
+        `(${pdfStr(label)}) Tj`,
+      );
+      ops += 3;
+    }
+    if (opened) {
+      cmds.push("ET");
+      ops += 1;
+    }
+  };
+
   const drawImages = (cmds: string[], p: Placed, fr: Frame): void => {
-    for (const it of positionedImageSlots(p, p.node, resolveImage).items) {
+    const pos = positionedImageSlots(p, p.node, resolveImage);
+
+    // Gallery cells (T25). PDF has no "cover", so it is spelled out: clip to
+    // the cell, then place the WHOLE picture oversized behind that window so
+    // the visible part is the centred square. The normalised crop gives both
+    // numbers directly — the full width is the cell divided by the fraction of
+    // the source on show, and the picture's edge sits that fraction back.
+    for (const c of pos.cells) {
+      const name = xobjByAsset.get(c.id);
+      if (!name || !c.crop) continue;
+      const fullW = c.w / c.crop.sw;
+      const fullH = c.h / c.crop.sh;
+      const imgX = c.x - c.crop.sx * fullW;
+      const imgTop = c.y - c.crop.sy * fullH;
+      cmds.push(
+        "q",
+        `${f(fr.X(c.x))} ${f(fr.Y(c.y + c.h))} ${f(c.w * fr.s)} ${f(c.h * fr.s)} re W n`,
+        `${f(fullW * fr.s)} 0 0 ${f(fullH * fr.s)} ${f(fr.X(imgX))} ${f(fr.Y(imgTop + fullH))} cm`,
+        `/${name} Do`,
+        "Q",
+      );
+      ops += 5;
+      images++;
+    }
+
+    for (const it of pos.items) {
       const name = xobjByAsset.get(it.id);
       if (!name) continue;
       // cm places the unit square: width 0 0 height x y_bottom.
@@ -599,6 +672,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       const colors = opts.colorOf(p.node.id);
       drawBox(cmds, p, colors?.fill ?? "#ffffff", fr);
       drawImages(cmds, p, fr);
+      drawCaptions(cmds, p, colors?.text ?? "#111111", fr);
       drawTitle(cmds, p, colors?.text ?? "#111111", fr);
     }
 

@@ -78,6 +78,29 @@ export interface ShapePart {
 /** Which of the four edges of a topic box an image is attached to. */
 export type ImageSlot = "top" | "bottom" | "left" | "right";
 
+/**
+ * One cell of a gallery topic (T25): an attachment id plus the caption drawn
+ * under it.
+ *
+ * The caption lives HERE and not on `AttachmentInfo` because that card is
+ * per-ASSET and an asset is content-addressed: the same picture dropped into
+ * two tiers is one card, so a caption stored there would rename both. The
+ * caption is a property of this image IN THIS NODE, which is exactly what a
+ * cell is.
+ *
+ * It is deliberately a plain string, not a `TextRun[]`. A rich caption would
+ * need the Lexical overlay to edit it, and that overlay is a second renderer
+ * over the same text — the §3 parity contract in full, for a label that is
+ * one short line. Captions are edited in the Inspector and painted by the
+ * canvas alone, so the parity contract never applies to them.
+ */
+export interface GalleryItem {
+  /** SHA-256 of the asset — the same id `Style.image` and the slots use. */
+  id: string;
+  /** Single-line label under the cell. Newlines are not meaningful here. */
+  caption?: string;
+}
+
 export interface Style {
   fill?: string;
   stroke?: string;
@@ -105,6 +128,38 @@ export interface Style {
   imageRight?: string;
   /** Display width of the image(s) in world units; height follows the aspect ratio. */
   imageWidth?: number;
+  /**
+   * Turns the topic into a GALLERY (T25): an ordered grid of captioned images
+   * filling the body under the title — a tier-list row, a mood board, a cast
+   * list. A presentation variant like `code` and `shapeParts`, deliberately
+   * not a `NodeType`: that enum drives topology and layout, and a grid of
+   * pictures inside one box changes neither.
+   *
+   * Why this is not "more image slots". `ImageSlot` names an EDGE of the box
+   * and there are four of them by construction; the count is the point, and
+   * every consumer — hit-test, drag & drop, the resize handle, the editing
+   * overlay's insets — is written against those four names. A gallery has no
+   * edge and no fixed count, so it is a different thing wearing the same
+   * word. The two compose: a gallery topic may still carry side images.
+   */
+  gallery?: {
+    /** Cells in paint order. An empty array is a gallery with no pictures yet. */
+    items: GalleryItem[];
+    /** Cell width in world units. Absent = GALLERY_CELL_W. */
+    cellW?: number;
+    /**
+     * Cell width ÷ height. Absent = GALLERY_ASPECT (square).
+     *
+     * EVERY cell gets this shape, whatever the pictures are: each is cropped
+     * to its centre to fill the box, never letterboxed and never stretched.
+     * That is the whole reason the grid reads as a grid — a tier row of
+     * portraits, screenshots and banners at their own aspect ratios is a
+     * ragged pile, and lining them up is what makes it a tier list.
+     */
+    aspect?: number;
+    /** Fixed column count. Absent or 0 = wrap to whatever the box allows. */
+    cols?: number;
+  };
   link?: string;
   /**
    * Marks the topic as a read-only code block (T22). The SOURCE lives in

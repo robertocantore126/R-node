@@ -16,7 +16,7 @@ import { History } from "../core/history";
 import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type AttachmentInfo, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
@@ -43,6 +43,21 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * The starting caption for a gallery cell: the file's name without its
+ * extension, tidied of the separators a download tends to leave behind
+ * ("wonder-woman_01.png" → "wonder woman 01").
+ *
+ * A guess, and openly one — it is a plain string in an editable field, not a
+ * derived value that would fight the user. A cell whose caption is cleared
+ * stays cleared: nothing re-derives this later.
+ */
+function captionFromFileName(name?: string): string | undefined {
+  if (!name) return undefined;
+  const stem = name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  return stem === "" ? undefined : stem;
 }
 
 export type PortableFormat = "json" | "zip";
@@ -357,6 +372,9 @@ export class EditorStore {
     this.opAbort?.abort();
     this.opAbort = new AbortController();
     this.state.op = { kind: "save", label, progress: 0, cancellable };
+    // Tracer 2.0: a heavy operation IS a state transaction — begin/end marks
+    // bracket it so a capture shows the whole transaction, not its pieces.
+    trace.mark("state", "state:transaction", { op: "begin", label });
     this.notify();
     return this.opAbort.signal;
   }
@@ -399,6 +417,7 @@ export class EditorStore {
   private endLongOp(): void {
     this.opAbort = null;
     this.state.op = null;
+    trace.mark("state", "state:transaction", { op: "end" });
     this.notify();
   }
 
@@ -406,6 +425,7 @@ export class EditorStore {
    *  rejects with an AbortError and reports "Save cancelled". */
   cancelLongOp(): void {
     this.opAbort?.abort();
+    trace.mark("async", "async:cancel", { what: "long-op" });
   }
 
   // -------------------------------------------------------------------------
@@ -448,6 +468,7 @@ export class EditorStore {
       // First run: start from the sample map. Nothing is persisted until the
       // user presses Save / Ctrl+S — the sample acts as an in-memory draft.
       this.model = new DocumentModel(DocumentModel.sample());
+      trace.mark("err", "err:recovery", { what: "init", reason: "first-run" });
     }
     this.normalizeBranchColors(this.model.sheet);
     this.state = this.makeState();
@@ -479,6 +500,15 @@ export class EditorStore {
     for (const op of ops) inverses.push(applyWithInverse(this.sheet, op));
     if (!opts?.skipHistory) this.history.push(ops, inverses);
     trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
+    // Tracer 2.0 state row: creation vs deletion vs plain mutation, derived
+    // from the op types so the contract is kept without naming ops twice.
+    const opTypes = ops.map((o) => o.type);
+    const stateWhat = opTypes.some((t) => t.startsWith("create"))
+      ? "state:created"
+      : opTypes.some((t) => t.startsWith("delete"))
+        ? "state:deleted"
+        : "state:mutated";
+    trace.mark("state", stateWhat, { types: opTypes.join(","), count: ops.length });
     // Before touch(), so a corrupt tree fails here instead of reaching the
     // renderer. Zero cost in production (T1).
     if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
@@ -488,6 +518,10 @@ export class EditorStore {
   undo(): void {
     const ops = this.history.undo();
     if (!ops) return;
+    trace.mark("ui", "ui:undo-redo", { action: "undo" });
+    // Undo mutates state without execOps, so the tracer marks it explicitly —
+    // otherwise the state→persist gap detector would not see it as a change.
+    trace.mark("state", "state:mutated", { types: ops.map((o) => o.type).join(","), via: "undo" });
     for (const op of ops) applyWithInverse(this.sheet, op);
     this.clearSelection();
     if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
@@ -497,6 +531,8 @@ export class EditorStore {
   redo(): void {
     const ops = this.history.redo();
     if (!ops) return;
+    trace.mark("ui", "ui:undo-redo", { action: "redo" });
+    trace.mark("state", "state:mutated", { types: ops.map((o) => o.type).join(","), via: "redo" });
     for (const op of ops) applyWithInverse(this.sheet, op);
     this.clearSelection();
     if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
@@ -507,6 +543,7 @@ export class EditorStore {
     this.model.doc.updatedAt = nowIso();
     this.scheduleLayout(false);
     this.state.sync = "dirty";
+    trace.mark("state", "state:sync", { status: "dirty" });
     this.notify();
   }
 
@@ -514,12 +551,36 @@ export class EditorStore {
   // Layout (derived data — never in history)
   // -------------------------------------------------------------------------
 
+  /** Run the layout with the tracer around it: start/end marks, the legacy
+   *  timing event, and a failure event instead of a silent half-applied tree
+   *  (tracer 2.0 layout row: start, end, node-calc, constraint, failure). */
+  private applyLayoutTraced(force: boolean, clearManual = false): void {
+    const nodes = Object.keys(this.sheet.nodes).length;
+    const manual = Object.values(this.sheet.nodes).filter((n) => n.position.manual).length;
+    trace.mark("layout", "layout:start", { nodes, manual });
+    trace.mark("layout", "layout:node-calc", { nodes });
+    trace.mark("layout", "layout:constraint", { force, manual });
+    const t = typeof performance !== "undefined" ? performance.now() : 0;
+    try {
+      applyLayout(this.sheet, force, this.measurer, clearManual);
+    } catch (e) {
+      trace.mark("layout", "layout:failure", { error: String(e) });
+      trace.error("layout", e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+    const ms = (typeof performance !== "undefined" ? performance.now() : 0) - t;
+    trace.layout(nodes, ms);
+    trace.mark("layout", "layout:end", { nodes, ms });
+  }
+
   private scheduleLayout(force: boolean, clearManual = false): void {
     if (this.layoutTimer) clearTimeout(this.layoutTimer);
+    trace.mark("layout", "layout:invalidate", { force });
     this.layoutTimer = setTimeout(() => {
-      const t = typeof performance !== "undefined" ? performance.now() : 0;
-      applyLayout(this.sheet, force, this.measurer, clearManual);
-      trace.layout(Object.keys(this.sheet.nodes).length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
+      // The debounce itself is an async:timeout — the layout is derived data
+      // recomputed on a timer, and the tracer says which timer fired.
+      trace.mark("async", "async:timeout", { what: "layout-debounce" });
+      this.applyLayoutTraced(force, clearManual);
       this.notify();
     }, 30);
   }
@@ -539,9 +600,7 @@ export class EditorStore {
     // common reflows arrive here, an untraced settle leaves a capture full of
     // ops with no layout behind them, and sends the next reader hunting for a
     // reflow that never went missing.
-    const t = typeof performance !== "undefined" ? performance.now() : 0;
-    applyLayout(this.sheet, false, this.measurer);
-    trace.layout(Object.keys(this.sheet.nodes).length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
+    this.applyLayoutTraced(false);
     this.notify();
   }
 
@@ -557,6 +616,7 @@ export class EditorStore {
    * plain download (current content) where the API is unavailable.
    */
   async saveNow(): Promise<void> {
+    trace.mark("async", "async:promise", { what: "save" });
     // A Ctrl+S pressed while the inline editor is open must save the text the
     // user is typing: commit the draft without closing the editor, so they
     // can keep going. The later blur/Enter commit finds the title up to date.
@@ -576,6 +636,7 @@ export class EditorStore {
       await this.performSave();
     } finally {
       this.saveInFlight = false;
+      trace.mark("async", "async:promise", { what: "save", done: true });
       if (this.saveQueued) {
         this.saveQueued = false;
         void this.saveNow(); // exactly one re-run, with the content of THAT moment
@@ -633,6 +694,7 @@ export class EditorStore {
           this.endLongOp();
         }
         this.state.sync = "saved";
+        trace.mark("state", "state:sync", { status: "saved", via: this.adapter.label });
         this.toast(
           this.lastSaveSkipped > 0
             ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be copied (missing from the source file)`
@@ -648,6 +710,7 @@ export class EditorStore {
         ? await this.writePortableZip()
         : await this.writePortableFile(JSON.stringify(this.model.doc, null, 2));
       this.state.sync = "saved";
+      trace.mark("state", "state:sync", { status: "saved", via: this.adapter.label });
       this.toast(fileWritten ? "Saved" : "Saved locally (no file chosen)");
     } catch (e) {
       this.state.sync = "dirty";
@@ -655,6 +718,7 @@ export class EditorStore {
         // The user cancelled the running heavy save: a queued re-run would
         // redo exactly the work they stopped, so the queue is dropped too.
         this.saveQueued = false;
+        trace.mark("async", "async:cancel", { what: "save", reason: "abort" });
         this.toast("Save cancelled");
       } else {
         this.toast("Save failed — check storage");
@@ -785,8 +849,10 @@ export class EditorStore {
     if (target.toLowerCase() === current.toLowerCase()) return;
     try {
       await window.__TAURI__.core.invoke("rename_document", { from: current, to: target });
+      trace.mark("files", "files:rename", { from: current, to: target });
     } catch (e) {
       trace.error("rename", String(e));
+      trace.mark("files", "files:failure", { op: "rename", error: String(e) });
       this.toast(`Could not rename the file to "${base}.rnode" — it is still "${titleFromDocPath(current)}.rnode"`);
       return;
     }
@@ -809,6 +875,7 @@ export class EditorStore {
   async openDesktop(): Promise<boolean> {
     const file = await this.pickDesktopFile("open");
     if (!file) return false;
+    trace.mark("files", "files:open", { path: file });
     const assetStore = getAssetStore();
     if (!(assetStore instanceof TauriAssetStore) || !(this.adapter instanceof TauriStorageAdapter)) {
       return false;
@@ -894,6 +961,7 @@ export class EditorStore {
         const writable = await handle.createWritable();
         await writable.write(blob);
         await writable.close();
+        trace.mark("files", "files:write", { format, bytes: blob.size, via: "stored-handle" });
         return true;
       } catch {
         // Handle stale (file moved/deleted) → drop it and ask again.
@@ -922,6 +990,7 @@ export class EditorStore {
         await writable.close();
         this.fileHandles.set(key, picked);
         await this.storeFileHandle(key, picked);
+        trace.mark("files", "files:write", { format, bytes: blob.size, via: "picker" });
         return true;
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return false;
@@ -931,6 +1000,8 @@ export class EditorStore {
 
     // 3) Fallback: download the file with the CURRENT content.
     this.download(blob, fileName);
+    trace.mark("err", "err:fallback", { what: "portable-save", format, bytes: blob.size });
+    trace.mark("files", "files:write", { format, bytes: blob.size, via: "download" });
     return true;
   }
 
@@ -1005,6 +1076,8 @@ export class EditorStore {
         : `Exporting .rnode.zip (~${est})…`
     );
     const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, mode);
+    trace.mark("data", "data:serialize", { format: "zip", mode, bytes: bytes.length });
+    trace.mark("data", "data:export", { format: "zip", mode });
     this.download(new Blob([bytes.slice().buffer], { type: "application/zip" }), this.docZipName());
   }
 
@@ -1085,6 +1158,7 @@ export class EditorStore {
       input.click();
     });
     if (!file) return;
+    trace.mark("files", "files:open", { name: file.name, bytes: file.size });
     try {
       const buf = await file.arrayBuffer();
       const head = new Uint8Array(buf, 0, 4);
@@ -1117,6 +1191,7 @@ export class EditorStore {
     let raw: unknown;
     try {
       raw = JSON.parse(text);
+      trace.mark("data", "data:deserialize", { chars: text.length });
     } catch {
       return null;
     }
@@ -1125,6 +1200,7 @@ export class EditorStore {
     const existing = this.state.docs.findIndex((d) => d.documentId === doc.documentId);
     if (existing >= 0) this.state.docs[existing] = doc;
     else this.state.docs = [...this.state.docs, doc];
+    trace.mark("data", "data:import", { docId: doc.documentId, nodes: Object.keys(doc.sheets[0].nodes).length });
     this.switchToDoc(doc.documentId);
     this.state.sync = "dirty"; // loaded from disk — not yet in app storage
     this.normalizeBranchColors(this.sheet);
@@ -1243,6 +1319,7 @@ export class EditorStore {
     } else {
       sel = [id];
     }
+    trace.mark("ui", "ui:selection", { count: sel.length, additive });
     this.state.selection = sel;
     this.state.editingId = null;
     this.state.pendingInsert = null;
@@ -1267,6 +1344,7 @@ export class EditorStore {
     } else {
       this.state.selection = [...ids];
     }
+    trace.mark("ui", "ui:selection", { count: this.state.selection.length, additive: !!opts?.additive });
     this.state.editingId = null;
     this.state.relSel = null;
     this.state.groupSel = null;
@@ -1286,6 +1364,7 @@ export class EditorStore {
       !this.state.imageSel
     )
       return;
+    trace.mark("ui", "ui:selection", { count: 0 });
     this.state.selection = [];
     this.state.editingId = null;
     this.state.relSel = null;
@@ -1301,6 +1380,7 @@ export class EditorStore {
    *  other selection). */
   selectImage(nodeId: string, slot: ImageSlot = "top"): void {
     this.commitDraftOnLeave();
+    trace.mark("ui", "ui:selection", { image: true, slot });
     this.state.selection = [];
     this.state.editingId = null;
     this.state.pendingInsert = null;
@@ -1459,6 +1539,7 @@ export class EditorStore {
       listItems: runs ? runs.filter((r) => r.listIndent !== undefined).length : -1,
       plainLen: runs ? runsToPlain(runs).length : -1,
     });
+    trace.mark("ui", "ui:input-change", { nodeId: id ?? null, chars: runs ? runsToPlain(runs).length : 0 });
     const original = this.editOriginal;
     this.state.editingId = null;
     this.editingDraftRuns = null;
@@ -2445,6 +2526,22 @@ export class EditorStore {
    * rejection says why (rule §4bis of AGENT_GUIDE).
    */
   async attachImageFile(nodeId: string, file: Blob & { name?: string }, position: ImageSlot = "top"): Promise<{ ok: boolean; reason?: string }> {
+    const res = await this.importToCard(file);
+    if (!res.ok) return { ok: false, reason: res.reason };
+    this.attachImage(nodeId, res.card, position);
+    trace.applied("drop:image", { bytes: res.card.bytes, w: res.card.w, h: res.card.h });
+    return { ok: true };
+  }
+
+  /**
+   * Validate, import and store one file, yielding its metadata card — the half
+   * of the attach flow that is the same wherever the id ends up. The edge slots
+   * and the gallery differ only in where they WRITE that id, and the import is
+   * the expensive, failure-prone part worth having in one place.
+   */
+  private async importToCard(
+    file: Blob & { name?: string },
+  ): Promise<{ ok: true; card: AttachmentInfo } | { ok: false; reason: string }> {
     const v = validateImageSource(file.type, file.size);
     if (!v.ok) {
       trace.ignored(
@@ -2463,9 +2560,9 @@ export class EditorStore {
     }
     const assetStore = getAssetStore();
     const id = await assetStore.put(imported.levels, imported.meta);
-    this.attachImage(
-      nodeId,
-      {
+    return {
+      ok: true,
+      card: {
         id,
         mime: imported.meta.mime,
         w: imported.meta.w,
@@ -2473,10 +2570,223 @@ export class EditorStore {
         bytes: imported.meta.bytes,
         name: imported.meta.name,
       },
-      position
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Gallery topics (T25)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Every gallery edit funnels through here, and every one of them is a plain
+   * `setStyle`.
+   *
+   * That is a decision, not laziness about op design. `setStyle` already
+   * carries `prev`, so it inverts itself with no help (I7) and the whole
+   * history machinery covers gallery edits the day they exist. A dedicated
+   * `setGalleryItems` op would have to re-derive exactly that, and would then
+   * be a second way to write `node.style` that undo has to be kept in step
+   * with forever.
+   *
+   * An empty gallery drops the field rather than storing `{ items: [] }`: "no
+   * gallery" and "a gallery of nothing" must not be two states, or
+   * `galleryExtent` grows a case and every document that ever held a picture
+   * carries the ghost of one.
+   */
+  private putGallery(nodeId: string, items: GalleryItem[], cellW?: number, cols?: number, aspect?: number): void {
+    this.setNodeStyle(nodeId, { gallery: items.length > 0 ? { items, cellW, cols, aspect } : undefined });
+    // Same reason as setNodeImage: the grid changes the box, and without this
+    // the pictures appear and the topic grows around them a frame later.
+    this.settleLayoutNow();
+  }
+
+  /** A mutable copy of the node's cells, or an empty list. */
+  private galleryItems(nodeId: string): GalleryItem[] {
+    return (this.model.node(nodeId)?.style.gallery?.items ?? []).map((it) => ({ ...it }));
+  }
+
+  /**
+   * Import files and append them as cells, captioned with their file names.
+   *
+   * The default caption is the feature, not a flourish: a tier list of forty
+   * faces is unreadable without names, and the name is already in the file. It
+   * is a starting value like any other — clearing the field in the Inspector
+   * leaves that cell captionless, and when NO cell has one the grid reclaims
+   * the whole caption band.
+   */
+  async addGalleryImageFiles(
+    nodeId: string,
+    files: (Blob & { name?: string })[],
+  ): Promise<{ added: number; failed: number; reason?: string }> {
+    if (!this.model.node(nodeId)) return { added: 0, failed: 0 };
+    const items = this.galleryItems(nodeId);
+    let added = 0;
+    let failed = 0;
+    let reason: string | undefined;
+    for (const file of files) {
+      const res = await this.importToCard(file);
+      if (!res.ok) {
+        failed++;
+        if (reason === undefined) reason = res.reason;
+        continue;
+      }
+      // The card is shared and content-addressed: the same picture in two
+      // cells (or in a slot and a cell) is one entry here and one blob.
+      if (!this.sheet.attachments.some((a) => a.id === res.card.id)) {
+        this.sheet.attachments.push({ ...res.card });
+      }
+      items.push({ id: res.card.id, caption: captionFromFileName(res.card.name) });
+      added++;
+    }
+    if (added > 0) {
+      const g = this.model.node(nodeId)?.style.gallery;
+      this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
+      trace.applied("gallery:add", { added, failed });
+    }
+    this.notify();
+    return { added, failed, reason };
+  }
+
+  /** Retitle one cell. An empty string removes the caption. */
+  setGalleryCaption(nodeId: string, index: number, caption: string): void {
+    const items = this.galleryItems(nodeId);
+    if (index < 0 || index >= items.length) return;
+    const next = caption.trim();
+    if ((items[index].caption ?? "") === next) return;
+    items[index] = next ? { id: items[index].id, caption: next } : { id: items[index].id };
+    const g = this.model.node(nodeId)?.style.gallery;
+    this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
+    this.notify();
+  }
+
+  /**
+   * Drop one cell. The attachment CARD stays: the picture may sit in another
+   * cell or another topic, and `gcOrphans` is the collector — the same rule
+   * `deleteSelectedImage` follows for the edge slots.
+   */
+  removeGalleryItem(nodeId: string, index: number): void {
+    const items = this.galleryItems(nodeId);
+    if (index < 0 || index >= items.length) return;
+    items.splice(index, 1);
+    const g = this.model.node(nodeId)?.style.gallery;
+    this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
+    this.notify();
+  }
+
+  /** Reorder a cell — the grid is an ordered list, and a tier list is an order. */
+  moveGalleryItem(nodeId: string, from: number, to: number): void {
+    const items = this.galleryItems(nodeId);
+    if (from < 0 || from >= items.length) return;
+    const dest = Math.max(0, Math.min(items.length - 1, to));
+    if (dest === from) return;
+    const [moved] = items.splice(from, 1);
+    items.splice(dest, 0, moved);
+    const g = this.model.node(nodeId)?.style.gallery;
+    this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
+    this.notify();
+  }
+
+  /**
+   * Move a cell to a position in a gallery — the same tier or another one.
+   *
+   * This is the gesture the feature exists for: a tier list is built by
+   * dragging a face from "Nerfed" up to "Buffed", and by shuffling the order
+   * inside a row. Both are this one method, because to the document they are
+   * the same edit — the target happens to be the source.
+   *
+   * Cross-node moves emit BOTH style writes in ONE batch, so a single Ctrl+Z
+   * puts the picture back where it came from. Two separate calls would leave
+   * an undo that removes it from the destination and strands it nowhere,
+   * which is the trap `assignImageToNode` already documents for the slots.
+   *
+   * A target with no gallery yet grows one holding just this cell. Dropping a
+   * face onto a plain topic to start a new tier is worth more than the
+   * protection of refusing it, and it is one undo away.
+   */
+  moveGalleryCellTo(fromNodeId: string, fromIndex: number, toNodeId: string, toIndex: number): void {
+    const from = this.model.node(fromNodeId);
+    const to = this.model.node(toNodeId);
+    if (!from || !to) return;
+    const fromItems = this.galleryItems(fromNodeId);
+    if (fromIndex < 0 || fromIndex >= fromItems.length) return;
+
+    if (fromNodeId === toNodeId) {
+      // Same row: the insertion index counts the gaps BEFORE the removal, so
+      // a move to the right shifts down by one once the cell is lifted out.
+      const dest = Math.max(0, Math.min(fromItems.length, toIndex)) - (toIndex > fromIndex ? 1 : 0);
+      this.moveGalleryItem(fromNodeId, fromIndex, dest);
+      return;
+    }
+
+    const [moved] = fromItems.splice(fromIndex, 1);
+    const toItems = this.galleryItems(toNodeId);
+    toItems.splice(Math.max(0, Math.min(toItems.length, toIndex)), 0, moved);
+
+    const fromGal = from.style.gallery;
+    const toGal = to.style.gallery;
+    const styleFor = (
+      items: GalleryItem[],
+      gal: { cellW?: number; cols?: number; aspect?: number } | undefined,
+      base: Style,
+    ): Style => ({
+      ...base,
+      gallery: items.length > 0 ? { items, cellW: gal?.cellW, cols: gal?.cols, aspect: gal?.aspect } : undefined,
+    });
+
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: fromNodeId,
+        style: styleFor(fromItems, fromGal, from.style),
+        prev: from.style,
+      }),
+      makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: toNodeId,
+        // The destination's own cell size and columns win: a picture moved
+        // into a row takes on that row's shape, which is what "put it in this
+        // tier" means. Carrying the source's would resize the tier instead.
+        style: styleFor(toItems, toGal, to.style),
+        prev: to.style,
+      }),
+    ]);
+    this.settleLayoutNow();
+    trace.applied("gallery:move", { from: fromNodeId, to: toNodeId, fromIndex, toIndex });
+    this.notify();
+  }
+
+  /**
+   * Import files straight into a gallery at a given position — the external
+   * drop onto a tier row. `at` is an insertion index; past the end (or
+   * omitted) appends.
+   */
+  async addGalleryImageFilesAt(
+    nodeId: string,
+    files: (Blob & { name?: string })[],
+    at?: number,
+  ): Promise<{ added: number; failed: number; reason?: string }> {
+    const before = this.galleryItems(nodeId).length;
+    const res = await this.addGalleryImageFiles(nodeId, files);
+    if (res.added > 0 && at !== undefined && at < before) {
+      // addGalleryImageFiles appends; slide the new run into place as a second
+      // edit rather than duplicating the import path for one index.
+      for (let k = 0; k < res.added; k++) {
+        this.moveGalleryItem(nodeId, before + k, Math.min(at + k, before + k));
+      }
+    }
+    return res;
+  }
+
+  /** Cell size, column count and cell shape — the knobs that reshape the grid. */
+  setGalleryLayout(nodeId: string, patch: { cellW?: number; cols?: number; aspect?: number }): void {
+    const g = this.model.node(nodeId)?.style.gallery;
+    if (!g) return;
+    this.putGallery(
+      nodeId,
+      g.items.map((it) => ({ ...it })),
+      "cellW" in patch ? patch.cellW : g.cellW,
+      "cols" in patch ? patch.cols : g.cols,
+      "aspect" in patch ? patch.aspect : g.aspect,
     );
-    trace.applied("drop:image", { bytes: imported.meta.bytes, w: imported.meta.w, h: imported.meta.h });
-    return { ok: true };
+    this.notify();
   }
 
   /**
@@ -3385,6 +3695,7 @@ export class EditorStore {
 
   togglePalette(): void {
     this.state.showPalette = !this.state.showPalette;
+    trace.mark("ui", "ui:modal", { open: this.state.showPalette });
     this.notify();
   }
 
@@ -3577,6 +3888,8 @@ export class EditorStore {
 
   exportJson(): void {
     const json = JSON.stringify(this.model.doc, null, 2);
+    trace.mark("data", "data:serialize", { format: "json", chars: json.length });
+    trace.mark("data", "data:export", { format: "json" });
     const blob = new Blob([json], { type: "application/json" });
     this.download(blob, this.docFileName());
     this.toast("Document exported as JSON");

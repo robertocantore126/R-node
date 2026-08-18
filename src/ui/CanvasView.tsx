@@ -11,7 +11,7 @@ import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
+import { createCanvasTextMeasurer, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
@@ -100,6 +100,10 @@ interface DragState {
   imgSlot: ImageSlot;
   /** The side the drop will target ("top" while not over a node). */
   imgDropSlot: ImageSlot;
+  /** Gallery cell move (T25): which cell of which topic is in hand. */
+  cellDragFrom: { nodeId: string; index: number } | null;
+  /** Where it would land: topic and insertion index (a gap, not a cell). */
+  cellDropTo: { nodeId: string; index: number } | null;
   /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
   marqueeStartX: number | null;
   marqueeStartY: number | null;
@@ -153,6 +157,8 @@ export function CanvasView(): JSX.Element {
     imgDragging: null,
     imgSlot: "top",
     imgDropSlot: "top",
+    cellDragFrom: null,
+    cellDropTo: null,
     marqueeStartX: null,
     marqueeStartY: null,
     marqueeActive: false,
@@ -195,6 +201,8 @@ export function CanvasView(): JSX.Element {
   // Side of the target node the external drag is hovering (for the snapped
   // ghost preview and the drop). null = not over a node.
   const extDropSideRef = useRef<ImageSlot | null>(null);
+  /** Live insertion caret for a gallery cell drag (T25) — see RenderState. */
+  const galleryDropRef = useRef<{ nodeId: string; index: number } | null>(null);
   const [extGhostSrc, setExtGhostSrc] = useState<string | null>(null);
 
   const paint = useCallback(() => {
@@ -220,6 +228,7 @@ export function CanvasView(): JSX.Element {
       imageSel: s.imageSel,
       imageSlot: s.imageSlot,
       ghostImage: ghostRef.current,
+      galleryDrop: galleryDropRef.current,
       marqueeSel: marqueeSelRef.current,
     };
     renderer.render(rs);
@@ -631,6 +640,24 @@ export function CanvasView(): JSX.Element {
     // moves it onto another node. Skipped while picking a relationship
     // target, like the resize handles. The exact SLOT is remembered so the
     // move removes the right one and the ring marks the right one.
+    // Gallery cell hit (T25), before the slot and body tests: a cell lives
+    // INSIDE its topic's box, so the most specific target has to be asked
+    // first or the topic answers for it. A drag moves the picture to another
+    // tier or to another place in this one; a plain click does nothing but
+    // select the topic, so a mis-grab costs nothing.
+    const cellHit = s.relFrom ? null : renderer.hitTestGalleryCell(rs, world.x, world.y);
+    if (cellHit) {
+      drag.grabOffsetX = world.x - cellHit.rect.x;
+      drag.grabOffsetY = world.y - cellHit.rect.y;
+      drag.cellDragFrom = { nodeId: cellHit.nodeId, index: cellHit.index };
+      drag.cellDropTo = null;
+      drag.dragging = null;
+      drag.marqueeStartX = null;
+      store.select(cellHit.nodeId, { additive: false });
+      trace.applied("pointerdown:gallery-cell", { id: cellHit.nodeId, index: cellHit.index, wasEditing });
+      return;
+    }
+
     const imgHit = s.relFrom ? null : renderer.hitTestImageSlot(rs, world.x, world.y);
     if (imgHit) {
       drag.grabOffsetX = world.x - imgHit.rect.x;
@@ -796,6 +823,31 @@ export function CanvasView(): JSX.Element {
     // target. Threshold before feedback, same as node dragging. The ghost
     // preview follows the cursor (set BEFORE setDrop — the store change
     // repaints synchronously and must already see it).
+    // A gallery cell in flight: the ghost follows the cursor and the caret
+    // marks the gap it would drop into. The target may be ANY topic — moving a
+    // face from one tier to another is the same gesture as reordering inside
+    // one, so both are resolved here and the store is told once, on release.
+    if (drag.cellDragFrom) {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const rs = currentRenderState();
+      const src = store.doc.node(drag.cellDragFrom.nodeId);
+      const imageId = src?.style.gallery?.items[drag.cellDragFrom.index]?.id ?? null;
+      const hit = rendererRef.current!.hitTest(rs, world.x, world.y);
+      if (hit) {
+        const rects = rendererRef.current!.galleryCellRects(rs, hit);
+        drag.cellDropTo = { nodeId: hit, index: galleryInsertIndex(rects, world.x, world.y) };
+        galleryDropRef.current = drag.cellDropTo;
+      } else {
+        drag.cellDropTo = null;
+        galleryDropRef.current = null;
+      }
+      ghostRef.current = imageId ? { imageId, x: world.x, y: world.y, nodeId: drag.cellDragFrom.nodeId } : null;
+      schedule();
+      return;
+    }
     if (drag.imgDragging) {
       if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
       drag.moved = true;
@@ -924,6 +976,21 @@ export function CanvasView(): JSX.Element {
       drag.panning = false;
       drag.dragging = null;
       setPanning(false);
+      return;
+    }
+    // Gallery cell dropped (T25). A plain click never moves anything: the
+    // threshold in pointermove is what separates "grabbed it" from "clicked
+    // near it", exactly as for the slot images.
+    if (drag.cellDragFrom) {
+      const from = drag.cellDragFrom;
+      const to = drag.cellDropTo;
+      if (drag.moved && to) store.moveGalleryCellTo(from.nodeId, from.index, to.nodeId, to.index);
+      drag.cellDragFrom = null;
+      drag.cellDropTo = null;
+      drag.moved = false;
+      galleryDropRef.current = null;
+      ghostRef.current = null;
+      schedule();
       return;
     }
     // Image move dropped: assign the image to the highlighted node. A plain
@@ -1100,6 +1167,7 @@ export function CanvasView(): JSX.Element {
       imageSel: s.imageSel,
       imageSlot: s.imageSlot,
       ghostImage: ghostRef.current,
+      galleryDrop: galleryDropRef.current,
       marqueeSel: marqueeSelRef.current,
     };
   };
@@ -1307,6 +1375,17 @@ export function CanvasView(): JSX.Element {
               store.toast("Could not load the image from its URL");
               return;
             }
+          }
+          // A topic that already IS a gallery takes the file into its grid, at
+          // the gap under the cursor — dropping a face onto a tier row means
+          // "add it to this tier", not "hang it off the side of the row".
+          // Topics without a grid keep the original slot behaviour untouched.
+          if (store.doc.node(target)?.style.gallery) {
+            const rects = rendererRef.current?.galleryCellRects(currentRenderState(), target) ?? [];
+            const at = galleryInsertIndex(rects, world.x, world.y);
+            const res = await store.addGalleryImageFilesAt(target, [file], at);
+            if (res.added === 0) store.toast(res.reason ?? "Could not import image");
+            return;
           }
           const res = await store.attachImageFile(target, file, side);
           if (!res.ok) store.toast(res.reason ?? "Could not import image");

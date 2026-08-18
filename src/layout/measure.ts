@@ -129,6 +129,29 @@ export const MAX_IMAGE_W = 240;
 export const IMAGE_GAP = 6;
 
 /**
+ * Gallery topics (T25). Shared by the measure, the canvas renderer, the SVG
+ * and the PDF export (I9) — four readers, so a hand-copied number here is the
+ * classic way an exported tier list stops matching the one on screen.
+ */
+/**
+ * Cell width when `Style.gallery.cellW` says nothing — a small PREVIEW, not a
+ * thumbnail: a face has to be recognisable at a normal zoom or the grid is a
+ * row of coloured squares.
+ */
+export const GALLERY_CELL_W = 96;
+/** Cell width ÷ height when `Style.gallery.aspect` says nothing: square. */
+export const GALLERY_ASPECT = 1;
+/** Gap between cells, horizontally and vertically. */
+export const GALLERY_GAP = 4;
+/** Font size of a cell caption. Fixed: a caption is chrome, not node text. */
+export const GALLERY_CAPTION_SIZE = 9;
+/** Gap between the bottom of a cell's picture and its caption's line box. */
+export const GALLERY_CAPTION_GAP = 2;
+/** Ceiling for a gallery's width, mirroring MAX_CODE_W's reason: a 40-image
+ *  row must wrap rather than mint a box wider than any screen. */
+export const MAX_GALLERY_W = 720;
+
+/**
  * Width of the bullet column, in em of the list item's font size. Shared with
  * the overlay as `--rnode-bullet-w`: the canvas indents the text by exactly
  * this and the CSS hangs the item by exactly this, so a wrapped list item
@@ -597,6 +620,198 @@ export interface PositionedSlot {
   y: number;
 }
 
+// ---------------------------------------------------------------------------
+// Gallery topics (T25)
+// ---------------------------------------------------------------------------
+
+/** The grid's shape, derived from the node alone — see `galleryExtent`. */
+export interface GalleryExtent {
+  /** Extent of the whole grid, captions included. */
+  w: number;
+  h: number;
+  /** Width of one picture. */
+  cellW: number;
+  /** Height of one picture — `cellW / aspect`, the same for every cell. */
+  cellPicH: number;
+  /** Picture plus caption band: the pitch of a row, gap excluded. */
+  cellH: number;
+  cols: number;
+  rows: number;
+  /** Band reserved under every picture for its caption; 0 when none has one. */
+  captionH: number;
+  count: number;
+}
+
+/** One placed cell: where its picture goes and which part of it is shown. */
+export interface GalleryCell {
+  id: string;
+  /** Trimmed caption; "" when this cell has none. */
+  caption: string;
+  /** The picture's rect — square, `cellW` on a side. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /**
+   * The centred part of the source that fills the cell ("cover"), in
+   * NORMALISED 0..1 units of the original. Normalised rather than in pixels
+   * because the canvas never holds the original: it holds a bitmap decoded at
+   * whatever bucket the zoom asked for, and a fraction multiplies onto that
+   * bitmap's own dimensions with nothing to look up. Null when the asset card
+   * is missing — the signal to draw the dashed placeholder instead.
+   */
+  crop: { sx: number; sy: number; sw: number; sh: number } | null;
+  /** Baseline-independent rect of the caption band under the picture. */
+  captionY: number;
+  captionH: number;
+}
+
+/**
+ * Clip a caption to `maxW`, ending it with an ellipsis when it does not fit.
+ *
+ * Shared by the canvas, the SVG export and the PDF export (I9). The obvious
+ * alternative in SVG — `textLength` with `lengthAdjust` — is not the same
+ * picture: it squeezes a long caption into the cell instead of cutting it, and
+ * it stretches a SHORT one out to the full width, so the three painters would
+ * show three different labels for one document.
+ *
+ * Binary search over the prefix, not a character walk: a 60-character caption
+ * measured one prefix at a time is 60 measurements per cell per frame, and a
+ * tier list is forty cells.
+ */
+export function ellipsizeToWidth(text: string, maxW: number, measure: (s: string) => number): string {
+  if (text === "" || measure(text) <= maxW) return text;
+  const ell = "…";
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (measure(text.slice(0, mid) + ell) <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? text.slice(0, lo) + ell : ell;
+}
+
+/**
+ * The centred part of a source that fills a box of ratio `targetAspect`
+ * (width ÷ height), in normalised 0..1 units — "cover", the rule that lets a
+ * grid of mismatched pictures line up.
+ *
+ * The alternative, letterboxing each picture inside its cell, keeps every
+ * pixel but gives every cell a different amount of empty space around it, so
+ * the row stops reading as a row. Cropping loses the edges of the frame and
+ * keeps the alignment, which is the trade a tier list wants.
+ *
+ * Null when the size is unknown — the caller draws a placeholder rather than
+ * guessing a crop.
+ */
+export function coverCrop(
+  nat: { w: number; h: number } | null,
+  targetAspect: number,
+): { sx: number; sy: number; sw: number; sh: number } | null {
+  if (!nat || nat.w <= 0 || nat.h <= 0 || !(targetAspect > 0)) return null;
+  const sourceAspect = nat.w / nat.h;
+  // Wider than the cell → the full height is used and the sides are trimmed.
+  // Taller → the full width is used and the top and bottom are trimmed.
+  const sw = sourceAspect > targetAspect ? targetAspect / sourceAspect : 1;
+  const sh = sourceAspect > targetAspect ? 1 : sourceAspect / targetAspect;
+  return { sx: (1 - sw) / 2, sy: (1 - sh) / 2, sw, sh };
+}
+
+/**
+ * Where a cell dropped at (wx, wy) should be inserted among `cells` — an index
+ * in 0..cells.length, counting the slots BETWEEN pictures rather than the
+ * pictures themselves.
+ *
+ * Nearest cell centre, then before or after it depending on which side of that
+ * centre the pointer is. Vertical distance is weighted into the choice so a
+ * multi-row grid picks the row first: a pointer in row two must not insert
+ * into row one merely because a row-one cell is horizontally closer.
+ *
+ * Pure and framework-free, like `nearestImageSide`, and for the same reason —
+ * it is a rule the user drives by hand and it is not obvious from watching it
+ * once.
+ */
+export function galleryInsertIndex(
+  cells: { x: number; y: number; w: number; h: number }[],
+  wx: number,
+  wy: number,
+): number {
+  if (cells.length === 0) return 0;
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    const cx = c.x + c.w / 2;
+    const cy = c.y + c.h / 2;
+    // Rows dominate: a full row apart must outweigh any horizontal offset
+    // inside a row, or a grid inserts into the wrong line.
+    const d = Math.abs(wy - cy) * 4 + Math.abs(wx - cx);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  const c = cells[best];
+  return wx > c.x + c.w / 2 ? best + 1 : best;
+}
+
+/**
+ * The grid a gallery topic wants, or null when the node is not one.
+ *
+ * Derived from the NODE ALONE — never from the placed box. That is the whole
+ * discipline here: the column count decides the width, so reading the width
+ * back to decide the columns is a loop, and resolving that loop differently in
+ * the measure and in the painter is how the canvas and the export end up
+ * disagreeing about how many pictures fit on a row. An explicit
+ * `Style.width` wraps the grid into that width; otherwise the grid wraps at
+ * MAX_GALLERY_W and the box grows to fit it.
+ *
+ * Captions reserve their band on EVERY cell as soon as ONE cell has a caption.
+ * Per-cell reservation staggers the rows, and a grid whose rows do not line up
+ * stops reading as a grid.
+ */
+export function galleryExtent(
+  n: MindNode,
+  resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
+): GalleryExtent | null {
+  const g = n.style.gallery;
+  if (!g || g.items.length === 0) return null;
+  const count = g.items.length;
+  const cellW = Math.max(16, g.cellW ?? GALLERY_CELL_W);
+  const aspect = g.aspect && g.aspect > 0 ? g.aspect : GALLERY_ASPECT;
+  const cellPicH = Math.max(8, Math.round(cellW / aspect));
+  const captionH = g.items.some((it) => (it.caption ?? "").trim() !== "")
+    ? GALLERY_CAPTION_GAP + Math.round(GALLERY_CAPTION_SIZE * LINE_HEIGHT_FACTOR)
+    : 0;
+  const cellH = cellPicH + captionH;
+
+  let cols: number;
+  if (g.cols && g.cols > 0) {
+    cols = Math.min(count, Math.floor(g.cols));
+  } else {
+    const pad = n.style.padding ?? 10;
+    // Side images eat the row before the grid does, so they belong in the fit.
+    const side = slotSizes(n, resolveImage);
+    const sidePadW = (side.left ? side.left.w + IMAGE_GAP : 0) + (side.right ? side.right.w + IMAGE_GAP : 0);
+    const availW = (n.style.width ? Math.max(MIN_TOPIC_W, n.style.width) - pad * 2 - TEXT_INSET : MAX_GALLERY_W) - sidePadW;
+    const fit = Math.floor((availW + GALLERY_GAP) / (cellW + GALLERY_GAP));
+    cols = Math.min(count, Math.max(1, fit));
+  }
+  const rows = Math.ceil(count / cols);
+  return {
+    w: cols * cellW + (cols - 1) * GALLERY_GAP,
+    h: rows * cellH + (rows - 1) * GALLERY_GAP,
+    cellW,
+    cellPicH,
+    cellH,
+    cols,
+    rows,
+    captionH,
+    count,
+  };
+}
+
 export interface TextInsets {
   top: number;
   bottom: number;
@@ -614,14 +829,20 @@ export interface TextInsets {
  * never reads these numbers, but it narrows the editing overlay's text column
  * and re-wraps the text the instant a topic with an image is double-clicked.
  *
+ * `galleryH` is the grid of a gallery topic (T25), which stacks BELOW the text
+ * and so reserves from the bottom on exactly the same terms as a bottom image.
+ * Folding it in here rather than at each call site is what makes the four
+ * readers — the measure, the canvas, the SVG and the PDF — place the title of
+ * a gallery topic identically without any of them knowing what a gallery is.
+ *
  * Consumed by measureTopic, positionedImageSlots, the RichEditor overlay and
  * the parity harness: all four have to agree on where the text may go.
  */
-export function textInsets(slots: SlotSizes): TextInsets {
+export function textInsets(slots: SlotSizes, galleryH = 0): TextInsets {
   const reserve = (v: number | undefined): number => (v && v > 0 ? v + IMAGE_GAP : 0);
   return {
     top: reserve(slots.top?.h),
-    bottom: reserve(slots.bottom?.h),
+    bottom: reserve(slots.bottom?.h) + reserve(galleryH),
     left: reserve(slots.left?.w),
     right: reserve(slots.right?.w),
   };
@@ -637,9 +858,19 @@ export function positionedImageSlots(
   box: { x: number; y: number; w: number; h: number },
   n: MindNode,
   resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
-): { slots: SlotSizes; insets: TextInsets; sidePadW: number; midL: number; midW: number; items: PositionedSlot[] } {
+): {
+  slots: SlotSizes;
+  insets: TextInsets;
+  sidePadW: number;
+  midL: number;
+  midW: number;
+  items: PositionedSlot[];
+  gallery: GalleryExtent | null;
+  cells: GalleryCell[];
+} {
   const slots = slotSizes(n, resolveImage);
-  const insets = textInsets(slots);
+  const gallery = galleryExtent(n, resolveImage);
+  const insets = textInsets(slots, gallery?.h ?? 0);
   const sidePadW = insets.left + insets.right;
   const pad = n.style.padding ?? 10;
   const midL = box.x + pad + insets.left;
@@ -651,7 +882,38 @@ export function positionedImageSlots(
     items.push({ slot: "bottom", id: n.style.imageBottom!, size: slots.bottom, x: midL + (midW - slots.bottom.w) / 2, y: box.y + box.h - pad - slots.bottom.h });
   if (slots.left) items.push({ slot: "left", id: n.style.imageLeft!, size: slots.left, x: box.x + pad, y: box.y + (box.h - slots.left.h) / 2 });
   if (slots.right) items.push({ slot: "right", id: n.style.imageRight!, size: slots.right, x: box.x + box.w - pad - slots.right.w, y: box.y + (box.h - slots.right.h) / 2 });
-  return { slots, insets, sidePadW, midL, midW, items };
+
+  // The grid sits at the FOOT of the middle column, just above a bottom image
+  // if there is one — the same block the insets reserved for it, read back.
+  // `midW` already excludes the grid's own reservation (it is vertical), so
+  // the grid centres in the column the side images leave behind.
+  const cells: GalleryCell[] = [];
+  if (gallery) {
+    const belowGrid = slots.bottom ? slots.bottom.h + IMAGE_GAP : 0;
+    const gridTop = box.y + box.h - pad - belowGrid - gallery.h;
+    const gridLeft = midL + (midW - gallery.w) / 2;
+    const g = n.style.gallery!;
+    for (let i = 0; i < g.items.length; i++) {
+      const item = g.items[i];
+      const col = i % gallery.cols;
+      const row = Math.floor(i / gallery.cols);
+      const x = gridLeft + col * (gallery.cellW + GALLERY_GAP);
+      const y = gridTop + row * (gallery.cellH + GALLERY_GAP);
+      const nat = resolveImage?.(item.id) ?? null;
+      cells.push({
+        id: item.id,
+        caption: (item.caption ?? "").trim(),
+        x,
+        y,
+        w: gallery.cellW,
+        h: gallery.cellPicH,
+        crop: coverCrop(nat, gallery.cellW / gallery.cellPicH),
+        captionY: y + gallery.cellPicH + GALLERY_CAPTION_GAP,
+        captionH: gallery.captionH > 0 ? gallery.captionH - GALLERY_CAPTION_GAP : 0,
+      });
+    }
+  }
+  return { slots, insets, sidePadW, midL, midW, items, gallery, cells };
 }
 
 /**
@@ -685,7 +947,17 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
   // The code flag must be in the key: without it a topic promoted to a code
   // block keeps the extent it had as a normal topic (measured with wrap and
   // clamped to MAX_TOPIC_W) until some unrelated edit happens to bust it.
-  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}`;
+  // The gallery contributes its GRID, not its pictures: the cell size, the
+  // column count and whether any caption reserves the band are the only three
+  // things that move the box. Swapping which picture is in a cell — or
+  // retyping a caption that stays a caption — legitimately leaves the extent
+  // alone, so those must not appear here or every keystroke in the Inspector
+  // would mint a cache entry and re-measure the whole sheet.
+  const g = s.gallery;
+  const gal = g
+    ? `${g.items.length}:${g.cellW ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}`
+    : "";
+  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
 }
 
 /**
@@ -782,12 +1054,15 @@ function measureTopicUncached(
   const hasText = lines.some((l) => l.segments.length > 0);
   const textH = lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapPx ?? 0), 0);
 
-  // Middle column: top image, text, bottom image. A gap separates an image
-  // from the text (or from the other image) but never appears when nothing
+  // Middle column: top image, text, gallery grid, bottom image. A gap
+  // separates each present block from the next but never appears when nothing
   // is on that side — text-only nodes keep their exact old height.
-  let midH = topH + botH;
-  if (topH > 0 && (hasText || botH > 0)) midH += IMAGE_GAP; // top image → next block
-  if (hasText && botH > 0) midH += IMAGE_GAP; // text → bottom image
+  const gallery = galleryExtent(n, resolveImage);
+  const galH = gallery?.h ?? 0;
+  let midH = topH + botH + galH;
+  if (topH > 0 && (hasText || galH > 0 || botH > 0)) midH += IMAGE_GAP; // top image → next block
+  if (hasText && (galH > 0 || botH > 0)) midH += IMAGE_GAP; // text → grid or bottom image
+  if (galH > 0 && botH > 0) midH += IMAGE_GAP; // grid → bottom image
   if (hasText) midH += textH;
   // Side images sit beside the middle column; the box fits the taller one.
   const sideH = Math.max(leftH, rightH);
@@ -799,9 +1074,11 @@ function measureTopicUncached(
   let w = style.width
     ? Math.max(MIN_TOPIC_W, style.width)
     : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET)) + sidePadW;
-  // The middle column must fit the top/bottom images (the side columns are
-  // already part of sidePadW).
-  const maxTopBotW = Math.max(slots.top?.w ?? 0, slots.bottom?.w ?? 0);
+  // The middle column must fit the top/bottom images and the gallery grid
+  // (the side columns are already part of sidePadW). The grid's own width is
+  // already capped — by MAX_GALLERY_W, or by an explicit style.width it was
+  // told to wrap into — so this widens the box without unbounding it.
+  const maxTopBotW = Math.max(slots.top?.w ?? 0, slots.bottom?.w ?? 0, gallery?.w ?? 0);
   if (maxTopBotW > 0) w = Math.max(w, maxTopBotW + pad * 2 + sidePadW);
   // ... and it can never collapse below the minimum text width.
   w = Math.max(w, sidePadW + (24 + TEXT_INSET) + pad * 2);

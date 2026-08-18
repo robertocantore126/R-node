@@ -11,7 +11,7 @@ import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, FONT_STACK, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, ellipsizeToWidth, FONT_STACK, GALLERY_CAPTION_SIZE, GALLERY_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -46,6 +46,12 @@ export interface RenderState {
    * the ghost onto that slot of the target node instead of the cursor.
    */
   ghostImage?: { imageId: string; x: number; y: number; nodeId: string; side?: ImageSlot } | null;
+  /**
+   * Where a dragged gallery cell would land: a caret drawn in the gap it
+   * would be inserted into (T25). `index` counts the gaps, so it runs from 0
+   * to the cell count inclusive — `cells.length` is "after the last one".
+   */
+  galleryDrop?: { nodeId: string; index: number } | null;
   /**
    * Marquee drag preview: ids of the topics inside the drag box — they wear
    * the selection ring BEFORE the release commits them (the box itself is a
@@ -164,6 +170,9 @@ export class Renderer {
     this.dpr = dpr;
     canvas.width = w;
     canvas.height = h;
+    // Assigning width/height (re)allocates the backing store — a GPU surface
+    // (tracer 2.0 render:gpu-alloc).
+    trace.mark("render", "render:gpu-alloc", { w, h });
   }
 
   // -------------------------------------------------------------------------
@@ -351,6 +360,7 @@ export class Renderer {
 
     // 6) ghost preview of an image being dragged (internal reassignment) —
     // on top of everything, centered on the cursor, before the drop lands.
+    if (state.galleryDrop) this.drawGalleryDrop(theme, state);
     if (state.ghostImage) this.drawGhostImage(theme, state, state.ghostImage);
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -730,6 +740,7 @@ export class Renderer {
         this.drawCodeBlock(theme, p);
       } else {
         this.drawImage(p);
+        this.drawGallery(theme, p);
         this.drawText(theme, p, textColor);
       }
     }
@@ -923,6 +934,7 @@ export class Renderer {
       entry = { ...bitmap, bytes };
       this.textCache.set(key, entry);
       this.textBytes += bytes;
+      trace.mark("render", "render:text-cache", { bytes, kind: "insert" });
       this.evictTextToBudget();
     }
     const totalH = entry.h;
@@ -954,14 +966,75 @@ export class Renderer {
     for (const it of items) this.paintSlot(p, it.id, it.size.w, it.size.h, it.x, it.y);
   }
 
-  /** Decode (if needed) and blit one image slot at the given world rect. */
-  private paintSlot(p: Placed, imageId: string, imgW: number, imgH: number, x: number, y: number): void {
+  /**
+   * The grid of a gallery topic (T25): each cell's picture cropped to cover
+   * its square, with its caption underneath.
+   *
+   * The cells come from positionedImageSlots (I9) like every other image, so
+   * the measure, this painter and the two exports cannot disagree on where a
+   * picture lands. Captions are drawn straight from the string: they are plain
+   * single-line labels by construction (see `GalleryItem`), never runs, so
+   * none of the §3 parity machinery is involved and none of it needs to be.
+   */
+  private drawGallery(theme: RenderTheme, p: Placed): void {
+    const { cells, gallery } = positionedImageSlots(p, p.node, this.resolveImage);
+    if (!gallery) return;
+    const ctx = this.ctx;
+    for (const c of cells) {
+      if (c.crop) {
+        this.paintSlot(p, c.id, c.w, c.h, c.x, c.y, c.crop);
+      } else {
+        // The card is missing (a document opened without its assets). The cell
+        // keeps its space — the layout already paid for it — and says so,
+        // rather than leaving a hole nothing explains.
+        ctx.save();
+        ctx.strokeStyle = theme.textMuted;
+        ctx.globalAlpha = 0.4;
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 1;
+        ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
+        ctx.restore();
+      }
+    }
+    if (gallery.captionH <= 0) return;
+    ctx.save();
+    ctx.fillStyle = theme.textMuted;
+    ctx.font = `${GALLERY_CAPTION_SIZE}px ${FONT_STACK}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (const c of cells) {
+      if (!c.caption) continue;
+      // ctx.font is already the caption font — set once for the whole pass
+      // rather than per cell, so this measures in the right face.
+      ctx.fillText(ellipsizeToWidth(c.caption, c.w, (s) => ctx.measureText(s).width), c.x + c.w / 2, c.captionY);
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Decode (if needed) and blit one image slot at the given world rect.
+   *
+   * `crop` (normalised 0..1) shows only part of the source, scaled to fill the
+   * rect — how a gallery cell covers its square. It also raises the resolution
+   * asked for: a third of a bitmap stretched over the cell needs three times
+   * the pixels, and driving the bucket from the destination width alone left
+   * wide pictures visibly soft in a tier list while the slots looked fine.
+   */
+  private paintSlot(
+    p: Placed,
+    imageId: string,
+    imgW: number,
+    imgH: number,
+    x: number,
+    y: number,
+    crop?: { sx: number; sy: number; sw: number; sh: number } | null,
+  ): void {
     if (!this.resolveImage) return;
     // Decode at the size THIS image is painted at, not at the size it happens
     // to be stored at. Driving the choice from the global zoom alone put every
     // bitmap on the 1024px level above zoom 0.5 on a retina screen — 3MB each,
     // so fifty visible image nodes blew the budget and the cache thrashed.
-    const neededPx = imgW * this.curScale * this.dpr;
+    const neededPx = (imgW * this.curScale * this.dpr) / (crop && crop.sw > 0 ? crop.sw : 1);
     // Quantised to powers of two: an exact size would mint a new cache key on
     // every micro-change of zoom and nothing would ever hit.
     const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
@@ -978,7 +1051,13 @@ export class Renderer {
       // LRU refresh (Map insertion order = recency).
       this.imageCache.delete(key);
       this.imageCache.set(key, entry);
-      this.ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
+      if (crop) {
+        const bw = entry.bitmap.width;
+        const bh = entry.bitmap.height;
+        this.ctx.drawImage(entry.bitmap, crop.sx * bw, crop.sy * bh, crop.sw * bw, crop.sh * bh, x, y, imgW, imgH);
+      } else {
+        this.ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
+      }
       return;
     }
     if (this.imageFailed.has(key)) return; // corrupt/unavailable: not per frame
@@ -989,10 +1068,12 @@ export class Renderer {
   private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel, bucket: number): Promise<void> {
     this.inflight.set(key, nodeId);
     this.inflightCount++;
+    const t0 = typeof performance !== "undefined" ? performance.now() : 0;
     try {
       const blob = await this.assetStore.get(assetId, level);
       if (!blob) {
         this.imageFailed.add(key);
+        trace.mark("render", "render:image-decode", { assetId, level, bucket, error: "missing" });
         return;
       }
       // resizeWidth downsamples DURING decode: the full-resolution surface is
@@ -1008,12 +1089,21 @@ export class Renderer {
       const bytes = bitmap.width * bitmap.height * 4;
       this.imageCache.set(key, { bitmap, bytes });
       this.imageBytes += bytes;
+      trace.mark("render", "render:image-decode", {
+        assetId,
+        level,
+        bucket,
+        bytes,
+        ms: Math.round(((typeof performance !== "undefined" ? performance.now() : 0) - t0) * 100) / 100,
+      });
+      trace.mark("render", "render:image-cache", { kind: "insert", bytes });
       this.evictToBudget();
       // A repaint lets the fresh bitmap appear without waiting for the next
       // user gesture (and starts the next pending decodes).
       this.onRepaint?.();
-    } catch {
+    } catch (e) {
       this.imageFailed.add(key);
+      trace.mark("render", "render:image-decode", { assetId, level, bucket, error: String(e) });
     } finally {
       if (this.inflight.delete(key)) this.inflightCount--;
     }
@@ -1069,17 +1159,24 @@ export class Renderer {
   /** Byte-budget LRU eviction for the text cache: same shape as evictToBudget
    *  (images), minus the bitmap close — canvas elements are plain JS memory. */
   private evictTextToBudget(): void {
+    let freed = 0;
+    let count = 0;
     while (this.textBytes > this.TEXT_BUDGET && this.textCache.size > 0) {
       const first = this.textCache.entries().next().value;
       if (!first) break;
       const [k, v] = first as [string, { bytes: number }];
       this.textCache.delete(k);
       this.textBytes -= v.bytes;
+      freed += v.bytes;
+      count++;
     }
+    if (count > 0) trace.mark("render", "render:cache-evict", { kind: "text", entries: count, freed });
   }
 
   /** LRU eviction under the byte budget. Only ever called between frames. */
   private evictToBudget(): void {
+    let freed = 0;
+    let count = 0;
     while (this.imageBytes > this.IMAGE_BUDGET && this.imageCache.size > 0) {
       const first = this.imageCache.entries().next().value;
       if (!first) break;
@@ -1087,7 +1184,12 @@ export class Renderer {
       this.imageCache.delete(k);
       this.imageBytes -= v.bytes;
       v.bitmap.close();
+      freed += v.bytes;
+      count++;
+      // A closed ImageBitmap is GPU memory returned to the system (tracer 2.0).
+      trace.mark("render", "render:gpu-free", { bytes: v.bytes });
     }
+    if (count > 0) trace.mark("render", "render:cache-evict", { kind: "image", entries: count, freed });
   }
 
   private textCacheKey(n: MindNode, color: string, maxW: number, res: number): string {
@@ -1514,6 +1616,42 @@ export class Renderer {
     return null;
   }
 
+  /**
+   * The caret showing where a dragged cell would be inserted (T25): a bar in
+   * the gap between two cells, or hugging the first/last one at the ends.
+   *
+   * A caret rather than a highlighted cell, because the drop lands BETWEEN
+   * pictures — highlighting the neighbour would leave "before it or after it"
+   * unanswered, which is the whole question when reordering a tier.
+   */
+  private drawGalleryDrop(theme: RenderTheme, state: RenderState): void {
+    const target = state.galleryDrop;
+    if (!target) return;
+    const p = this.placedNodes(state).find((q) => q.node.id === target.nodeId);
+    if (!p) return;
+    const { cells, gallery } = positionedImageSlots(p, p.node, this.resolveImage);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.strokeStyle = theme.dropIndicator;
+    ctx.lineWidth = 3;
+    ctx.setLineDash([]);
+    if (cells.length === 0 || !gallery) {
+      // An empty (or brand-new) gallery: mark the whole body instead, so a
+      // drop onto a topic that has no grid yet still says where it will go.
+      ctx.strokeRect(p.x - 3, p.y - 3, p.w + 6, p.h + 6);
+      ctx.restore();
+      return;
+    }
+    const i = Math.max(0, Math.min(cells.length, target.index));
+    const at = i < cells.length ? cells[i] : cells[cells.length - 1];
+    const x = i < cells.length ? at.x - GALLERY_GAP / 2 : at.x + at.w + GALLERY_GAP / 2;
+    ctx.beginPath();
+    ctx.moveTo(x, at.y - 2);
+    ctx.lineTo(x, at.y + at.h + 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   private drawDropIndicator(theme: RenderTheme, target: Placed, mode: string): void {
     const ctx = this.ctx;
     ctx.strokeStyle = theme.dropIndicator;
@@ -1659,6 +1797,44 @@ export class Renderer {
       }
     }
     return null;
+  }
+
+  /**
+   * The gallery cell under the point (T25), or null.
+   *
+   * Checked BEFORE the slot and body tests: a cell sits inside its topic's
+   * box, so whichever test runs first wins, and the specific target has to be
+   * the one that answers. The picture's rect alone is the target — the caption
+   * band under it belongs to the node, so a click there still selects the
+   * topic.
+   */
+  hitTestGalleryCell(
+    state: RenderState,
+    worldX: number,
+    worldY: number,
+  ): { nodeId: string; index: number; rect: { x: number; y: number; w: number; h: number } } | null {
+    const placed = this.placedNodes(state).filter((p) => p.visible);
+    for (let i = placed.length - 1; i >= 0; i--) {
+      const { cells } = positionedImageSlots(placed[i], placed[i].node, this.resolveImage);
+      for (let k = 0; k < cells.length; k++) {
+        const c = cells[k];
+        if (worldX >= c.x && worldX <= c.x + c.w && worldY >= c.y && worldY <= c.y + c.h) {
+          return { nodeId: placed[i].node.id, index: k, rect: { x: c.x, y: c.y, w: c.w, h: c.h } };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * World-space rects of a node's gallery cells — what `galleryInsertIndex`
+   * needs to turn a cursor position into a drop position. Empty for a topic
+   * with no gallery, which the caller reads as "insert at 0".
+   */
+  galleryCellRects(state: RenderState, nodeId: string): { x: number; y: number; w: number; h: number }[] {
+    const p = this.placedNodes(state).find((q) => q.node.id === nodeId);
+    if (!p) return [];
+    return positionedImageSlots(p, p.node, this.resolveImage).cells.map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }));
   }
 
   hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {

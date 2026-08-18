@@ -750,6 +750,58 @@ qualunque sia il titolo.
 
 ---
 
+## T25 — Gallery node (tier list) · P2 · ✅ FATTO
+
+**Obiettivo.** Un topic il cui corpo è una **griglia ordinata di immagini con
+didascalia**: una riga di tier list, un mood board, un cast. Il titolo resta
+sopra la griglia ed è un titolo normale.
+
+**Perché è `Style.gallery` e non un `NodeType`.** Stessa regola già scritta in
+`types.ts` per T22: quell'enum governa la topologia e il layout dell'albero, e
+una griglia di immagini dentro una scatola non cambia né l'una né l'altro. È
+una **variante di presentazione**, come `code` e `shapeParts`.
+
+**Perché non è "più slot immagine".** `ImageSlot` nomina un **bordo** della
+scatola e i bordi sono quattro per costruzione: il numero è il punto, e ogni
+consumatore — hit-test, drag & drop, maniglia di resize, inset dell'overlay —
+è scritto su quei quattro nomi. Una gallery non ha bordo e non ha numero
+fisso. Le due cose convivono: un topic gallery può avere anche immagini laterali.
+
+**Le celle hanno tutte la stessa forma.** `cellW` + `aspect` (default quadrato);
+ogni immagine è ritagliata al centro per riempire la cella (`coverCrop`), mai
+letterboxata. È l'unica proprietà che rende leggibile una griglia: ritratti,
+screenshot e banner alle loro proporzioni native sono una pila irregolare.
+
+**Le didascalie sono stringhe piatte, non `TextRun[]`, e si scrivono
+nell'Inspector.** Una didascalia ricca vorrebbe l'overlay Lexical sopra di sé,
+cioè un **secondo renderer sullo stesso testo**, cioè il contratto di parità
+del §3 per intero — per un'etichetta di una riga a corpo fisso. Tenuta fuori
+dal canvas-editing, la parità non la tocca mai. La didascalia sta sulla
+**cella**, non su `AttachmentInfo`: quella scheda è per-ASSET ed è
+content-addressed, quindi la stessa figura in due tier la rinominerebbe in
+entrambi.
+
+**La trappola pagata.** `nodeImageIds` è la radice del **GC degli asset**
+(`referencedAssetIds`): un id che non compare lì è un id che nessun nodo
+reclama, e il collector cancella i byte. È anche ciò che decide quali bitmap
+restano in cache nel renderer. Entrambi i guasti sono silenziosi e arrivano
+molto dopo la modifica che li causa.
+
+**Gesti.** Trascinare una cella la sposta **tra tier** e **dentro il tier**
+(stesso gesto, stesso metodo: per il documento il bersaglio è solo un nodo che
+può coincidere con la sorgente). Un file rilasciato su un topic-gallery entra
+nella griglia al varco sotto il cursore; su un topic senza griglia vale il
+comportamento a slot di prima. Le mosse cross-nodo emettono **due `setStyle` in
+UN batch**, o un Ctrl+Z lascerebbe la figura in nessuno dei due tier.
+
+**Fatto quando.** Le celle sono identiche qualunque siano le sorgenti; il GC
+vede le immagini della griglia; un undo riporta una mossa cross-tier in un solo
+passo; canvas, SVG e PDF leggono `positionedImageSlots` e `insets` (nessuno dei
+tre ricalcola i blocchi dagli slot). Verificato in `tests/gallery.test.ts` e
+nell'app reale.
+
+---
+
 ## Fuori roadmap (decisione del proprietario)
 
 Non iniziare senza richiesta esplicita:

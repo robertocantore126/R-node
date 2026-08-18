@@ -1,13 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../editor/context";
 import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
 import { makeOp, type Op } from "../core/ops";
 import { plainToRuns } from "../core/text";
-import { MAX_IMAGE_W } from "../layout/measure";
+import { GALLERY_ASPECT, GALLERY_CELL_W, MAX_IMAGE_W } from "../layout/measure";
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
 const PRIORITIES: Priority[] = ["none", "low", "medium", "high", "urgent"];
+/** Cell shapes offered for a gallery grid, as width ÷ height. */
+const CELL_SHAPES: [string, number][] = [
+  ["square", 1],
+  ["landscape 4:3", 4 / 3],
+  ["portrait 3:4", 3 / 4],
+  ["wide 16:9", 16 / 9],
+  ["tall 2:3", 2 / 3],
+];
+
 const STRUCTURES = ["mindmap", "logic", "tree", "org", "timeline", "fishbone", "matrix", "treetable", "freeform"] as const;
 
 export function Inspector(): JSX.Element {
@@ -180,6 +189,8 @@ export function Inspector(): JSX.Element {
         )}
       </div>
 
+      <GallerySection nodeId={node.id} />
+
       <div className="inspector-section">
         <div className="inspector-label">Task</div>
         <div className="field">
@@ -264,6 +275,196 @@ function SheetControls(): JSX.Element {
       </div>
       <div className="muted count" data-help="Visible topics" data-help-more="How many topics the map contains (hidden/collapsed subtrees excluded).">Visible topics: {store.doc.visibleNodeCount}</div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Gallery (T25)
+// ---------------------------------------------------------------------------
+
+/**
+ * The cells of a gallery topic: their order, their size, and their captions.
+ *
+ * Captions are edited HERE and nowhere else, and that is the design rather
+ * than a limitation. Editing them on the canvas would mean a Lexical overlay
+ * over the caption, which is a second renderer over the same text and drags
+ * the whole editor-canvas parity contract (AGENT_GUIDE §3) along with it — for
+ * a label that is one short line at a fixed size. Kept in this panel, a
+ * caption is a plain string the canvas draws and nothing has to agree with
+ * anything.
+ *
+ * There are no thumbnails on purpose: the pictures are already on the canvas
+ * a few centimetres away, and rendering them again here would mean object URLs
+ * per row, with their revocation, for a second view of the same thing.
+ */
+function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
+  const store = useStore();
+  const node = store.selectionNode;
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+
+  const gallery = node?.style.gallery;
+  const items = gallery?.items ?? [];
+
+  const pick = async (list: FileList | null): Promise<void> => {
+    if (!list || list.length === 0) return;
+    setBusy(true);
+    setNote("");
+    const res = await store.addGalleryImageFiles(nodeId, Array.from(list));
+    setBusy(false);
+    // Say why, every time, rather than dropping a file silently (§4bis).
+    if (res.failed > 0) setNote(`${res.added} added, ${res.failed} refused${res.reason ? ` — ${res.reason}` : ""}`);
+    else if (res.added > 0) setNote(`${res.added} image${res.added === 1 ? "" : "s"} added`);
+  };
+
+  return (
+    <div className="inspector-section">
+      <div
+        className="inspector-label"
+        data-help="Gallery"
+        data-help-more="Fills the topic with a grid of captioned pictures — a tier-list row, a mood board, a cast list. The title stays above the grid."
+      >
+        Gallery
+      </div>
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          void pick(e.target.files);
+          e.target.value = ""; // so re-picking the same file fires again
+        }}
+      />
+
+      <div className="field">
+        <button className="btn small" disabled={busy} onClick={() => fileRef.current?.click()}>
+          {busy ? "Adding…" : items.length > 0 ? "Add more images…" : "Add images…"}
+        </button>
+        {items.length > 0 && <span className="muted">{items.length} in the grid</span>}
+      </div>
+      {note && <p className="muted">{note}</p>}
+
+      {items.length === 0 ? (
+        <p className="muted">No pictures yet. Added images fill the body of the topic as a grid, each captioned with its file name.</p>
+      ) : (
+        <>
+          <div className="field">
+            <span>Cell size</span>
+            <input
+              type="range"
+              min={24}
+              max={200}
+              step={4}
+              value={gallery?.cellW ?? GALLERY_CELL_W}
+              onChange={(e) => store.setGalleryLayout(nodeId, { cellW: Number(e.target.value) })}
+              title="Side of one cell — the pictures are cropped square to fill it"
+            />
+            <span className="muted">{gallery?.cellW ?? GALLERY_CELL_W}px</span>
+          </div>
+          <div className="field">
+            <span>Cell shape</span>
+            <select
+              value={String(gallery?.aspect ?? GALLERY_ASPECT)}
+              onChange={(e) => store.setGalleryLayout(nodeId, { aspect: Number(e.target.value) })}
+              title="Every cell takes this shape; the pictures are cropped to their centre to fill it"
+            >
+              {CELL_SHAPES.map(([label, value]) => (
+                <option key={label} value={String(value)}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <span>Columns</span>
+            <input
+              type="number"
+              min={0}
+              max={40}
+              value={gallery?.cols ?? 0}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                store.setGalleryLayout(nodeId, { cols: v > 0 ? Math.floor(v) : undefined });
+              }}
+              title="0 wraps the grid to the topic's width"
+            />
+            <span className="muted">{gallery?.cols ? "fixed" : "auto"}</span>
+          </div>
+
+          <ul className="gallery-list">
+            {items.map((item, i) => (
+              <GalleryRow
+                key={`${item.id}-${i}`}
+                nodeId={nodeId}
+                index={i}
+                last={i === items.length - 1}
+                caption={item.caption ?? ""}
+                name={store.sheet.attachments.find((a) => a.id === item.id)?.name ?? item.id.slice(0, 8)}
+              />
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One cell's row: its caption, its place in the order, and its removal. */
+function GalleryRow({
+  nodeId,
+  index,
+  last,
+  caption,
+  name,
+}: {
+  nodeId: string;
+  index: number;
+  last: boolean;
+  caption: string;
+  name: string;
+}): JSX.Element {
+  const store = useStore();
+  const [text, setText] = useState(caption);
+  // Follow the document when it changes under us (undo, reorder), but never
+  // while the field is being typed into — the commit is on blur/Enter, so
+  // node state and this state only meet at those points.
+  useEffect(() => setText(caption), [caption, index]);
+
+  const commit = (): void => {
+    if (text.trim() !== caption) store.setGalleryCaption(nodeId, index, text);
+  };
+
+  return (
+    <li className="gallery-row">
+      <span className="gallery-row-name" title={name}>
+        {name}
+      </span>
+      <input
+        className="gallery-row-caption"
+        type="text"
+        value={text}
+        placeholder="caption"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") setText(caption);
+        }}
+      />
+      <button className="btn tiny" title="Move earlier" disabled={index === 0} onClick={() => store.moveGalleryItem(nodeId, index, index - 1)}>
+        ↑
+      </button>
+      <button className="btn tiny" title="Move later" disabled={last} onClick={() => store.moveGalleryItem(nodeId, index, index + 1)}>
+        ↓
+      </button>
+      <button className="btn tiny" title="Remove from the grid (the picture itself is kept)" onClick={() => store.removeGalleryItem(nodeId, index)}>
+        ✕
+      </button>
+    </li>
   );
 }
 

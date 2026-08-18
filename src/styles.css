@@ -274,6 +274,51 @@ textarea:focus {
   color: var(--danger);
 }
 
+/* Square icon button for the gallery row controls (reorder, remove). */
+.btn.tiny {
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* ---------- Gallery rows (Inspector, T25) ----------
+   One row per cell of a gallery topic. The file name is allowed to shrink and
+   ellipsize; the caption field is the part the user is actually here for, so
+   it takes the space the name gives up. */
+.gallery-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.gallery-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gallery-row-name {
+  flex: 0 1 72px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gallery-row-caption {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
 /* ---------- Top bar ---------- */
 
 /* Xmind-style top bar: the buttons are borderless (icon-flat) so the chrome
