@@ -63,6 +63,11 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Node >= 17 resolves "localhost" to ::1 first, so vite binds IPv6-only
+    // and the Tauri webview (WebView2 resolves localhost to 127.0.0.1) gets a
+    // connection-refused white window. Bind IPv4 explicitly: both the desktop
+    // app and browser tabs then reach the same server.
+    host: "127.0.0.1",
   },
   build: {
     target: "es2022",
