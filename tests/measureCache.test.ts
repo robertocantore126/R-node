@@ -124,3 +124,52 @@ describe("extent cache — every measured field is in the key", () => {
     expect(measureNode(n, FONT_SENSITIVE)).toEqual(plain);
   });
 });
+
+/**
+ * The gallery grid (T25) is a second body under the title, and every knob that
+ * reshapes it resizes the topic. All of them therefore belong in the key.
+ *
+ * `aspect` is listed because it was the one that was missing: it is the divisor
+ * of `cellPicH`, so the Inspector's "Cell shape" select moved the height of
+ * every row while changing nothing else the key looked at. The box kept the
+ * height it was first measured at — dead space one way, and the other way a
+ * grid taller than its own box, starting above the topic's top edge and
+ * painting over the title.
+ */
+describe("extent cache — the gallery grid is in the key", () => {
+  /** Three square cells, so each mutation below changes exactly one thing. */
+  const withGallery = (): MindNode => {
+    const n = fresh();
+    n.style.gallery = { items: [{ id: "a0" }, { id: "a1" }, { id: "a2" }], cellW: 96, aspect: 1 };
+    return n;
+  };
+  /** Pictures deliberately NOT square, so a crop that does nothing shows up. */
+  const pictures = (): ((id: string) => { w: number; h: number }) => () => ({ w: 200, h: 100 });
+
+  const GALLERY_AFFECTS: Array<[string, (n: MindNode) => void]> = [
+    ["cell count", (n) => { n.style.gallery!.items.push({ id: "a3" }); }],
+    ["cellW", (n) => { n.style.gallery!.cellW = 140; }],
+    ["aspect (the Inspector's cell shape)", (n) => { n.style.gallery!.aspect = 16 / 9; }],
+    ["cols", (n) => { n.style.gallery!.cols = 2; }],
+    ["the caption band opening", (n) => { n.style.gallery!.items[0].caption = "named"; }],
+  ];
+
+  for (const [what, mutate] of GALLERY_AFFECTS) {
+    it(`${what} changes the extent`, () => {
+      const n = withGallery();
+      const before = measureNode(n, FONT_SENSITIVE, pictures());
+      mutate(n);
+      const after = measureNode(n, FONT_SENSITIVE, pictures());
+      expect(`${after.w}x${after.h}`).not.toBe(`${before.w}x${before.h}`);
+    });
+  }
+
+  it("which picture sits in a cell is deliberately NOT in the key", () => {
+    // The grid's SHAPE moves the box; swapping the pictures inside it does
+    // not, and keying on them would re-measure the sheet on every drag.
+    const n = withGallery();
+    const before = measureNode(n, FONT_SENSITIVE, pictures());
+    n.style.gallery!.items = [{ id: "b0" }, { id: "b1" }, { id: "b2" }];
+    expect(measureNode(n, FONT_SENSITIVE, pictures())).toEqual(before);
+  });
+});

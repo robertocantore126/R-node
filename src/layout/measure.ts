@@ -969,15 +969,23 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
   // The code flag must be in the key: without it a topic promoted to a code
   // block keeps the extent it had as a normal topic (measured with wrap and
   // clamped to MAX_TOPIC_W) until some unrelated edit happens to bust it.
-  // The gallery contributes its GRID, not its pictures: the cell size, the
-  // column count and whether any caption reserves the band are the only three
-  // things that move the box. Swapping which picture is in a cell — or
-  // retyping a caption that stays a caption — legitimately leaves the extent
-  // alone, so those must not appear here or every keystroke in the Inspector
-  // would mint a cache entry and re-measure the whole sheet.
+  // The gallery contributes its GRID, not its pictures: the cell count, the
+  // cell size, the cell SHAPE, the column count and whether any caption
+  // reserves the band are the five things that move the box. Swapping which
+  // picture is in a cell — or retyping a caption that stays a caption —
+  // legitimately leaves the extent alone, so those must not appear here or
+  // every keystroke in the Inspector would mint a cache entry and re-measure
+  // the whole sheet.
+  //
+  // `aspect` earns its place the hard way: it is the divisor of `cellPicH` in
+  // galleryExtent, so the Inspector's "Cell shape" select changes the height of
+  // every row while touching nothing else in this key. Without it the box kept
+  // the height it was first measured at — 42px of dead space one way, and the
+  // other way a grid taller than its own box, starting above the topic's top
+  // edge and painting over the title.
   const g = s.gallery;
   const gal = g
-    ? `${g.items.length}:${g.cellW ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}`
+    ? `${g.items.length}:${g.cellW ?? ""}:${g.aspect ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}`
     : "";
   return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
 }
