@@ -310,6 +310,72 @@ describe("save / load file", () => {
     expect(store.sheet.nodes[store.sheet.rootNodeId].title).toBe(original.sheets[0].nodes[original.sheets[0].rootNodeId].title);
   });
 
+  /**
+   * Opening a document must not quietly reformat it.
+   *
+   * The block-level run fields are the ones at risk, because losing them is
+   * invisible: I5 compares PLAIN text and the plain text is identical either
+   * way. Worse, once `paraGap`/`listIndent` are gone `normalizeRuns` reads the
+   * neighbouring runs as identically formatted and merges them, so two blocks
+   * become one run — which is why the run COUNT is asserted too.
+   *
+   * This covers all three open paths at once: `.rnode.json`, `.rnode.zip` and
+   * `openDesktop` all funnel through `importDocumentFromJson`.
+   */
+  it("keeps headings, paragraph gaps and list indents when a document is opened", () => {
+    const store = new EditorStore(memoryAdapter);
+    const doc = DocumentModel.blank("Formatted map");
+    const sheet = doc.sheets[0];
+    const root = sheet.nodes[sheet.rootNodeId];
+    root.titleRuns = [
+      { text: "Big heading", fontSize: 24, bold: true },
+      { text: "body paragraph", paraGap: true },
+      { text: "first bullet", listIndent: 1 },
+      { text: "nested bullet", listIndent: 2, color: "#ff0000" },
+    ];
+    root.title = root.titleRuns.map((r) => r.text).join("");
+
+    expect(store.importDocumentFromJson(JSON.stringify(doc))).toBe(doc.documentId);
+
+    const runs = store.doc.node(sheet.rootNodeId)!.titleRuns!;
+    expect(runs).toHaveLength(4); // nothing merged
+    expect(runs[0].fontSize).toBe(24);
+    expect(runs[0].bold).toBe(true);
+    expect(runs[1].paraGap).toBe(true);
+    expect(runs[2].listIndent).toBe(1);
+    expect(runs[3].listIndent).toBe(2);
+    expect(runs[3].color).toBe("#ff0000");
+  });
+
+  it("refuses run fields that would poison the layout, and caps list depth", () => {
+    const store = new EditorStore(memoryAdapter);
+    const doc = DocumentModel.blank("Hostile map");
+    const sheet = doc.sheets[0];
+    const root = sheet.nodes[sheet.rootNodeId];
+    root.titleRuns = [
+      { text: "a", fontSize: Number.POSITIVE_INFINITY },
+      { text: "b", fontSize: -3 },
+      { text: "c", fontSize: "24" as unknown as number },
+      { text: "d", listIndent: 99 },
+      { text: "e", listIndent: 2.7 },
+      { text: "f", paraGap: "yes" as unknown as boolean },
+    ];
+    root.title = "abcdef";
+
+    expect(store.importDocumentFromJson(JSON.stringify(doc))).toBe(doc.documentId);
+
+    const runs = store.doc.node(sheet.rootNodeId)!.titleRuns!;
+    const byText = (t: string) => runs.find((r) => r.text.includes(t))!;
+    expect(byText("a").fontSize).toBeUndefined();
+    expect(byText("b").fontSize).toBeUndefined();
+    expect(byText("c").fontSize).toBeUndefined();
+    expect(byText("d").listIndent).toBe(8); // clamped to the paste path's ceiling
+    expect(byText("e").listIndent).toBe(2); // whole levels only
+    expect(byText("f").paraGap).toBeUndefined();
+    // Whatever was dropped, the flat title still reads the same (I5).
+    expect(store.doc.node(sheet.rootNodeId)!.title).toBe("abcdef");
+  });
+
   it("imports a second document as an additional entry and switches to it", () => {
     const store = new EditorStore(memoryAdapter);
     const second = JSON.parse(JSON.stringify(store.doc.doc));

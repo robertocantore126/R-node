@@ -108,9 +108,21 @@ function pathDirname(p: string): string {
 }
 
 /**
- * Validate/sanitize titleRuns coming from an imported document: only plain
- * text with bold/italic/underline/color survives; anything else is dropped.
+ * Validate/sanitize titleRuns coming from an imported document: every field of
+ * `TextRun` that survives type-checking is kept; anything malformed is dropped.
  * Falls back to a single plain run of `title` when no valid runs are present.
+ *
+ * The three BLOCK-level fields matter as much as the inline ones, and are the
+ * easy ones to forget: `fontSize` is a heading, `paraGap` is a paragraph
+ * boundary (§3 rule 4 — it opens a block even without a `\n`) and `listIndent`
+ * is a bullet depth. Dropping them does not merely lose formatting: with the
+ * boundaries gone `normalizeRuns` sees the neighbouring runs as identically
+ * formatted and MERGES them, so two blocks silently become one. Nothing
+ * downstream notices, because I5 compares plain text and the plain text is
+ * unchanged — which is exactly why this has to be right here.
+ *
+ * Every open path reaches this: `.rnode.json`, `.rnode.zip` and `openDesktop`,
+ * which round-trips a document it has just read out of its own `.rnode` file.
  */
 function sanitizeTitleRuns(raw: unknown): TextRun[] | undefined {
   if (!Array.isArray(raw)) return undefined;
@@ -125,6 +137,17 @@ function sanitizeTitleRuns(raw: unknown): TextRun[] | undefined {
     if ((r as { underline?: unknown }).underline === true) run.underline = true;
     const color = (r as { color?: unknown }).color;
     if (typeof color === "string" && /^#[0-9a-fA-F]{3,8}$/.test(color)) run.color = color;
+    // A size the layout can divide by: NaN, Infinity or anything <= 0 would
+    // propagate through the line box into every measurement downstream.
+    const fontSize = (r as { fontSize?: unknown }).fontSize;
+    if (typeof fontSize === "number" && Number.isFinite(fontSize) && fontSize > 0) run.fontSize = fontSize;
+    if ((r as { paraGap?: unknown }).paraGap === true) run.paraGap = true;
+    // Whole levels, capped at 8 — the same depth ceiling pasteSanitizer clamps
+    // both its list paths to, so an imported list cannot out-nest a pasted one.
+    const listIndent = (r as { listIndent?: unknown }).listIndent;
+    if (typeof listIndent === "number" && Number.isFinite(listIndent) && listIndent > 0) {
+      run.listIndent = Math.min(8, Math.floor(listIndent));
+    }
     runs.push(run);
   }
   if (runs.length === 0) return undefined;
