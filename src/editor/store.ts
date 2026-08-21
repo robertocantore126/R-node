@@ -19,7 +19,7 @@ import { trace } from "../dev/trace";
 import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
-import { createCanvasTextMeasurer, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, galleryExtent, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
@@ -46,17 +46,22 @@ function formatBytes(bytes: number): string {
 }
 
 /**
- * The starting caption for a gallery cell: the file's name without its
- * extension, tidied of the separators a download tends to leave behind
- * ("wonder-woman_01.png" → "wonder woman 01").
+ * The starting caption for a gallery cell: the file's name, whole — extension
+ * and separators included ("wonder-woman_01.png").
  *
- * A guess, and openly one — it is a plain string in an editable field, not a
- * derived value that would fight the user. A cell whose caption is cleared
- * stays cleared: nothing re-derives this later.
+ * This used to tidy the name into a title ("wonder woman 01"). It stopped,
+ * because what a caption is actually for in a grid is telling two similar
+ * pictures apart, and the tidying deleted exactly the part that does it:
+ * "-v2" against "-v3", ".png" against ".jpg". A guess that drops the
+ * distinguishing half is worse than no guess at all.
+ *
+ * Still a guess, and still openly one — a plain string in an editable field,
+ * not a derived value that would fight the user. A cell whose caption is
+ * cleared stays cleared: the only thing that ever re-derives this is the
+ * Inspector's "Use file names" button, which asks by being a button.
  */
 function captionFromFileName(name?: string): string | undefined {
-  if (!name) return undefined;
-  const stem = name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  const stem = (name ?? "").trim();
   return stem === "" ? undefined : stem;
 }
 
@@ -191,6 +196,19 @@ export interface EditorState {
   imageSel: string | null;
   /** Which slot of the selected image was clicked ("top" by default). */
   imageSlot: ImageSlot | null;
+  /**
+   * The selected CELL of a gallery topic (T25) — what Delete removes and what
+   * the arrow keys walk. Null = no cell selected.
+   *
+   * Unlike `imageSel`, this is NOT exclusive with node selection: the topic
+   * stays selected alongside it. A cell's caption is edited in the Inspector's
+   * gallery list, and that list only exists for a selected topic, so an
+   * exclusive cell selection would close the panel the selection exists to
+   * reach. It is cleared wherever `imageSel` is, though — a cell selection
+   * that outlived its topic's would let Delete cut a picture out of a grid
+   * nobody is looking at.
+   */
+  gallerySel: { nodeId: string; index: number } | null;
   /** Heavy operation in flight (a save with images, which builds the
    *  .rnode.zip). The status bar shows a progress bar with a cancel button;
    *  null = nothing heavy running. progress is 0..1, null = indeterminate. */
@@ -337,6 +355,7 @@ export class EditorStore {
       summarySel: null,
       imageSel: null,
       imageSlot: null,
+      gallerySel: null,
       op: null,
     };
   }
@@ -1351,6 +1370,7 @@ export class EditorStore {
     this.state.summarySel = null;
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     if (opts?.center) this.centerOnNode(id);
     this.notify();
   }
@@ -1374,6 +1394,7 @@ export class EditorStore {
     this.state.summarySel = null;
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     this.notify();
   }
 
@@ -1395,6 +1416,7 @@ export class EditorStore {
     this.state.summarySel = null;
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     this.notify();
   }
 
@@ -1412,6 +1434,91 @@ export class EditorStore {
     this.state.summarySel = null;
     this.state.imageSel = nodeId;
     this.state.imageSlot = slot;
+    this.notify();
+  }
+
+  /**
+   * Select ONE CELL of a gallery topic (T25): the ring the canvas draws, and
+   * the thing Delete and the arrow keys then act on.
+   *
+   * The topic stays selected, which is the one way this differs from
+   * `selectImage` — see `gallerySel` for why. An index outside the grid is
+   * refused rather than stored: every consumer would otherwise have to
+   * re-check it, and the one that forgot would edit the wrong picture.
+   */
+  selectGalleryCell(nodeId: string, index: number): void {
+    const items = this.model.node(nodeId)?.style.gallery?.items;
+    if (!items || index < 0 || index >= items.length) return;
+    this.commitDraftOnLeave();
+    trace.mark("ui", "ui:selection", { galleryCell: true, index });
+    this.state.selection = [nodeId];
+    this.state.editingId = null;
+    this.state.pendingInsert = null;
+    this.state.relSel = null;
+    this.state.groupSel = null;
+    this.state.summarySel = null;
+    this.state.imageSel = null;
+    this.state.imageSlot = null;
+    this.state.gallerySel = { nodeId, index };
+    this.notify();
+  }
+
+  /** Step out of a cell back to its topic, which stays selected — Escape.
+   *  Distinct from `clearSelection`: leaving the grid should not also leave
+   *  the topic, or Escape would cost the Inspector panel as well. */
+  clearGalleryCell(): void {
+    if (!this.state.gallerySel) return;
+    this.state.gallerySel = null;
+    this.notify();
+  }
+
+  /**
+   * Move the cell selection one step (T25). Left/Right walk the paint order;
+   * Up/Down step a whole ROW, using the grid's own column count so the
+   * movement matches what is on screen rather than the order in the array.
+   *
+   * Walking off an end stops instead of wrapping. The grid is a picture, not a
+   * list: a jump from the last cell back to the first reads as the selection
+   * being lost, and there is nothing off the end to go to anyway.
+   */
+  navigateGalleryCell(dir: "up" | "down" | "left" | "right"): void {
+    const sel = this.state.gallerySel;
+    if (!sel) return;
+    const node = this.model.node(sel.nodeId);
+    const ext = node ? galleryExtent(node) : null;
+    if (!ext) return;
+    const step = dir === "left" ? -1 : dir === "right" ? 1 : dir === "up" ? -ext.cols : ext.cols;
+    const next = sel.index + step;
+    if (next < 0 || next >= ext.count) return;
+    trace.mark("ui", "ui:selection", { galleryCell: true, index: next });
+    this.state.gallerySel = { nodeId: sel.nodeId, index: next };
+    this.notify();
+  }
+
+  /**
+   * Delete the SELECTED cell (Backspace/Delete with a cell selected): it
+   * leaves the grid, the topic stays, and so does the picture — the
+   * attachment card may be shared and `gcOrphans` is the collector. The same
+   * rule `deleteSelectedImage` follows for the edge slots.
+   *
+   * The selection then lands on whatever slid into the gap, so a run of
+   * Deletes clears a grid from a point rather than stopping after one.
+   */
+  deleteSelectedGalleryCell(): void {
+    const sel = this.state.gallerySel;
+    if (!sel) return;
+    const items = this.model.node(sel.nodeId)?.style.gallery?.items ?? [];
+    if (sel.index < 0 || sel.index >= items.length) {
+      // A stale index — undo, or another session, moved the grid under the
+      // selection. Drop the selection rather than removing whatever happens
+      // to sit at that index now.
+      this.state.gallerySel = null;
+      this.notify();
+      return;
+    }
+    this.removeGalleryItem(sel.nodeId, sel.index);
+    const left = this.model.node(sel.nodeId)?.style.gallery?.items.length ?? 0;
+    this.state.gallerySel = left === 0 ? null : { nodeId: sel.nodeId, index: Math.min(sel.index, left - 1) };
     this.notify();
   }
 
@@ -1441,6 +1548,7 @@ export class EditorStore {
       this.state.pendingInsert = null;
       this.state.imageSel = null;
       this.state.imageSlot = null;
+      this.state.gallerySel = null;
       const why = node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
       return trace.ignored("edit:start", why, { nodeId: id });
     }
@@ -1449,6 +1557,7 @@ export class EditorStore {
     this.state.pendingInsert = null;
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     this.editOriginal = { title: node.title, titleRuns: node.titleRuns };
     // Seed the draft with the current title so layout keeps measuring the
     // node at its current size until the editor reports its first change.
@@ -2099,6 +2208,7 @@ export class EditorStore {
       this.state.summarySel = null;
       this.state.imageSel = null;
       this.state.imageSlot = null;
+      this.state.gallerySel = null;
       this.notify();
     }
   }
@@ -2501,6 +2611,7 @@ export class EditorStore {
     const slot = this.state.imageSlot ?? "top";
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     if (!node?.style[slotKey(slot)]) {
       this.notify();
       return;
@@ -2728,6 +2839,38 @@ export class EditorStore {
   }
 
   /**
+   * Rewrite every caption in a gallery from its picture's file name — the
+   * Inspector's "Use file names" (T25).
+   *
+   * Import writes that name into a NEW cell and then never touches it again,
+   * on purpose: a caption someone typed must not be overwritten because the
+   * default later changed its mind. This button IS that change of mind, made
+   * explicit and reversible — it rides the same single `setStyle` every other
+   * gallery edit does (I7), so one Ctrl+Z brings the old captions back
+   * together rather than one at a time.
+   *
+   * A cell whose picture carries no stored name keeps the caption it has.
+   * Blanking a caption because the document arrived without that piece of
+   * metadata would be a worse answer than leaving it alone.
+   */
+  resetGalleryCaptions(nodeId: string): number {
+    const items = this.galleryItems(nodeId);
+    let changed = 0;
+    for (const it of items) {
+      const caption = captionFromFileName(this.sheet.attachments.find((a) => a.id === it.id)?.name);
+      if (caption === undefined || caption === it.caption) continue;
+      it.caption = caption;
+      changed++;
+    }
+    if (changed === 0) return 0;
+    const g = this.model.node(nodeId)?.style.gallery;
+    this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
+    trace.applied("gallery:reset-captions", { nodeId, changed });
+    this.notify();
+    return changed;
+  }
+
+  /**
    * Drop one cell. The attachment CARD stays: the picture may sit in another
    * cell or another topic, and `gcOrphans` is the collector — the same rule
    * `deleteSelectedImage` follows for the edge slots.
@@ -2751,6 +2894,11 @@ export class EditorStore {
     items.splice(dest, 0, moved);
     const g = this.model.node(nodeId)?.style.gallery;
     this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
+    // The ring follows the picture it is on, not the position it was at: a
+    // reorder that left the selection behind would leave it marking whichever
+    // cell slid into the gap.
+    const sel = this.state.gallerySel;
+    if (sel && sel.nodeId === nodeId && sel.index === from) this.state.gallerySel = { nodeId, index: dest };
     this.notify();
   }
 
@@ -3455,6 +3603,7 @@ export class EditorStore {
     this.state.summarySel = null;
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     this.state.relSel = id;
     this.notify();
   }
@@ -3465,6 +3614,7 @@ export class EditorStore {
     this.state.summarySel = null;
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     this.state.groupSel = id;
     this.notify();
   }
@@ -3475,6 +3625,7 @@ export class EditorStore {
     this.state.groupSel = null;
     this.state.imageSel = null;
     this.state.imageSlot = null;
+    this.state.gallerySel = null;
     this.state.summarySel = id;
     this.notify();
   }

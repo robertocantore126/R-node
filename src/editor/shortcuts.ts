@@ -62,6 +62,11 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       store.togglePalette();
     } else if (s.relFrom) {
       store.clearRelFrom();
+    } else if (s.gallerySel) {
+      // Step OUT of the cell, not out of the topic (T25): the grid is inside
+      // the topic, so one Escape should climb one level, and the Inspector
+      // that edits the caption is only there while the topic is selected.
+      store.clearGalleryCell();
     } else if (s.selection.length > 0 || s.imageSel) {
       store.clearSelection();
     }
@@ -95,6 +100,16 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
   // Tracer 2.0 ui:keyboard-shortcut — every dispatched shortcut, at the one
   // choke point every key passes through (tracer 2.0).
   trace.applied("ui:shortcut", { combo, action });
+
+  // With a gallery cell selected, the arrows walk the GRID instead of the map
+  // (T25). Intercepted here rather than inside the four nav cases so the
+  // directions cannot drift apart, and so `navigate` never sees a keystroke
+  // that was aimed at a cell.
+  const navDir = { "nav-up": "up", "nav-down": "down", "nav-left": "left", "nav-right": "right" } as const;
+  if (action in navDir && store.getSnapshot().gallerySel) {
+    store.navigateGalleryCell(navDir[action as keyof typeof navDir]);
+    return true;
+  }
 
   switch (action) {
     case "create-sibling":
@@ -131,9 +146,10 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
     case "delete": {
       e.preventDefault();
       const s = store.getSnapshot();
-      // An image selected inside its node: Backspace/Delete removes ONLY the
-      // image reference — never the node.
-      if (s.imageSel) store.deleteSelectedImage();
+      // An image or a gallery cell selected inside its node: Backspace/Delete
+      // removes ONLY that picture's place in the node — never the node.
+      if (s.gallerySel) store.deleteSelectedGalleryCell();
+      else if (s.imageSel) store.deleteSelectedImage();
       else if (s.relSel) store.deleteSelectedRelationship();
       else if (s.groupSel) store.deleteGroup(s.groupSel);
       else if (s.summarySel) store.deleteSummary(s.summarySel);

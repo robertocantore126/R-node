@@ -11,7 +11,7 @@ import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, createCanvasTextMeasurer, ellipsizeToWidth, FONT_STACK, GALLERY_CAPTION_SIZE, GALLERY_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -39,6 +39,13 @@ export interface RenderState {
   imageSel?: string | null;
   /** Which slot of `imageSel` was clicked (defaults to "top"). */
   imageSlot?: ImageSlot | null;
+  /**
+   * The selected CELL of a gallery topic (T25) — drawn with the same ring an
+   * image slot gets, around the picture AND its caption band, because both
+   * are the cell. Unlike `imageSel` this does not replace the node selection:
+   * the topic wears its own ring at the same time.
+   */
+  gallerySel?: { nodeId: string; index: number } | null;
   /**
    * Ghost preview of an image being dragged over the map (internal
    * reassignment): the image bitmap follows the cursor, semi-transparent,
@@ -711,6 +718,19 @@ export class Renderer {
         this.strokeRing(ctx, ir, RING_W_SELECTED);
       }
     }
+    // Gallery cell selection ring (T25): a cell is a target of its own, so it
+    // says so the same way a selected image does. Drawn from the same
+    // positioned cells the painter and the hit test use, so the ring cannot
+    // land anywhere but on the picture the keys will act on.
+    if (state.gallerySel?.nodeId === n.id) {
+      const { cells, gallery } = positionedImageSlots(p, p.node, this.resolveImage);
+      const c = cells[state.gallerySel.index];
+      if (c) {
+        const h = c.h + (gallery && gallery.captionH > 0 ? gallery.captionH : 0);
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, { x: c.x, y: c.y, w: c.w, h }, RING_W_SELECTED);
+      }
+    }
     if (state.hoverId === n.id && !selected) {
       ctx.strokeStyle = theme.selection;
       ctx.globalAlpha = opacity * 0.55;
@@ -973,8 +993,9 @@ export class Renderer {
    * The cells come from positionedImageSlots (I9) like every other image, so
    * the measure, this painter and the two exports cannot disagree on where a
    * picture lands. Captions are drawn straight from the string: they are plain
-   * single-line labels by construction (see `GalleryItem`), never runs, so
-   * none of the §3 parity machinery is involved and none of it needs to be.
+   * text by construction (see `GalleryItem`), never runs, so none of the §3
+   * parity machinery is involved and none of it needs to be. `captionLines`
+   * decides the wrap, and the exports call the same function.
    */
   private drawGallery(theme: RenderTheme, p: Placed): void {
     const { cells, gallery } = positionedImageSlots(p, p.node, this.resolveImage);
@@ -1006,7 +1027,10 @@ export class Renderer {
       if (!c.caption) continue;
       // ctx.font is already the caption font — set once for the whole pass
       // rather than per cell, so this measures in the right face.
-      ctx.fillText(ellipsizeToWidth(c.caption, c.w, (s) => ctx.measureText(s).width), c.x + c.w / 2, c.captionY);
+      const lines = captionLines(c.caption, c.w, (s) => ctx.measureText(s).width);
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], c.x + c.w / 2, c.captionY + i * GALLERY_CAPTION_LINE_H);
+      }
     }
     ctx.restore();
   }

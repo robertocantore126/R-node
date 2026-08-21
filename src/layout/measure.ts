@@ -143,10 +143,36 @@ export const GALLERY_CELL_W = 96;
 export const GALLERY_ASPECT = 1;
 /** Gap between cells, horizontally and vertically. */
 export const GALLERY_GAP = 4;
-/** Font size of a cell caption. Fixed: a caption is chrome, not node text. */
-export const GALLERY_CAPTION_SIZE = 9;
+/**
+ * Font size of a cell caption. Fixed: a caption is chrome, not node text.
+ *
+ * 11 rather than the 9 this started at, because a caption now carries the
+ * picture's WHOLE file name (`captionFromFileName` in the store). A two-word
+ * label is recognised at a glance at any size; a file name is read character
+ * by character — "-v2" against "-v3" — and 9px lost that at a normal zoom.
+ * Raising it re-lays-out every gallery in every existing document the next
+ * time it is opened. That is the shared constant doing its job (I9): the
+ * canvas, the SVG export and the PDF export all move together.
+ */
+export const GALLERY_CAPTION_SIZE = 11;
 /** Gap between the bottom of a cell's picture and its caption's line box. */
 export const GALLERY_CAPTION_GAP = 2;
+/**
+ * Lines reserved under EVERY picture — always this many, never "as many as
+ * this caption needs".
+ *
+ * Every cell of a grid is the same height by construction, so the band is one
+ * decision for the whole gallery: sizing it per cell would ripple into
+ * `gridCells` and stop the rows lining up, which is the entire point of the
+ * grid. A flat count also keeps caption TEXT out of `extentKey` — the measure
+ * only ever asks whether ANY caption exists, so typing a longer one never
+ * re-measures the sheet.
+ */
+export const GALLERY_CAPTION_LINES = 2;
+/** Pitch of one caption line. Shared so the three painters put the second
+ *  line in the same place, and so the band's height and the baselines drawn
+ *  inside it can never be derived from two different numbers. */
+export const GALLERY_CAPTION_LINE_H = Math.round(GALLERY_CAPTION_SIZE * LINE_HEIGHT_FACTOR);
 /** Default columns when `Style.gallery.cols` says nothing: five per row, then
  *  wrap. A fixed default is the point — the column count is a property of the
  *  node, not of the width it happens to be drawn at (see `galleryExtent`). */
@@ -694,6 +720,66 @@ export function ellipsizeToWidth(text: string, maxW: number, measure: (s: string
 }
 
 /**
+ * Longest prefix of `text` that measures within `maxW` — never fewer than one
+ * character, or a cell narrower than a single glyph would never make progress
+ * and `captionLines` would not terminate.
+ *
+ * Binary search, for the same reason `ellipsizeToWidth` uses one: this runs
+ * per cell per frame and a tier list is forty cells.
+ */
+function fitPrefix(text: string, maxW: number, measure: (s: string) => number): number {
+  let lo = 1;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (measure(text.slice(0, mid)) <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
+ * Break a caption into at most `maxLines` lines that each fit `maxW`, the last
+ * one ellipsized when the text still has not ended.
+ *
+ * Shared by the canvas, the SVG export and the PDF export (I9), for the reason
+ * `ellipsizeToWidth` is: three painters each deciding where a name breaks is
+ * three different labels for one document.
+ *
+ * The break is where the line FILLS, not at a word boundary. A caption is a
+ * file name and "wonder-woman_01.png" is a single word to any word-wrapper, so
+ * wrapping on spaces would leave the second line empty and cut the name at
+ * exactly the width one line was already worth — which is what the second line
+ * was added to fix.
+ */
+export function captionLines(
+  text: string,
+  maxW: number,
+  measure: (s: string) => number,
+  maxLines: number = GALLERY_CAPTION_LINES,
+): string[] {
+  if (text === "" || maxLines <= 0 || maxW <= 0) return [];
+  const lines: string[] = [];
+  let rest = text;
+  while (rest !== "") {
+    if (lines.length === maxLines - 1) {
+      // The last line takes whatever is left, cut with the same ellipsis the
+      // single-line path uses — one look for a clipped caption, everywhere.
+      lines.push(ellipsizeToWidth(rest, maxW, measure));
+      return lines;
+    }
+    if (measure(rest) <= maxW) {
+      lines.push(rest);
+      return lines;
+    }
+    const n = fitPrefix(rest, maxW, measure);
+    lines.push(rest.slice(0, n));
+    rest = rest.slice(n);
+  }
+  return lines;
+}
+
+/**
  * The centred part of a source that fills a box of ratio `targetAspect`
  * (width ÷ height), in normalised 0..1 units — "cover", the rule that lets a
  * grid of mismatched pictures line up.
@@ -809,7 +895,7 @@ export function galleryExtent(n: MindNode): GalleryExtent | null {
   const aspect = g.aspect && g.aspect > 0 ? g.aspect : GALLERY_ASPECT;
   const cellPicH = Math.max(8, Math.round(cellW / aspect));
   const captionH = g.items.some((it) => (it.caption ?? "").trim() !== "")
-    ? GALLERY_CAPTION_GAP + Math.round(GALLERY_CAPTION_SIZE * LINE_HEIGHT_FACTOR)
+    ? GALLERY_CAPTION_GAP + GALLERY_CAPTION_LINES * GALLERY_CAPTION_LINE_H
     : 0;
   const cellH = cellPicH + captionH;
 

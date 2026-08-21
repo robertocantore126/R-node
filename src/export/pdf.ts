@@ -62,13 +62,14 @@ import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
   FONT_STACK,
+  GALLERY_CAPTION_LINE_H,
   GALLERY_CAPTION_SIZE,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
   bezierEnterRect,
   bezierExitRect,
   bezierSlice,
-  ellipsizeToWidth,
+  captionLines,
   imageResolver,
   measureNode,
   positionedImageSlots,
@@ -490,22 +491,27 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     let opened = false;
     for (const c of pos.cells) {
       if (!c.caption) continue;
-      const label = ellipsizeToWidth(c.caption, c.w, measure);
-      if (!label) continue;
-      if (!opened) {
-        cmds.push("BT", `${rgb(color)} rg`);
-        ops += 2;
-        opened = true;
+      // Same wrap as the canvas and the SVG, from the same function (I9).
+      const lines = captionLines(c.caption, c.w, measure);
+      for (let i = 0; i < lines.length; i++) {
+        const label = lines[i];
+        if (!label) continue;
+        if (!opened) {
+          cmds.push("BT", `${rgb(color)} rg`);
+          ops += 2;
+          opened = true;
+        }
+        const pt = Math.max(0.01, GALLERY_CAPTION_SIZE * fr.s);
+        fontSizes.push(pt);
+        const x = c.x + (c.w - measure(label)) / 2;
+        const y = c.captionY + GALLERY_CAPTION_SIZE + i * GALLERY_CAPTION_LINE_H;
+        cmds.push(
+          `/F1 ${f(pt)} Tf`,
+          `1 0 0 1 ${f(fr.X(x))} ${f(fr.Y(y))} Tm`,
+          `(${pdfStr(label)}) Tj`,
+        );
+        ops += 3;
       }
-      const pt = Math.max(0.01, GALLERY_CAPTION_SIZE * fr.s);
-      fontSizes.push(pt);
-      const x = c.x + (c.w - measure(label)) / 2;
-      cmds.push(
-        `/F1 ${f(pt)} Tf`,
-        `1 0 0 1 ${f(fr.X(x))} ${f(fr.Y(c.captionY + GALLERY_CAPTION_SIZE))} Tm`,
-        `(${pdfStr(label)}) Tj`,
-      );
-      ops += 3;
     }
     if (opened) {
       cmds.push("ET");

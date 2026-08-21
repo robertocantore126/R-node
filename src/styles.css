@@ -300,6 +300,16 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 4px;
+  padding: 1px 3px;
+  margin: 0 -3px;
+  border-radius: 4px;
+}
+
+/* The cell selected on the canvas (T25). The same selection, shown twice:
+   the ring is out on the picture and this is the row that edits its caption,
+   so clicking a picture does not turn into counting cells. */
+.gallery-row.selected {
+  background: var(--accent-soft);
 }
 
 .gallery-row-name {

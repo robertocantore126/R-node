@@ -327,6 +327,10 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
 
   const gallery = node?.style.gallery;
   const items = gallery?.items ?? [];
+  // The cell selected on the canvas, so its row here says so: the ring out
+  // there and the row in here are one selection seen twice, and a user who
+  // clicked a picture should not have to count cells to find its caption.
+  const sel = store.getSnapshot().gallerySel;
 
   const pick = async (list: FileList | null): Promise<void> => {
     if (!list || list.length === 0) return;
@@ -416,6 +420,20 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
             <span className="muted">{gallery?.cols ? "fixed" : `${GALLERY_COLS} default`}</span>
           </div>
           <div className="field">
+            <span>Captions</span>
+            <button
+              className="btn small"
+              onClick={() => {
+                const n = store.resetGalleryCaptions(nodeId);
+                setNote(n === 0 ? "captions already match the file names" : `${n} caption${n === 1 ? "" : "s"} reset`);
+              }}
+              title="Put every caption back to its picture's file name, in one undoable step"
+            >
+              Use file names
+            </button>
+            <span className="muted">one undo step</span>
+          </div>
+          <div className="field">
             <span>Download</span>
             <button className="btn small" onClick={() => runExportNodeImage(nodeId, "image/png")} title="This grid alone, as a PNG at 2x — no page chrome, no neighbouring topics">
               PNG
@@ -434,6 +452,7 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
                 last={i === items.length - 1}
                 caption={item.caption ?? ""}
                 name={store.sheet.attachments.find((a) => a.id === item.id)?.name ?? item.id.slice(0, 8)}
+                selected={sel?.nodeId === nodeId && sel.index === i}
                 inputRef={(el) => {
                   captionRefs.current[i] = el;
                 }}
@@ -453,6 +472,7 @@ function GalleryRow({
   last,
   caption,
   name,
+  selected,
   inputRef,
 }: {
   nodeId: string;
@@ -460,6 +480,8 @@ function GalleryRow({
   last: boolean;
   caption: string;
   name: string;
+  /** This cell is the one selected on the canvas (T25). */
+  selected?: boolean;
   /** Receives the caption input element, so GallerySection can focus it by index. */
   inputRef?: (el: HTMLInputElement | null) => void;
 }): JSX.Element {
@@ -475,7 +497,7 @@ function GalleryRow({
   };
 
   return (
-    <li className="gallery-row">
+    <li className={selected ? "gallery-row selected" : "gallery-row"}>
       <span className="gallery-row-name" title={name}>
         {name}
       </span>

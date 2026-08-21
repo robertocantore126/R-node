@@ -29,13 +29,14 @@ import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
   FONT_STACK,
+  GALLERY_CAPTION_LINE_H,
   GALLERY_CAPTION_SIZE,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
   bezierEnterRect,
   bezierExitRect,
   bezierSlice,
-  ellipsizeToWidth,
+  captionLines,
   imageResolver,
   measureNode,
   wrapRunLines,
@@ -503,15 +504,21 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
         imagesMissing++;
       }
       if (c.caption && c.captionH > 0) {
-        // Centred under the cell, on the caption band's own baseline. No
-        // wrapping and no runs: a caption is one plain line by construction,
-        // cut with the same ellipsis the canvas uses.
-        const label = ellipsizeToWidth(c.caption, c.w, (s) =>
+        // Centred under the cell, on the caption band's own baselines. The
+        // wrap is NOT decided here: `captionLines` is the one function the
+        // canvas, this export and the PDF all ask, so one document cannot
+        // break a file name in three places. One <text> per line rather than
+        // tspans — the lines are independent, centred, and a tspan dy would
+        // re-derive the pitch the shared constant already owns.
+        const lines = captionLines(c.caption, c.w, (s) =>
           opts.measurer.measure(s, { fontSize: GALLERY_CAPTION_SIZE, fontFamily: FONT_STACK }).width
         );
-        parts.push(
-          `<text x="${n3(c.x + c.w / 2)}" y="${n3(c.captionY + GALLERY_CAPTION_SIZE)}" font-family="${esc(FONT_STACK)}" font-size="${n3(GALLERY_CAPTION_SIZE)}" fill="${esc(text)}" fill-opacity="0.7" text-anchor="middle">${esc(label)}</text>`
-        );
+        for (let i = 0; i < lines.length; i++) {
+          const y = c.captionY + GALLERY_CAPTION_SIZE + i * GALLERY_CAPTION_LINE_H;
+          parts.push(
+            `<text x="${n3(c.x + c.w / 2)}" y="${n3(y)}" font-family="${esc(FONT_STACK)}" font-size="${n3(GALLERY_CAPTION_SIZE)}" fill="${esc(text)}" fill-opacity="0.7" text-anchor="middle">${esc(lines[i])}</text>`
+          );
+        }
       }
     }
     parts.push(title(p, text, pos, opts.measurer));
