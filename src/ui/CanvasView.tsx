@@ -7,7 +7,7 @@ import { THEMES } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
 import { sheetToHtmlViewer } from "../export/htmlViewer";
 import { sheetToPdf } from "../export/pdf";
-import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
+import { pdfImageSource } from "../export/pdfImage";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
@@ -465,18 +465,9 @@ export function CanvasView(): JSX.Element {
           measurer: createCanvasTextMeasurer(),
           colorOf: (id) => renderer.nodeColors(rs, id),
           linkColorOf: (id) => renderer.branchColorOf(rs, id),
-          // JPEG only: those bytes go into the file untouched (DCTDecode).
-          // A PNG would need its IDAT unpacked and re-encoded, which is more
-          // than an experiment should carry.
-          jpegBytes: async (assetId) => {
-            const store2 = getAssetStore();
-            const meta = await store2.meta(assetId);
-            if (!meta || meta.mime !== "image/jpeg") return null;
-            const blob = await store2.get(assetId, "small");
-            if (!blob) return null;
-            const dims = computeLevelDims(meta.w, meta.h, LEVEL_LONG_SIDE.small);
-            return { bytes: new Uint8Array(await blob.arrayBuffer()), w: dims.w, h: dims.h };
-          },
+          // Every format the browser can decode, not JPEG alone — see
+          // src/export/pdfImage.ts for which encoding each one takes.
+          imageBytes: (assetId) => pdfImageSource(getAssetStore(), assetId),
         });
         const url = URL.createObjectURL(out.blob);
         const a = document.createElement("a");
@@ -487,7 +478,15 @@ export function CanvasView(): JSX.Element {
         store.toast(
           `PDF — ${out.nodes.toLocaleString()} topics down ${out.mapPages} sheets, full width on each, ` +
             `${out.report.units.percentOfTrueSize}% of true size (text ${out.report.units.minFontPt}pt), ` +
-            `${out.bytes < 1048576 ? `${Math.round(out.bytes / 1024)}KB` : `${(out.bytes / 1048576).toFixed(1)}MB`}`
+            `${out.images} images, ` +
+            `${out.bytes < 1048576 ? `${Math.round(out.bytes / 1024)}KB` : `${(out.bytes / 1048576).toFixed(1)}MB`}` +
+            // Said out loud, because both were once silent: an unreadable
+            // asset used to be a picture that simply was not there, and a
+            // character with no glyph used to be a "?" mid-word.
+            (out.report.units.imagesMissing > 0 ? ` — ${out.report.units.imagesMissing} unreadable` : "") +
+            (out.report.units.unmappableChars > 0
+              ? ` — ${out.report.units.unmappableChars} characters Helvetica cannot draw`
+              : "")
         );
       } catch (e) {
         store.toast(`PDF export failed — ${String(e)}`);
