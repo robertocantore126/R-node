@@ -10,11 +10,11 @@
  */
 import { describe, expect, it } from "vitest";
 import { unzlibSync } from "fflate";
-import { sheetToPdf, PAGE_SIZES, PT_PER_UNIT } from "../src/export/pdf";
+import { sheetToPdf, PAGE_SIZES, PT_PER_UNIT, type PdfImageSource } from "../src/export/pdf";
 import { HEURISTIC_MEASURER } from "../src/layout/measure";
 import { applyLayout } from "../src/layout/mindmap";
 import { DocumentModel } from "../src/core/doc";
-import type { MindNode, Sheet } from "../src/core/types";
+import type { MindNode, Sheet, TextRun } from "../src/core/types";
 
 const MARGIN = 28.35;
 
@@ -217,5 +217,180 @@ describe("paginated PDF", () => {
     const out = await sheetToPdf(sheet, OPTS);
     expect(out.pages).toBe(1);
     expect(out.nodes).toBe(0);
+  });
+});
+
+/**
+ * Rich text and pictures: what the export used to drop on the floor.
+ *
+ * Both were declared gaps rather than bugs, which is why they lasted — the
+ * header said "run-level bold/italic is NOT approximated" and "JPEG only", and
+ * a declared gap is invisible until someone opens the file. A real map is
+ * mostly styled prose and pasted PNGs, so the two gaps together removed most
+ * of what was on the page.
+ */
+describe("PDF rich text", () => {
+  /** One topic whose title carries the given runs, laid out for real. */
+  function richSheet(runs: TextRun[], style: Record<string, unknown> = {}): Sheet {
+    const { sheet, add } = makeSheet();
+    const n = add(sheet.rootNodeId, runs.map((r) => r.text).join(""), style);
+    n.titleRuns = runs;
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+    return sheet;
+  }
+  const streamsOf = async (sheet: Sheet): Promise<string> =>
+    (await pageStreams((await sheetToPdf(sheet, { ...OPTS, page: "A1" })).blob)).join("\n");
+
+  it("draws a bold run bold and an italic run italic", async () => {
+    const text = await streamsOf(
+      richSheet([
+        { text: "plain " },
+        { text: "heavy", bold: true },
+        { text: " and " },
+        { text: "slanted", italic: true },
+        { text: " and " },
+        { text: "both", bold: true, italic: true },
+      ]),
+    );
+    // Every face is SELECTED, and each phrase is its own Tj: the version this
+    // replaces concatenated the whole line into one string under /F1.
+    expect(text).toMatch(/\/F2 [\d.]+ Tf/);
+    expect(text).toMatch(/\/F3 [\d.]+ Tf/);
+    expect(text).toMatch(/\/F4 [\d.]+ Tf/);
+    expect(text).toContain("(heavy) Tj");
+    expect(text).toContain("(slanted) Tj");
+    expect(text).toContain("(both) Tj");
+  });
+
+  it("carries a run's own colour, not just the topic's", async () => {
+    const text = await streamsOf(richSheet([{ text: "black " }, { text: "blue", color: "#3366cc" }]));
+    // #3366cc is 0.2 0.4 0.8, and it must be set immediately before the phrase.
+    expect(text).toMatch(/0\.200 0\.400 0\.800 rg\n1 0 0 1 [-\d.]+ [-\d.]+ Tm\n\(blue\) Tj/);
+  });
+
+  it("rules an underlined run for exactly its own width", async () => {
+    const text = await streamsOf(
+      richSheet([{ text: "off " }, { text: "under", underline: true }, { text: " off" }]),
+    );
+    // The topic's own box is a rounded rectangle (`c f`), so a `re f` here is
+    // a rule and nothing else.
+    const rules = [...text.matchAll(/^([-\d.]+) ([-\d.]+) ([\d.]+) ([\d.]+) re f$/gm)].map((m) => ({
+      x: Number(m[1]),
+      w: Number(m[3]),
+    }));
+    expect(rules.length).toBe(1);
+    const word = /1 0 0 1 ([-\d.]+) [-\d.]+ Tm\n\(under\) Tj/.exec(text);
+    expect(word).not.toBeNull();
+    // Same left edge as the word it belongs to, and only as wide as that word.
+    expect(rules[0].x).toBeCloseTo(Number(word![1]), 1);
+    expect(rules[0].w).toBeGreaterThan(0);
+    expect(rules[0].w).toBeLessThan(5 * 0.55 * 14);
+  });
+
+  it("draws the marker of a list item", async () => {
+    const text = await streamsOf(richSheet([{ text: "first item", listIndent: 1 }]));
+    // WinAnsi 0x95 is the bullet. It was never emitted at all before, so a
+    // list arrived as paragraphs indented for no visible reason.
+    expect(text).toContain("(" + String.fromCharCode(0x95) + ") Tj");
+  });
+
+  it("declares its own advance widths, so a style change lands where the layout put it", async () => {
+    const out = await sheetToPdf(richSheet([{ text: "aaaa " }, { text: "bbbb", bold: true }]), {
+      ...OPTS,
+      page: "A1",
+    });
+    const file = new TextDecoder("latin1").decode(new Uint8Array(await out.blob.arrayBuffer()));
+    // Four faces, each with a Widths array and a descriptor to hang it on.
+    expect((file.match(/\/Widths \[/g) ?? []).length).toBe(4);
+    expect((file.match(/\/FontDescriptor \d+ 0 R/g) ?? []).length).toBe(4);
+    expect(file).toContain("/FirstChar 32");
+    expect(file).toContain("/LastChar 255");
+
+    // The second phrase starts exactly one first-phrase-width along. This is
+    // the property that removes the gap before every bold word: without a
+    // declared Widths the viewer advances by Helvetica's metrics while this x
+    // came from the measurer's, and the two disagree by a few percent.
+    const text = (await pageStreams(out.blob)).join("\n");
+    const a = /1 0 0 1 ([-\d.]+) [-\d.]+ Tm\n\(aaaa \) Tj/.exec(text);
+    const b = /1 0 0 1 ([-\d.]+) [-\d.]+ Tm\n\(bbbb\) Tj/.exec(text);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    // HEURISTIC_MEASURER makes every glyph 0.55em, so five of them at 14px is
+    // 38.5 world units, scaled onto the paper.
+    expect(Number(b![1]) - Number(a![1])).toBeCloseTo(5 * 0.55 * 14 * out.scale, 1);
+  });
+
+  it("spells a character WinAnsi has, and counts the ones it does not", async () => {
+    const out = await sheetToPdf(richSheet([{ text: "a—b śūnyatā 中" }]), {
+      ...OPTS,
+      page: "A1",
+    });
+    const text = (await pageStreams(out.blob)).join("\n");
+    // The em dash is WinAnsi 0x97. It used to be "?", mid-word, which reads as
+    // corruption rather than as a font limit.
+    expect(text).toContain(String.fromCharCode(0x97));
+    // Diacritics are stripped rather than the letter being lost.
+    expect(text).toContain("sunyata");
+    // What is genuinely unrepresentable is counted, not swallowed.
+    expect(out.report.units.unmappableChars).toBe(1);
+  });
+});
+
+describe("PDF images", () => {
+  /** A topic showing one asset, plus the attachment card the measurer needs. */
+  function imageSheet(): Sheet {
+    const { sheet, add } = makeSheet();
+    add(sheet.rootNodeId, "shown", { image: "asset1" });
+    sheet.attachments = [
+      { id: "asset1", w: 4, h: 2, mime: "image/png", name: "a", bytes: 0 },
+    ] as unknown as Sheet["attachments"];
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+    return sheet;
+  }
+  const fileOf = async (out: { blob: Blob }): Promise<string> =>
+    new TextDecoder("latin1").decode(new Uint8Array(await out.blob.arrayBuffer()));
+
+  it("embeds a JPEG untouched", async () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
+    const src: PdfImageSource = { w: 4, h: 2, jpeg };
+    const out = await sheetToPdf(imageSheet(), { ...OPTS, imageBytes: async () => src });
+    const file = await fileOf(out);
+    expect(file).toContain("/Filter /DCTDecode");
+    expect(file).toContain("/Width 4 /Height 2");
+  });
+
+  it("deflates a decoded image instead of reporting it missing", async () => {
+    // The whole of the old behaviour: anything but a JPEG was dropped, and a
+    // pasted screenshot is a PNG.
+    const out = await sheetToPdf(imageSheet(), {
+      ...OPTS,
+      imageBytes: async () => ({ w: 4, h: 2, rgb: new Uint8Array(4 * 2 * 3).fill(200) }),
+    });
+    expect(out.images).toBe(1);
+    expect(out.report.units.imagesMissing).toBe(0);
+    expect(out.report.units.imagesDeflated).toBe(1);
+    expect(await fileOf(out)).toMatch(/\/Subtype \/Image[^>]*\/Filter \/FlateDecode/);
+  });
+
+  it("carries transparency as an SMask", async () => {
+    const out = await sheetToPdf(imageSheet(), {
+      ...OPTS,
+      imageBytes: async () => ({
+        w: 4,
+        h: 2,
+        rgb: new Uint8Array(4 * 2 * 3).fill(200),
+        alpha: new Uint8Array(4 * 2).fill(128),
+      }),
+    });
+    expect(out.report.units.imagesMasked).toBe(1);
+    const file = await fileOf(out);
+    expect(file).toMatch(/\/SMask \d+ 0 R/);
+    expect(file).toContain("/ColorSpace /DeviceGray");
+  });
+
+  it("still reports an asset whose bytes it cannot get", async () => {
+    const out = await sheetToPdf(imageSheet(), { ...OPTS, imageBytes: async () => null });
+    expect(out.images).toBe(0);
+    expect(out.report.units.imagesMissing).toBe(1);
   });
 });

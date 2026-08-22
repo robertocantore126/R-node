@@ -40,14 +40,22 @@
  * and discard most of them, so the whole cost would come back once per page.
  *
  * KNOWN GAPS, declared here and in the report rather than discovered later.
- * The font is Helvetica, one of the fourteen every viewer carries, so nothing
- * is embedded and non-Latin text degrades to "?". R-node measures with Segoe
- * UI, so line breaks are ours while the glyphs are the viewer's: invisible at
- * 0.048 scale, visible at 1:1, and the reason font embedding is the next piece
- * of work rather than a nicety. Run-level bold/italic is NOT approximated — a
- * per-line guess would render mixed lines wrong while looking complete, so the
- * report declares the gap instead. Shapes other than a rounded rectangle, code
- * topics, groups and summaries are likewise absent and likewise declared.
+ * The fonts are the four Helvetica faces of the base-14 set, so nothing is
+ * embedded: run-level bold, italic, colour, per-run size, underline, strike
+ * and list bullets are all reproduced, and only the GLYPHS are the viewer's.
+ * The LAYOUT is ours too: the file declares its own
+ * /Widths, measured with R-node's measurer, so the viewer advances exactly as
+ * the canvas advances instead of by Helvetica's metrics. What remains is that
+ * Helvetica glyphs are drawn at Segoe UI advances, which leaves a letter
+ * marginally loose or tight inside a word — invisible at 0.048 scale, visible
+ * at 1:1, and the reason embedding a font is the next piece of work rather
+ * than a nicety. Text outside WinAnsi is transliterated where an accent can be
+ * stripped and "?" otherwise, counted as `unmappableChars`.
+ *
+ * Pictures go in whatever their format: JPEG bytes pass through untouched,
+ * everything else is decoded to RGB by the caller and deflated here, with
+ * transparency carried as an /SMask. Shapes other than a rounded rectangle,
+ * code topics, groups and summaries are absent and declared in the report.
  */
 // zlibSync, NOT deflateSync: /FlateDecode means zlib (RFC 1950), and fflate's
 // deflateSync emits RAW deflate with no header. A viewer cannot decode that, so
@@ -56,19 +64,20 @@
 // check we had.
 import { unzlibSync, zlibSync } from "fflate";
 import { buildReport, publishReport, type ExportReport } from "./report";
-import type { MindNode, Relationship, Sheet } from "../core/types";
+import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
 import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
   FONT_STACK,
+  GALLERY_CAPTION_LINE_H,
   GALLERY_CAPTION_SIZE,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
   bezierEnterRect,
   bezierExitRect,
   bezierSlice,
-  ellipsizeToWidth,
+  captionLines,
   imageResolver,
   measureNode,
   positionedImageSlots,
@@ -107,6 +116,27 @@ const DEFAULT_MARGIN = 28.35;
  */
 export const PT_PER_UNIT = 0.75;
 
+/**
+ * The four Helvetica faces of the base-14 set, so a bold or italic run is
+ * drawn bold or italic instead of being flattened.
+ *
+ * All four are guaranteed present in every viewer, so this buys run-level
+ * weight and slant for nothing — no embedding, no bytes. It does not buy
+ * their metrics, and it must not: a style change mid-line is a place where the
+ * exporter has to state where the second face starts, and Helvetica's widths
+ * are not the widths that decided the line. See `widthTable` for what the file
+ * declares instead.
+ */
+const BASE_FONTS = [
+  { name: "F1", base: "Helvetica", bold: false, italic: false },
+  { name: "F2", base: "Helvetica-Bold", bold: true, italic: false },
+  { name: "F3", base: "Helvetica-Oblique", bold: false, italic: true },
+  { name: "F4", base: "Helvetica-BoldOblique", bold: true, italic: true },
+] as const;
+
+/** Index into BASE_FONTS for a weight/slant pair. */
+const faceIndex = (bold: boolean, italic: boolean): number => (bold ? 1 : 0) + (italic ? 2 : 0);
+
 interface Placed {
   node: MindNode;
   x: number;
@@ -128,6 +158,31 @@ interface Page {
   nodes: Placed[];
 }
 
+/**
+ * One asset's pixels, ready to become an image XObject.
+ *
+ * Two encodings, because PDF has exactly two that cost nothing to produce:
+ * `jpeg` is embedded byte-for-byte through DCTDecode, and `rgb` is deflated
+ * here into a FlateDecode image. A caller that cannot hand over original JPEG
+ * bytes decodes to RGB and lets this file compress it.
+ *
+ * `alpha` is separate because a PDF image has no alpha channel: transparency
+ * is a second, greyscale image referenced as the /SMask. Without it a logo
+ * with a cut-out background is composited as its bounding box, which reads as
+ * a white slab over the branch it sits on.
+ */
+export interface PdfImageSource {
+  /** Pixel size of the DATA — not the size the topic draws it at. */
+  w: number;
+  h: number;
+  /** DCTDecode: the asset's own JPEG bytes, untouched. */
+  jpeg?: Uint8Array;
+  /** FlateDecode: w * h * 3 bytes, 8-bit RGB, row-major, no padding. */
+  rgb?: Uint8Array;
+  /** w * h bytes of opacity, 0 transparent .. 255 opaque. Becomes an /SMask. */
+  alpha?: Uint8Array;
+}
+
 export interface PdfExportOptions {
   measurer: TextMeasurer;
   /**
@@ -140,11 +195,14 @@ export interface PdfExportOptions {
   /** Colour for a relationship (its own, else the theme's accent). */
   relColorOf?: (relId: string) => string;
   /**
-   * Raw JPEG bytes for an asset. JPEG only: those bytes embed as-is through
-   * DCTDecode, while a PNG would need its IDAT unpacked and re-encoded. A PNG
-   * asset is reported missing rather than drawn wrong.
+   * The pixels of an asset, in one of the two forms a PDF can carry.
+   *
+   * The contract this replaces took JPEG only and reported everything else
+   * missing. That was not a small gap: an image pasted from a browser or cut
+   * with a screenshot tool is a PNG, so the common case was the one that
+   * silently vanished from the file.
    */
-  jpegBytes?: (assetId: string) => Promise<{ bytes: Uint8Array; w: number; h: number } | null>;
+  imageBytes?: (assetId: string) => Promise<PdfImageSource | null>;
   /** Paper, in points. A name from PAGE_SIZES or an explicit size. Default A1
    *  landscape — the page size IS the readability control, see PAGE_SIZES. */
   page?: PageSizeName | { w: number; h: number };
@@ -186,13 +244,151 @@ const latin1 = (s: string): Uint8Array => {
   return out;
 };
 
-/** PDF string literal: only these three bytes are special. Anything outside
- *  WinAnsi becomes "?" — see the font gap in the header. */
-const pdfStr = (s: string): string =>
-  s.replace(/[\\()]/g, (c) => `\\${c}`).replace(/[^\x20-\x7e\xa0-\xff]/g, "?");
+/**
+ * Unicode -> WinAnsi for the characters WinAnsi keeps in 0x80-0x9F, which
+ * Latin-1 leaves undefined. Every one of them used to land on "?" — the em
+ * dash most visibly, because prose written anywhere but a code editor is full
+ * of them and "things?possessions" reads as corruption, not as a font limit.
+ */
+const WIN_ANSI_HIGH: Record<number, number> = {
+  0x20ac: 0x80, 0x201a: 0x82, 0x0192: 0x83, 0x201e: 0x84, 0x2026: 0x85,
+  0x2020: 0x86, 0x2021: 0x87, 0x02c6: 0x88, 0x2030: 0x89, 0x0160: 0x8a,
+  0x2039: 0x8b, 0x0152: 0x8c, 0x017d: 0x8e, 0x2018: 0x91, 0x2019: 0x92,
+  0x201c: 0x93, 0x201d: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97,
+  0x02dc: 0x98, 0x2122: 0x99, 0x0161: 0x9a, 0x203a: 0x9b, 0x0153: 0x9c,
+  0x017e: 0x9e, 0x0178: 0x9f,
+};
+
+/**
+ * Characters with no WinAnsi equivalent and no accent to strip, spelled with
+ * glyphs Helvetica does have. Deliberately short: it covers what a mind map
+ * actually contains — the other two bullet levels, and the arrows people
+ * type into a title — and anything else still degrades to "?".
+ */
+const ASCII_FALLBACK: Record<string, string> = {
+  "◦": "o", "▪": "-", "●": "•", "⁃": "-",
+  "→": "->", "←": "<-", "↔": "<->", "⇒": "=>",
+  "≤": "<=", "≥": ">=", "≠": "!=", "×": "x",
+  "‑": "-", "−": "-", "″": '"', "′": "'",
+};
+
+/** Characters no encoding step could represent. Reported, never swallowed. */
+let unmappable = 0;
+
+/**
+ * One character as WinAnsi.
+ *
+ * Order matters: a character WinAnsi HAS is emitted as itself (é stays é),
+ * and only one it lacks is decomposed and stripped of its accents. That is
+ * what gets the diacritics off "śūnyatā" instead of leaving "??ny?t?" —
+ * readable, honestly lossy, and confined to scripts the base-14 fonts were
+ * never going to carry. Embedding a font is what makes it exact; this is what
+ * makes it legible today.
+ */
+function winAnsi(ch: string): string {
+  const cp = ch.codePointAt(0) ?? 0;
+  if ((cp >= 0x20 && cp <= 0x7e) || (cp >= 0xa0 && cp <= 0xff)) return ch;
+  const mapped = WIN_ANSI_HIGH[cp];
+  if (mapped !== undefined) return String.fromCharCode(mapped);
+  const bare = ch.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (bare !== ch && bare.length > 0) {
+    const out = [...bare].map(winAnsi).join("");
+    if (!out.includes("?")) return out;
+  }
+  const spelled = ASCII_FALLBACK[ch];
+  if (spelled !== undefined) return spelled;
+  unmappable++;
+  return "?";
+}
+
+/** The WinAnsi form of a string — what the file will actually contain, and so
+ *  what its advance has to be measured from. */
+const winAnsiText = (s: string): string => [...s].map(winAnsi).join("");
+
+/** PDF string literal, from an already-encoded string: three special bytes. */
+const pdfEscape = (s: string): string => s.replace(/[\\()]/g, (c) => `\\${c}`);
+
+/** Encode and escape in one step, for text that is not separately measured. */
+const pdfStr = (s: string): string => pdfEscape(winAnsiText(s));
+
+/** WinAnsi byte -> the Unicode character it draws, for the 0x80-0x9F block. */
+const WIN_ANSI_UNICODE = new Map<number, string>(
+  Object.entries(WIN_ANSI_HIGH).map(([cp, byte]) => [byte, String.fromCodePoint(Number(cp))]),
+);
+
+const FIRST_CHAR = 32;
+const LAST_CHAR = 255;
+/** Font size the width table is measured at. Widths are 1/1000 em, and a
+ *  thousand-pixel em makes the division exact enough to round cleanly. */
+const WIDTH_EM = 1000;
+
+/**
+ * The advance widths the file DECLARES, in 1/1000 em, measured with R-node's
+ * own measurer.
+ *
+ * This is the piece that makes a mixed-style line come out right, and it is
+ * worth being explicit about why. A viewer draws each Tj at the position we
+ * state and then advances by the width in this array — /Widths takes
+ * precedence over the font program's own metrics. Declare nothing and the
+ * viewer advances by HELVETICA's widths while every x we computed came from
+ * SEGOE UI's, so each style change lands a few percent off: gaps before a bold
+ * phrase, a closing bracket printed over the italic word before it, an
+ * underline longer than the text it belongs to. All three were visible in the
+ * export this replaces.
+ *
+ * Declaring our own widths inverts the relationship. The glyph shapes are
+ * still Helvetica's, but they are SPACED exactly as the canvas spaced them, so
+ * the page reproduces the layout the map was measured with instead of
+ * approximating it. That also retires the centring caveat: a line we centre by
+ * our measured width is now centred where we put it.
+ *
+ * What it does not fix is the shapes themselves — Helvetica letters at Segoe
+ * UI advances are marginally loose or tight per glyph. Embedding the real font
+ * is still the exact answer; this makes the layout right in the meantime.
+ */
+function widthTable(measurer: TextMeasurer, bold: boolean, italic: boolean): number[] {
+  const style = {
+    fontSize: WIDTH_EM,
+    fontFamily: FONT_STACK,
+    fontWeight: bold ? 700 : 400,
+    italic,
+  };
+  const out: number[] = [];
+  for (let code = FIRST_CHAR; code <= LAST_CHAR; code++) {
+    // 0x80-0x9F are WinAnsi's own additions: measure the character they DRAW,
+    // not the control code that shares their byte.
+    const ch =
+      code >= 0x80 && code <= 0x9f ? WIN_ANSI_UNICODE.get(code) : String.fromCharCode(code);
+    // An undefined slot draws nothing and must advance by nothing.
+    out.push(ch === undefined ? 0 : Math.round(measurer.measure(ch, style).width));
+  }
+  return out;
+}
+
+/**
+ * A non-embedded descriptor, which /Widths needs to be taken seriously.
+ *
+ * No /FontFile: these are the standard fourteen, and a viewer supplies the
+ * program. The numbers are Helvetica's real ones, because they describe the
+ * glyphs being drawn; only the ADVANCES are ours.
+ */
+const fontDescriptor = (base: string, bold: boolean, italic: boolean): string =>
+  `<< /Type /FontDescriptor /FontName /${base} /Flags ${italic ? 96 : 32} ` +
+  `/FontBBox [-166 -225 1000 931] /ItalicAngle ${italic ? -12 : 0} ` +
+  `/Ascent 718 /Descent -207 /CapHeight 718 /StemV ${bold ? 140 : 88} >>`;
 
 function rgb(color: string): string {
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+  const css = color.trim();
+  // rgb()/rgba() as well as hex, because a run colour can arrive from a paste
+  // rather than from the palette, and falling through to the grey below turns
+  // a coloured phrase into a grey one with nothing to show it happened.
+  const fn = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(css);
+  if (fn) {
+    return [1, 2, 3]
+      .map((i) => (Math.min(255, Math.max(0, Number(fn[i]))) / 255).toFixed(3))
+      .join(" ");
+  }
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(css);
   if (!hex) return "0.5 0.5 0.5";
   let h = hex[1];
   if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
@@ -287,6 +483,28 @@ interface Frame {
 
 export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<PdfExportResult> {
   const t0 = performance.now();
+  // Per export, not per process: the count belongs to the file being written.
+  unmappable = 0;
+  // One table per face, measured once and used for BOTH halves of the job:
+  // the /Widths the file declares, and every x this exporter computes. They
+  // have to be the same numbers or the two disagree by a few percent per
+  // style change, which is exactly the drift they exist to remove.
+  const widths = BASE_FONTS.map((ft) => widthTable(opts.measurer, ft.bold, ft.italic));
+  /**
+   * How far an already-encoded string advances at `size`, under the widths
+   * this file declares. Not `measurer.measure` on the ORIGINAL text: what the
+   * viewer advances by is the sum over the WinAnsi bytes it receives, and a
+   * transliterated word is not the word that was measured.
+   */
+  const advance = (encoded: string, bold: boolean, italic: boolean, size: number): number => {
+    const table = widths[faceIndex(bold, italic)];
+    let sum = 0;
+    for (let i = 0; i < encoded.length; i++) {
+      const code = encoded.charCodeAt(i);
+      if (code >= FIRST_CHAR && code <= LAST_CHAR) sum += table[code - FIRST_CHAR];
+    }
+    return (sum / WIDTH_EM) * size;
+  };
   const paper = typeof opts.page === "string" ? PAGE_SIZES[opts.page] : opts.page ?? PAGE_SIZES.A1;
   const margin = opts.margin ?? DEFAULT_MARGIN;
   const withIndex = opts.index === true;
@@ -356,10 +574,21 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   // Declared once as XObjects and referenced by name from every page that
   // draws them: the bytes appear in the file exactly once however many topics
   // (or sheets) show the picture.
-  const xobjects: { name: string; bytes: Uint8Array; w: number; h: number }[] = [];
+  const xobjects: {
+    name: string;
+    w: number;
+    h: number;
+    /** Already in its final encoding: JPEG bytes, or deflated RGB. */
+    body: Uint8Array;
+    filter: "DCTDecode" | "FlateDecode";
+    /** Deflated 8-bit grey over the same pixel grid, when the asset has alpha. */
+    smask?: Uint8Array;
+  }[] = [];
   const xobjByAsset = new Map<string, string>();
   let imagesMissing = 0;
-  if (opts.jpegBytes) {
+  let imagesDeflated = 0;
+  let imagesMasked = 0;
+  if (opts.imageBytes) {
     const ids = new Set<string>();
     for (const p of placed) {
       const pos = positionedImageSlots(p, p.node, resolveImage);
@@ -367,13 +596,23 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       for (const c of pos.cells) ids.add(c.id);
     }
     for (const id of ids) {
-      const jpg = await opts.jpegBytes(id);
-      if (!jpg) {
+      const src = await opts.imageBytes(id);
+      if (!src || (!src.jpeg && !src.rgb)) {
         imagesMissing++;
         continue;
       }
       const name = `Im${xobjects.length}`;
-      xobjects.push({ name, bytes: jpg.bytes, w: jpg.w, h: jpg.h });
+      // The mask is deflated whatever the colour encoding is — an /SMask is an
+      // image in its own right, and a DCTDecode picture may carry a
+      // FlateDecode one.
+      const smask = src.alpha ? zlibSync(src.alpha) : undefined;
+      if (smask) imagesMasked++;
+      if (src.jpeg) {
+        xobjects.push({ name, w: src.w, h: src.h, body: src.jpeg, filter: "DCTDecode", smask });
+      } else {
+        imagesDeflated++;
+        xobjects.push({ name, w: src.w, h: src.h, body: zlibSync(src.rgb!), filter: "FlateDecode", smask });
+      }
       xobjByAsset.set(id, name);
     }
   }
@@ -416,12 +655,21 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
    * gap-then-baseline order, same left-vs-centre rule, same middle column
    * between the top/bottom images and the side ones.
    *
-   * Centring uses OUR measured `line.width` because PDF has no `text-anchor`:
-   * a viewer cannot centre a string we hand it without us stating where it
-   * starts. That bakes our metrics into the file, which is exactly the class of
-   * error the SVG exporter avoids — and at 1:1 it is visible. It resolves when
-   * the font is embedded and the widths become the same widths; until then it
-   * is a declared gap, not a solved problem.
+   * A line is emitted as one Tj per STYLE RUN, because a Tj cannot change face
+   * or colour mid-string. Per LINE is the version this replaces: it
+   * concatenated the segments and drew them in one face at one size, so a
+   * title that was half bold came out uniformly regular, every colour but the
+   * topic's was lost, and underlines and bullets were never drawn at all.
+   * Grouping rather than one Tj per token is only economy — `wrapRunLines`
+   * returns a segment per word, and a title of forty words would be forty
+   * placements where four will do.
+   *
+   * Every x here, the group offsets and the centring by `line.width` alike,
+   * is arithmetic on OUR measurements — which is sound only because the file
+   * declares those same measurements as its /Widths. Read `widthTable` before
+   * changing either side: they are one mechanism, and metrics that disagree
+   * with the ones the viewer is given put every style change a few percent
+   * out.
    */
   const drawTitle = (cmds: string[], p: Placed, color: string, fr: Frame): void => {
     const n = p.node;
@@ -443,33 +691,102 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     const startY = p.y + padNode + topBlock + Math.max(0, (p.h - padNode * 2 - midH) / 2);
     const startX = p.x + padNode + pos.insets.left;
 
-    cmds.push("BT", `${rgb(color)} rg`);
-    ops += 2;
+    // The node-level switches OR into every run, exactly as the canvas and the
+    // SVG resolve them: a bold topic makes every run bold, and a run can add
+    // bold to a regular topic, but neither can take it away.
+    const baseWeight = n.style.fontWeight ?? 400;
+    const nodeItalic = n.style.italic ?? false;
+    const nodeUnderline = n.style.underline ?? false;
+    const strike = n.style.strikethrough ?? false;
+    const faceOf = (
+      r: TextRun,
+    ): { size: number; bold: boolean; italic: boolean; color: string; underline: boolean } => ({
+      size: r.fontSize ?? size,
+      bold: (r.bold ?? false) || baseWeight >= 700,
+      italic: (r.italic ?? false) || nodeItalic,
+      color: r.color ?? color,
+      underline: (r.underline ?? false) || nodeUnderline,
+    });
+    /** Two adjacent segments share a Tj only when every one of these agrees. */
+    const keyOf = (r: TextRun): string => {
+      const a = faceOf(r);
+      return `${a.size}|${a.bold ? 1 : 0}|${a.italic ? 1 : 0}|${a.color}|${a.underline ? 1 : 0}`;
+    };
+
+    // A rule is a PATH, and a path operator inside BT/ET is a malformed
+    // stream: they are collected here and filled once the text object closes.
+    const rules: string[] = [];
+
+    /** One line's segments, laid down left to right from `x0`. */
+    const lay = (segs: { text: string; run: TextRun }[], x0: number, baselineY: number): void => {
+      let i = 0;
+      let x = x0;
+      while (i < segs.length) {
+        const source = segs[i].run;
+        const key = keyOf(source);
+        let text = "";
+        while (i < segs.length && keyOf(segs[i].run) === key) text += segs[i++].text;
+        const a = faceOf(source);
+        // The advance comes from the declared widths, never from the measurer
+        // directly: this x has to be the x the viewer reaches after the
+        // previous group, and the viewer only knows what /Widths told it.
+        const encoded = winAnsiText(text);
+        const w = advance(encoded, a.bold, a.italic, a.size);
+        if (text.trim() !== "") {
+          const pt = Math.max(0.01, a.size * fr.s);
+          fontSizes.push(pt);
+          cmds.push(
+            `/${BASE_FONTS[faceIndex(a.bold, a.italic)].name} ${f(pt)} Tf`,
+            `${rgb(a.color)} rg`,
+            `1 0 0 1 ${f(fr.X(x))} ${f(fr.Y(baselineY))} Tm`,
+            `(${pdfEscape(encoded)}) Tj`,
+          );
+          ops += 4;
+          // The offsets the canvas strokes them at: underline 0.1em below the
+          // baseline, strikethrough 0.28em above it.
+          for (const [on, dy] of [
+            [a.underline, a.size * 0.1],
+            [strike, -a.size * 0.28],
+          ] as [boolean, number][]) {
+            if (!on || w <= 0) continue;
+            const th = Math.max(0.15, a.size * 0.06 * fr.s);
+            rules.push(
+              `${rgb(a.color)} rg`,
+              `${f(fr.X(x))} ${f(fr.Y(baselineY + dy))} ${f(w * fr.s)} ${f(th)} re f`,
+            );
+            ops += 2;
+          }
+        }
+        x += w;
+      }
+    };
+
+    cmds.push("BT");
+    ops += 1;
     let yCursor = startY;
     for (const line of lines) {
       const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
       yCursor += line.gapPx ?? 0;
       const baselineY = yCursor + (line.baseline ?? lh * 0.8);
       const indent = line.indent ?? 0;
+      // The marker sits in its own fixed-width column, ahead of the text
+      // column. It was not drawn at all before: a bulleted list arrived in the
+      // PDF as unmarked paragraphs indented for no visible reason.
+      if (line.bullet) {
+        lay([{ text: line.bullet.char, run: line.bullet.run }], startX + line.bullet.x, baselineY);
+      }
       const isList = indent > 0 || !!line.bullet;
       const x = startX + (n.style.align === "left" || isList ? indent : (maxW - line.width) / 2);
       // Trailing whitespace is excluded from line.width (as CSS does when
       // centring), so emitting it would push a centred line off by that much.
-      const str = line.segments.map((seg) => seg.text).join("").replace(/\s+$/, "");
-      if (str) {
-        const pt = Math.max(0.01, (line.segments[0]?.run.fontSize ?? size) * fr.s);
-        fontSizes.push(pt);
-        cmds.push(
-          `/F1 ${f(pt)} Tf`,
-          `1 0 0 1 ${f(fr.X(x))} ${f(fr.Y(baselineY))} Tm`,
-          `(${pdfStr(str)}) Tj`,
-        );
-        ops += 3;
-      }
+      const segs = [...line.segments];
+      while (segs.length > 0 && segs[segs.length - 1].text.trim() === "") segs.pop();
+      lay(segs, x, baselineY);
       yCursor += lh;
     }
     cmds.push("ET");
     ops += 1;
+    if (rules.length > 0) cmds.push(...rules);
   };
 
   /**
@@ -487,25 +804,36 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     if (!pos.gallery || pos.gallery.captionH <= 0) return;
     const measure = (s: string): number =>
       opts.measurer.measure(s, { fontSize: GALLERY_CAPTION_SIZE, fontFamily: FONT_STACK }).width;
+    // Wrapping uses the measurer (I9: the same function as the canvas and the
+    // SVG); CENTRING uses the declared advance, because that is what the
+    // viewer will lay down.
     let opened = false;
     for (const c of pos.cells) {
       if (!c.caption) continue;
-      const label = ellipsizeToWidth(c.caption, c.w, measure);
-      if (!label) continue;
-      if (!opened) {
-        cmds.push("BT", `${rgb(color)} rg`);
-        ops += 2;
-        opened = true;
+      // Same wrap as the canvas and the SVG, from the same function (I9).
+      const lines = captionLines(c.caption, c.w, measure);
+      for (let i = 0; i < lines.length; i++) {
+        const label = lines[i];
+        if (!label) continue;
+        if (!opened) {
+          cmds.push("BT", `${rgb(color)} rg`);
+          ops += 2;
+          opened = true;
+        }
+        const pt = Math.max(0.01, GALLERY_CAPTION_SIZE * fr.s);
+        fontSizes.push(pt);
+        // Encoded once: winAnsiText counts what it could not represent, and
+        // encoding the same caption twice would count it twice.
+        const encoded = winAnsiText(label);
+        const x = c.x + (c.w - advance(encoded, false, false, GALLERY_CAPTION_SIZE)) / 2;
+        const y = c.captionY + GALLERY_CAPTION_SIZE + i * GALLERY_CAPTION_LINE_H;
+        cmds.push(
+          `/F1 ${f(pt)} Tf`,
+          `1 0 0 1 ${f(fr.X(x))} ${f(fr.Y(y))} Tm`,
+          `(${pdfEscape(encoded)}) Tj`,
+        );
+        ops += 3;
       }
-      const pt = Math.max(0.01, GALLERY_CAPTION_SIZE * fr.s);
-      fontSizes.push(pt);
-      const x = c.x + (c.w - measure(label)) / 2;
-      cmds.push(
-        `/F1 ${f(pt)} Tf`,
-        `1 0 0 1 ${f(fr.X(x))} ${f(fr.Y(c.captionY + GALLERY_CAPTION_SIZE))} Tm`,
-        `(${pdfStr(label)}) Tj`,
-      );
-      ops += 3;
     }
     if (opened) {
       cmds.push("ET");
@@ -753,12 +1081,23 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     putStr("endobj\n");
   };
 
-  const ID_CATALOG = 1, ID_PAGES = 2, ID_FONT = 3;
-  let next = 4;
-  const imgIds = xobjects.map(() => next++);
+  const ID_CATALOG = 1, ID_PAGES = 2;
+  // The four faces come first and at fixed ids, so BASE_FONTS[i] is object
+  // 3 + i and the resource dictionary can be written once for every sheet.
+  const ID_FIRST_FONT = 3;
+  const ID_FIRST_DESC = ID_FIRST_FONT + BASE_FONTS.length;
+  let next = ID_FIRST_DESC + BASE_FONTS.length;
+  // An asset with transparency costs two objects: the picture and its mask.
+  const imgIds: number[] = [];
+  const maskIds: number[] = [];
+  for (const x of xobjects) {
+    imgIds.push(next++);
+    maskIds.push(x.smask ? next++ : 0);
+  }
   const sheetIds = streams.map(() => ({ page: next++, content: next++ }));
   const objCount = next;
 
+  const fontDict = BASE_FONTS.map((ft, i) => `/${ft.name} ${ID_FIRST_FONT + i} 0 R`).join(" ");
   const xobjDict = xobjects.map((x, i) => `/${x.name} ${imgIds[i]} 0 R`).join(" ");
 
   putStr("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
@@ -767,20 +1106,39 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     ID_PAGES,
     `<< /Type /Pages /Kids [${sheetIds.map((p) => `${p.page} 0 R`).join(" ")}] /Count ${sheetIds.length} >>`,
   );
-  obj(ID_FONT, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+  BASE_FONTS.forEach((ft, i) => {
+    obj(
+      ID_FIRST_FONT + i,
+      `<< /Type /Font /Subtype /Type1 /BaseFont /${ft.base} /Encoding /WinAnsiEncoding ` +
+        `/FirstChar ${FIRST_CHAR} /LastChar ${LAST_CHAR} ` +
+        `/Widths [${widths[i].join(" ")}] /FontDescriptor ${ID_FIRST_DESC + i} 0 R >>`,
+    );
+    obj(ID_FIRST_DESC + i, fontDescriptor(ft.base, ft.bold, ft.italic));
+  });
   xobjects.forEach((x, i) => {
+    if (x.smask) {
+      obj(
+        maskIds[i],
+        `<< /Type /XObject /Subtype /Image /Width ${x.w} /Height ${x.h} ` +
+          `/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode ` +
+          `/Length ${x.smask.length} >>`,
+        x.smask,
+      );
+    }
     obj(
       imgIds[i],
       `<< /Type /XObject /Subtype /Image /Width ${x.w} /Height ${x.h} ` +
-        `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${x.bytes.length} >>`,
-      x.bytes,
+        `/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /${x.filter} ` +
+        (x.smask ? `/SMask ${maskIds[i]} 0 R ` : "") +
+        `/Length ${x.body.length} >>`,
+      x.body,
     );
   });
   streams.forEach((stream, i) => {
     obj(
       sheetIds[i].page,
       `<< /Type /Page /Parent ${ID_PAGES} 0 R /MediaBox [0 0 ${f(paper.w)} ${f(paper.h)}] ` +
-        `/Resources << /Font << /F1 ${ID_FONT} 0 R >> /XObject << ${xobjDict} >> >> ` +
+        `/Resources << /Font << ${fontDict} >> /XObject << ${xobjDict} >> >> ` +
         `/Contents ${sheetIds[i].content} 0 R >>`,
     );
     obj(sheetIds[i].content, `<< /Length ${stream.length} /Filter /FlateDecode >>`, stream);
@@ -834,11 +1192,15 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     // Declared, not detected: an exporter cannot notice what it never thought
     // of, so it lists what it covers and the gap is computed against the
     // document. Everything absent here is a known omission — see the header.
-    honoured: ["fill", "textColor", "fontSize", "cornerRadius", "image", "imageWidth", "align", "width", "height"],
+    honoured: [
+      "fill", "textColor", "fontSize", "fontWeight", "italic", "underline",
+      "strikethrough", "cornerRadius", "image", "imageWidth", "align", "width",
+      "height",
+    ],
     units: {
       operators: ops,
       streamBytes,
-      imageBytes: xobjects.reduce((sum, x) => sum + x.bytes.length, 0),
+      imageBytes: xobjects.reduce((sum, x) => sum + x.body.length + (x.smask?.length ?? 0), 0),
       pages: streams.length,
       mapPages: pages.length,
       pageW: Math.round(paper.w),
@@ -850,6 +1212,13 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       percentOfTrueSize: Math.round((s / PT_PER_UNIT) * 100),
       splitAcrossSheets: split,
       imagesMissing,
+      // How the pictures got in: passed through as JPEG, or decoded and
+      // deflated. `imagesMasked` is the ones carrying transparency.
+      imagesDeflated,
+      imagesMasked,
+      // Characters with no WinAnsi glyph and no accent to strip, so they are
+      // "?" in the file. Non-zero means this map needs an embedded font.
+      unmappableChars: unmappable,
       minFontPt: Math.round(minFontPt * 1000) / 1000,
     },
     // The scale is derived from the page width, so on a wide map this CAN fall

@@ -10,10 +10,11 @@ import { nodeImageIds } from "../src/core/ops";
 import { referencedAssetIds } from "../src/persist/assets";
 import {
   GALLERY_CAPTION_GAP,
-  GALLERY_CAPTION_SIZE,
+  GALLERY_CAPTION_LINES,
+  GALLERY_CAPTION_LINE_H,
   GALLERY_CELL_W,
   GALLERY_GAP,
-  LINE_HEIGHT_FACTOR,
+  captionLines,
   coverCrop,
   ellipsizeToWidth,
   galleryExtent,
@@ -101,7 +102,10 @@ describe("gallery geometry", () => {
     const items = cells(4);
     items[2].caption = "Batman";
     const g = galleryExtent(galleryNode(items))!;
-    const band = GALLERY_CAPTION_GAP + Math.round(GALLERY_CAPTION_SIZE * LINE_HEIGHT_FACTOR);
+    // Every caption gets the full band whatever it says: the band is sized by
+    // the LINE COUNT, never by the text, which is what keeps caption text out
+    // of extentKey and typing out of the layout.
+    const band = GALLERY_CAPTION_GAP + GALLERY_CAPTION_LINES * GALLERY_CAPTION_LINE_H;
     expect(g.captionH).toBe(band);
     // The pitch of a row grows by the band — a grid whose rows are staggered
     // by which cell happens to be captioned stops reading as a grid.
@@ -623,5 +627,198 @@ describe("moving a cell between tiers", () => {
     const { store, buffed, nerfed } = tiers();
     store.moveGalleryCellTo(nerfed, 0, buffed, 99);
     expect(ids(store, buffed)).toEqual(["harley", "garnet", "velma"]);
+  });
+});
+
+describe("captionLines", () => {
+  // 10 units per character, so the arithmetic is visible in the assertions.
+  const measure = (s: string): number => s.length * 10;
+
+  it("leaves a caption that fits on one line alone", () => {
+    expect(captionLines("abcde", 50, measure)).toEqual(["abcde"]);
+  });
+
+  it("fills the first line before it starts the second", () => {
+    expect(captionLines("abcdefgh", 50, measure)).toEqual(["abcde", "fgh"]);
+  });
+
+  it("breaks INSIDE a word, because a file name is one word", () => {
+    // The whole reason this is not a word-wrapper: wrapping "wonder-woman.png"
+    // on spaces would leave the second line empty and cut the name at exactly
+    // the width one line was already worth.
+    expect(captionLines("wonder-woman.png", 50, measure)).toEqual(["wonde", "r-wo…"]);
+  });
+
+  it("ellipsizes the last line rather than opening a third", () => {
+    expect(captionLines("abcdefghijklmno", 50, measure)).toEqual(["abcde", "fghi…"]);
+  });
+
+  it("honours a line budget of one, exactly like the single-line path", () => {
+    expect(captionLines("abcdefgh", 50, measure, 1)).toEqual([ellipsizeToWidth("abcdefgh", 50, measure)]);
+  });
+
+  it("makes progress even in a cell narrower than one character", () => {
+    // A width that fits nothing must still terminate: fitPrefix never returns
+    // zero, so the wrap cannot loop forever on a 4px cell.
+    expect(captionLines("abc", 5, measure)).toEqual(["a", "…"]);
+  });
+
+  it("returns nothing at all for an empty caption", () => {
+    expect(captionLines("", 50, measure)).toEqual([]);
+  });
+});
+
+describe("selecting one cell of a gallery", () => {
+  function seeded(cols?: number): { store: EditorStore; id: string } {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const id = firstChild(store);
+    const node = store.doc.node(id)!;
+    node.style = {
+      ...node.style,
+      gallery: { items: [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }], cols },
+    };
+    return { store, id };
+  }
+
+  it("selects the cell WITHOUT taking the selection off its topic", () => {
+    // The difference from image selection, and the reason for it: the caption
+    // is edited in the Inspector's gallery list, which is only rendered for a
+    // selected topic. An exclusive cell selection would close the panel the
+    // selection exists to reach.
+    const { store, id } = seeded();
+    store.selectGalleryCell(id, 2);
+    expect(store.getSnapshot().gallerySel).toEqual({ nodeId: id, index: 2 });
+    expect(store.getSnapshot().selection).toEqual([id]);
+  });
+
+  it("refuses an index that is not in the grid", () => {
+    const { store, id } = seeded();
+    store.selectGalleryCell(id, 9);
+    expect(store.getSnapshot().gallerySel).toBeNull();
+  });
+
+  it("walks the grid by its OWN column count, not by the array", () => {
+    const { store, id } = seeded(2);
+    store.selectGalleryCell(id, 0);
+    store.navigateGalleryCell("down");
+    expect(store.getSnapshot().gallerySel!.index).toBe(2);
+    store.navigateGalleryCell("right");
+    expect(store.getSnapshot().gallerySel!.index).toBe(3);
+    store.navigateGalleryCell("up");
+    expect(store.getSnapshot().gallerySel!.index).toBe(1);
+  });
+
+  it("stops at the edges instead of wrapping round", () => {
+    const { store, id } = seeded(2);
+    store.selectGalleryCell(id, 0);
+    store.navigateGalleryCell("left");
+    store.navigateGalleryCell("up");
+    expect(store.getSnapshot().gallerySel!.index).toBe(0);
+    store.selectGalleryCell(id, 3);
+    store.navigateGalleryCell("right");
+    store.navigateGalleryCell("down");
+    expect(store.getSnapshot().gallerySel!.index).toBe(3);
+  });
+
+  it("deletes the selected cell and lands on the one that slid into the gap", () => {
+    const { store, id } = seeded();
+    store.selectGalleryCell(id, 1);
+    store.deleteSelectedGalleryCell();
+    expect(store.doc.node(id)!.style.gallery!.items.map((i) => i.id)).toEqual(["a", "c", "d"]);
+    expect(store.getSnapshot().gallerySel).toEqual({ nodeId: id, index: 1 });
+  });
+
+  it("keeps the topic when the last cell is deleted", () => {
+    // Delete with a cell selected must never reach the node — that is the
+    // whole point of the cell being a target of its own.
+    const { store, id } = seeded();
+    for (let k = 0; k < 4; k++) {
+      store.selectGalleryCell(id, 0);
+      store.deleteSelectedGalleryCell();
+    }
+    expect(store.doc.node(id)).toBeTruthy();
+    expect(store.doc.node(id)!.style.gallery).toBeUndefined();
+    expect(store.getSnapshot().gallerySel).toBeNull();
+  });
+
+  it("refuses to delete through a stale index rather than cutting the wrong picture", () => {
+    const { store, id } = seeded();
+    store.selectGalleryCell(id, 3);
+    store.removeGalleryItem(id, 0);
+    store.removeGalleryItem(id, 0);
+    store.deleteSelectedGalleryCell();
+    expect(store.doc.node(id)!.style.gallery!.items.map((i) => i.id)).toEqual(["c", "d"]);
+    expect(store.getSnapshot().gallerySel).toBeNull();
+  });
+
+  it("follows the picture through a reorder, not the position", () => {
+    const { store, id } = seeded();
+    store.selectGalleryCell(id, 0);
+    store.moveGalleryItem(id, 0, 2);
+    expect(store.getSnapshot().gallerySel!.index).toBe(2);
+    expect(store.doc.node(id)!.style.gallery!.items[2].id).toBe("a");
+  });
+
+  it("steps out of the cell without stepping out of the topic", () => {
+    const { store, id } = seeded();
+    store.selectGalleryCell(id, 1);
+    store.clearGalleryCell();
+    expect(store.getSnapshot().gallerySel).toBeNull();
+    expect(store.getSnapshot().selection).toEqual([id]);
+  });
+
+  it("drops the cell selection when another topic is selected", () => {
+    const { store, id } = seeded();
+    store.selectGalleryCell(id, 1);
+    store.select(store.sheet.rootNodeId);
+    expect(store.getSnapshot().gallerySel).toBeNull();
+  });
+});
+
+describe("resetGalleryCaptions", () => {
+  function seeded(): { store: EditorStore; id: string } {
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const id = firstChild(store);
+    store.attachImage(id, { id: "a", mime: "image/png", w: 4, h: 4, bytes: 1, name: "wonder-woman_01.png" }, "top");
+    store.attachImage(id, { id: "b", mime: "image/png", w: 4, h: 4, bytes: 1, name: "batman v2.JPG" }, "bottom");
+    const node = store.doc.node(id)!;
+    node.style = {
+      ...node.style,
+      gallery: { items: [{ id: "a", caption: "hand typed" }, { id: "b" }, { id: "nameless", caption: "keep me" }] },
+    };
+    return { store, id };
+  }
+
+  it("puts the WHOLE file name back, extension and separators included", () => {
+    const { store, id } = seeded();
+    expect(store.resetGalleryCaptions(id)).toBe(2);
+    const items = store.doc.node(id)!.style.gallery!.items;
+    expect(items[0].caption).toBe("wonder-woman_01.png");
+    expect(items[1].caption).toBe("batman v2.JPG");
+  });
+
+  it("leaves a cell whose picture arrived without a name", () => {
+    // Blanking a caption because the document carries no metadata for that
+    // asset would be a worse answer than leaving it alone.
+    const { store, id } = seeded();
+    store.resetGalleryCaptions(id);
+    expect(store.doc.node(id)!.style.gallery!.items[2].caption).toBe("keep me");
+  });
+
+  it("is ONE undo step for the whole grid", () => {
+    const { store, id } = seeded();
+    store.resetGalleryCaptions(id);
+    store.undo();
+    const items = store.doc.node(id)!.style.gallery!.items;
+    expect(items[0].caption).toBe("hand typed");
+    expect(items[1].caption).toBeUndefined();
+  });
+
+  it("reports nothing to do rather than writing an identical style", () => {
+    const { store, id } = seeded();
+    store.resetGalleryCaptions(id);
+    expect(store.resetGalleryCaptions(id)).toBe(0);
   });
 });

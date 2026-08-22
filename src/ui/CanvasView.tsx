@@ -7,7 +7,7 @@ import { THEMES } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
 import { sheetToHtmlViewer } from "../export/htmlViewer";
 import { sheetToPdf } from "../export/pdf";
-import { computeLevelDims, LEVEL_LONG_SIDE } from "../editor/imageImport";
+import { pdfImageSource } from "../export/pdfImage";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
@@ -227,6 +227,7 @@ export function CanvasView(): JSX.Element {
       summarySel: s.summarySel,
       imageSel: s.imageSel,
       imageSlot: s.imageSlot,
+      gallerySel: s.gallerySel,
       ghostImage: ghostRef.current,
       galleryDrop: galleryDropRef.current,
       marqueeSel: marqueeSelRef.current,
@@ -464,18 +465,9 @@ export function CanvasView(): JSX.Element {
           measurer: createCanvasTextMeasurer(),
           colorOf: (id) => renderer.nodeColors(rs, id),
           linkColorOf: (id) => renderer.branchColorOf(rs, id),
-          // JPEG only: those bytes go into the file untouched (DCTDecode).
-          // A PNG would need its IDAT unpacked and re-encoded, which is more
-          // than an experiment should carry.
-          jpegBytes: async (assetId) => {
-            const store2 = getAssetStore();
-            const meta = await store2.meta(assetId);
-            if (!meta || meta.mime !== "image/jpeg") return null;
-            const blob = await store2.get(assetId, "small");
-            if (!blob) return null;
-            const dims = computeLevelDims(meta.w, meta.h, LEVEL_LONG_SIDE.small);
-            return { bytes: new Uint8Array(await blob.arrayBuffer()), w: dims.w, h: dims.h };
-          },
+          // Every format the browser can decode, not JPEG alone — see
+          // src/export/pdfImage.ts for which encoding each one takes.
+          imageBytes: (assetId) => pdfImageSource(getAssetStore(), assetId),
         });
         const url = URL.createObjectURL(out.blob);
         const a = document.createElement("a");
@@ -486,7 +478,15 @@ export function CanvasView(): JSX.Element {
         store.toast(
           `PDF — ${out.nodes.toLocaleString()} topics down ${out.mapPages} sheets, full width on each, ` +
             `${out.report.units.percentOfTrueSize}% of true size (text ${out.report.units.minFontPt}pt), ` +
-            `${out.bytes < 1048576 ? `${Math.round(out.bytes / 1024)}KB` : `${(out.bytes / 1048576).toFixed(1)}MB`}`
+            `${out.images} images, ` +
+            `${out.bytes < 1048576 ? `${Math.round(out.bytes / 1024)}KB` : `${(out.bytes / 1048576).toFixed(1)}MB`}` +
+            // Said out loud, because both were once silent: an unreadable
+            // asset used to be a picture that simply was not there, and a
+            // character with no glyph used to be a "?" mid-word.
+            (out.report.units.imagesMissing > 0 ? ` — ${out.report.units.imagesMissing} unreadable` : "") +
+            (out.report.units.unmappableChars > 0
+              ? ` — ${out.report.units.unmappableChars} characters Helvetica cannot draw`
+              : "")
         );
       } catch (e) {
         store.toast(`PDF export failed — ${String(e)}`);
@@ -670,8 +670,8 @@ export function CanvasView(): JSX.Element {
     // Gallery cell hit (T25), before the slot and body tests: a cell lives
     // INSIDE its topic's box, so the most specific target has to be asked
     // first or the topic answers for it. A drag moves the picture to another
-    // tier or to another place in this one; a plain click does nothing but
-    // select the topic, so a mis-grab costs nothing.
+    // tier or to another place in this one; a plain click selects the CELL,
+    // which is what Delete and the arrow keys then act on.
     const cellHit = s.relFrom ? null : renderer.hitTestGalleryCell(rs, world.x, world.y);
     if (cellHit) {
       drag.grabOffsetX = world.x - cellHit.rect.x;
@@ -680,16 +680,12 @@ export function CanvasView(): JSX.Element {
       drag.cellDropTo = null;
       drag.dragging = null;
       drag.marqueeStartX = null;
-      store.select(cellHit.nodeId, { additive: false });
-      // A click on the CAPTION band focuses that caption's field in the
-      // Inspector, with its text selected so typing replaces it. The drag
-      // above is set up either way — dragging FROM the caption still drags
-      // the card, exactly like dragging from the picture.
-      if (cellHit.part === "caption") {
-        window.dispatchEvent(
-          new CustomEvent("r-node:focus-gallery-caption", { detail: { nodeId: cellHit.nodeId, index: cellHit.index } }),
-        );
-      }
+      // The picture and its caption band are one target: hitting either
+      // selects the cell, and dragging from either drags the card. Focus
+      // stays on the canvas — reaching the caption's field is what the
+      // DOUBLE click does (see onDblClick), because Delete and the arrow keys
+      // now act on the selected cell and a focused text field swallows both.
+      store.selectGalleryCell(cellHit.nodeId, cellHit.index);
       trace.applied("pointerdown:gallery-cell", { id: cellHit.nodeId, index: cellHit.index, part: cellHit.part, wasEditing });
       return;
     }
@@ -1076,7 +1072,23 @@ export function CanvasView(): JSX.Element {
       // overlay. startEdit refuses both too — this skips the call entirely so
       // the overlay never even starts to mount (the one thing that would drag
       // this feature into the §3 parity contract).
-      if (store.sheet.nodes[hit]?.style.code || store.sheet.nodes[hit]?.style.gallery) {
+      if (store.sheet.nodes[hit]?.style.gallery) {
+        // Double click on a CELL is how its caption is reached: focus that
+        // cell's field in the Inspector with the text selected, so typing
+        // replaces it. Still no editor on the canvas — the focused element is
+        // a plain <input> in a side panel, which owns none of the §3 contract.
+        const cellHit = renderer.hitTestGalleryCell(currentRenderState(), world.x, world.y);
+        if (cellHit && cellHit.nodeId === hit) {
+          store.selectGalleryCell(cellHit.nodeId, cellHit.index);
+          window.dispatchEvent(
+            new CustomEvent("r-node:focus-gallery-caption", { detail: { nodeId: cellHit.nodeId, index: cellHit.index } }),
+          );
+        } else {
+          store.select(hit);
+        }
+        return;
+      }
+      if (store.sheet.nodes[hit]?.style.code) {
         store.select(hit);
         return;
       }
@@ -1203,6 +1215,7 @@ export function CanvasView(): JSX.Element {
       // feature that looks present and is not.
       imageSel: s.imageSel,
       imageSlot: s.imageSlot,
+      gallerySel: s.gallerySel,
       ghostImage: ghostRef.current,
       galleryDrop: galleryDropRef.current,
       marqueeSel: marqueeSelRef.current,
