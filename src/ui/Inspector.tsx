@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../editor/context";
 import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
+import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
+import { THEMES } from "../render/theme";
 import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
 import { plainToRuns } from "../core/text";
@@ -19,6 +21,16 @@ const CELL_SHAPES: [string, number][] = [
 ];
 
 const STRUCTURES = ["mindmap", "logic", "tree", "org", "timeline", "fishbone", "matrix", "treetable", "freeform"] as const;
+
+/** Boundary thicknesses offered for a group, in screen px. The second one is
+ *  DEFAULT_GROUP_BORDER_WIDTH — the look a group has before anyone picks. */
+const GROUP_WIDTHS: [string, number][] = [
+  ["hairline", 1],
+  ["thin", DEFAULT_GROUP_BORDER_WIDTH],
+  ["medium", 2.5],
+  ["thick", 4],
+  ["heavy", 6],
+];
 
 export function Inspector(): JSX.Element {
   const store = useStore();
@@ -570,11 +582,55 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
 
 function GroupSection({ grp }: { grp: Group }): JSX.Element {
   const store = useStore();
+  const width = grp.borderWidth ?? DEFAULT_GROUP_BORDER_WIDTH;
+  // A width loaded from a document need not be one of the presets, and a
+  // <select> whose value matches no <option> shows the FIRST one — i.e. it
+  // would lie about the boundary on screen. Offer the odd value as its own.
+  const widths: [string, number][] = GROUP_WIDTHS.some(([, w]) => w === width)
+    ? GROUP_WIDTHS
+    : [...GROUP_WIDTHS, [`${width} px`, width]];
   return (
     <div className="inspector-section">
       <div className="inspector-label">Group</div>
       <p className="muted">{grp.memberIds.length} topics enclosed</p>
-      <button className="btn small danger" onClick={() => store.deleteGroup(grp.id)}>Delete group</button>
+      <div className="field">
+        <span>Thickness</span>
+        <select
+          value={width}
+          data-help="Boundary thickness"
+          data-help-more="Screen pixels: the boundary keeps the same weight at every zoom level."
+          onChange={(e) => store.setGroup(grp.id, { borderWidth: Number(e.target.value) })}
+        >
+          {widths.map(([name, w]) => (
+            <option key={w} value={w}>{name}</option>
+          ))}
+        </select>
+      </div>
+      <div className="field">
+        <span>Color</span>
+        <input
+          type="color"
+          value={grp.color ?? THEMES.light.textMuted}
+          onChange={(e) => store.setGroup(grp.id, { color: e.target.value })}
+        />
+      </div>
+      <div className="ctx-color-row group-swatches">
+        {THEMES.light.branch.map((c) => (
+          <button
+            key={c}
+            className="ctx-swatch"
+            style={{ background: c }}
+            title={c}
+            onClick={() => store.setGroup(grp.id, { color: c })}
+          />
+        ))}
+      </div>
+      <div className="inspector-actions">
+        {/* Back to "no choice at all", not to a grey copied out of the theme:
+            a group with neither field follows the theme wherever it goes. */}
+        <button className="btn small" onClick={() => store.setGroup(grp.id, { color: undefined, borderWidth: undefined })}>Reset style</button>
+        <button className="btn small danger" onClick={() => store.deleteGroup(grp.id)}>Delete group</button>
+      </div>
     </div>
   );
 }

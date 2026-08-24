@@ -324,7 +324,27 @@ export interface Group {
   /** Topic ids enclosed by the dashed boundary (usually siblings). */
   memberIds: string[];
   label?: string;
+  /**
+   * Boundary colour. Absent means the theme’s muted grey, so every document
+   * written before this field keeps the look it has — same field name and same
+   * “absent = the theme decides” rule as `Relationship.color`.
+   */
+  color?: string;
+  /**
+   * Boundary thickness in SCREEN pixels: the renderer divides it by the camera
+   * scale, so a boundary stays as thick as it was drawn at every zoom level,
+   * exactly like the hairline it replaces. Absent = DEFAULT_GROUP_BORDER_WIDTH.
+   */
+  borderWidth?: number;
 }
+
+/**
+ * The thickness a boundary is drawn with when `Group.borderWidth` is absent.
+ * It lives next to the field because two sides read it — the renderer to paint
+ * and the Inspector to show which preset is selected — and a second hand-written
+ * 1.5 in the UI is how the two quietly disagree.
+ */
+export const DEFAULT_GROUP_BORDER_WIDTH = 1.5;
 
 export interface Summary {
   id: string;

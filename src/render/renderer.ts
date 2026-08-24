@@ -7,6 +7,7 @@
  * of the node being edited so the overlay doesn't double-paint.
  */
 import type { Group, ImageSlot, MindNode, Sheet, ConnectorStyle, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
+import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
@@ -1511,14 +1512,36 @@ export class Renderer {
     }
   }
 
-  private drawGroup(theme: RenderTheme, _g: Group, b: { x: number; y: number; w: number; h: number }, pad: number, selected: boolean, s: number): void {
+  /**
+   * The stroke a boundary is painted with. Public and value-returning, like
+   * `nodeColors`, so the rule can be asserted without a canvas.
+   *
+   * Selection does NOT take a chosen colour away — the rule relationships
+   * already follow — it adds a pixel of thickness instead. Bumping rather
+   * than pinning it to 2.5 is what keeps a group drawn thick from getting
+   * THINNER the moment you click it.
+   *
+   * The dash grows with the line: a 6px stroke under the fixed 7/5 pattern
+   * reads as a chain of blobs, not as a dashed box.
+   */
+  groupStroke(theme: RenderTheme, g: Group, selected: boolean): { color: string; width: number; dash: [number, number] } {
+    const width = g.borderWidth ?? DEFAULT_GROUP_BORDER_WIDTH;
+    return {
+      color: g.color ?? (selected ? theme.selection : theme.textMuted),
+      width: selected ? width + 1 : width,
+      dash: [Math.max(7, width * 4), Math.max(5, width * 2.6)],
+    };
+  }
+
+  private drawGroup(theme: RenderTheme, g: Group, b: { x: number; y: number; w: number; h: number }, pad: number, selected: boolean, s: number): void {
     // Just the dashed boundary — no fill, no label tag (per the XMind-style
     // look: the box only "encapsulates" the topics visually).
     const ctx = this.ctx;
     const x = b.x - pad, y = b.y - pad, w = b.w + pad * 2, h = b.h + pad * 2;
-    ctx.strokeStyle = selected ? theme.selection : theme.textMuted;
-    ctx.lineWidth = selected ? 2.5 / s : 1.5 / s;
-    ctx.setLineDash([7 / s, 5 / s]);
+    const stroke = this.groupStroke(theme, g, selected);
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.width / s;
+    ctx.setLineDash([stroke.dash[0] / s, stroke.dash[1] / s]);
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 10 / s);
     ctx.stroke();
