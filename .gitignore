@@ -18,3 +18,8 @@ docs/layout-bundle.html
 # bundle the HTML export inlines. Never committed — a stale copy would export a
 # map drawn by an old renderer while claiming perfect fidelity.
 src/export/generated/
+
+# Packaged builds produced by `npm run tauri build`: several MB per archive
+# and reproducible from the tag they were cut at. Tracked, they would bloat
+# every clone; untracked, they showed up as noise in every `git status`.
+releases/
