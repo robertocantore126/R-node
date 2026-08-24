@@ -698,6 +698,13 @@ textarea:focus {
   gap: 5px;
 }
 
+/* The context menu’s swatch row, reused for a group’s boundary colour. Only
+   its padding is wrong here: it is tuned to the menu’s own 10px inset, which
+   in the panel pushes the squares out of line with the fields above them. */
+.inspector .group-swatches {
+  padding: 0 0 9px 94px;
+}
+
 .field {
   display: flex;
   align-items: center;
