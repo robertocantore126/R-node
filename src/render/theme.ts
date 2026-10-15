@@ -16,6 +16,9 @@ export interface RenderTheme {
   selection: string;
   selectionFill: string;
   dropIndicator: string;
+  /** In-map search (Ctrl+F): dashed ring for every match, solid for the current. */
+  searchMatch: string;
+  searchMatchActive: string;
   rootFill: string;
   rootText: string;
   branch: string[]; // branch palette, rotated by main-branch index
@@ -63,6 +66,8 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     selection: "#4f46e5",
     selectionFill: "rgba(79, 70, 229, 0.10)",
     dropIndicator: "#4f46e5",
+    searchMatch: "#f59e0b",
+    searchMatchActive: "#d97706",
     rootFill: "#ffffff",
     rootText: "#111827",
     branch: ["#ff646b", "#ff9a66", "#4eb5e8", "#55c9bd", "#a7d9bb", "#d979e5", "#70b9e8", "#f0bd62"],
