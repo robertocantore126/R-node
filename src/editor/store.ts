@@ -180,6 +180,9 @@ export interface EditorState {
   searchIndex: number;
   /** Whether the in-map search bar is open (Ctrl+F). */
   searchOpen: boolean;
+  /** The topic whose quiz window is open (from its right-click menu); null =
+   *  no quiz window. The quiz is never drawn on the canvas. */
+  quizNodeId: string | null;
   /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
   pendingInsert: string | null;
   sync: "saved" | "dirty";
@@ -345,6 +348,7 @@ export class EditorStore {
       searchResults: [],
       searchIndex: 0,
       searchOpen: false,
+      quizNodeId: null,
       pendingInsert: null,
       sync: "saved",
       message: null,
@@ -4017,6 +4021,54 @@ export class EditorStore {
   }
 
   // -------------------------------------------------------------------------
+  // Quiz (opens a modal window; the quiz itself is never drawn)
+  // -------------------------------------------------------------------------
+
+  openQuiz(nodeId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node?.style.quiz) return;
+    this.state.quizNodeId = nodeId;
+    trace.mark("ui", "ui:modal", { open: true, quiz: nodeId });
+    this.notify();
+  }
+
+  closeQuiz(): void {
+    if (this.state.quizNodeId === null) return;
+    this.state.quizNodeId = null;
+    trace.mark("ui", "ui:modal", { open: false });
+    this.notify();
+  }
+
+  /**
+   * Record one finished run of a topic's quiz. `correct` is the number of right
+   * answers; the total comes from the quiz itself. Written through a `setStyle`
+   * op so the result lives in the document (it survives a reload and an export)
+   * and one Ctrl+Z undoes the run like any other edit.
+   */
+  submitQuizScore(nodeId: string, correct: number): void {
+    const node = this.model.node(nodeId);
+    const quiz = node?.style.quiz;
+    if (!node || !quiz) return;
+    const total = quiz.questions.length;
+    const clamped = Math.max(0, Math.min(correct, total));
+    const prev = quiz.score;
+    const score = {
+      last: clamped,
+      best: Math.max(prev?.best ?? 0, clamped),
+      attempts: (prev?.attempts ?? 0) + 1,
+    };
+    const nextQuiz: QuizInfo = { ...quiz, score };
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: nodeId,
+        style: { ...node.style, quiz: nextQuiz },
+        prev: node.style,
+      }),
+    ]);
+    this.notify();
+  }
+
+  // -------------------------------------------------------------------------
   // Theme & UI toggles
   // -------------------------------------------------------------------------
 
@@ -4199,6 +4251,7 @@ export class EditorStore {
     this.state.search = "";
     this.state.searchResults = [];
     this.state.searchOpen = false;
+    this.state.quizNodeId = null;
     this.state.sync = "saved"; // the loaded doc is its persisted version
     this.focusRoot();
     this.notify();

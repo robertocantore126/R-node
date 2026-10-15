@@ -140,3 +140,61 @@ describe("copy as quiz prompt", () => {
     expect(text.startsWith("Create a multiple-choice quiz")).toBe(true);
   });
 });
+
+function topicWithQuiz(store: EditorStore, questionCount: number): string {
+  const root = store.doc.node(store.sheet.rootNodeId)!;
+  store.select(root.id);
+  store.createChild();
+  const topic = store.doc.requireNode(root.childrenIds[root.childrenIds.length - 1]);
+  const questions = Array.from({ length: questionCount }, (_, k) => ({
+    q: `Q${k + 1}`,
+    answers: ["a", "b", "c", "d"],
+    correct: 0,
+  }));
+  store.attachQuiz(topic.id, { questions });
+  return topic.id;
+}
+
+describe("quiz window state and score", () => {
+  it("opens only for a topic that carries a quiz", () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    store.select(root.id);
+    store.createChild();
+    const topic = store.doc.requireNode(root.childrenIds[root.childrenIds.length - 1]);
+
+    store.openQuiz(topic.id);
+    expect(store.getSnapshot().quizNodeId).toBeNull();
+
+    store.attachQuiz(topic.id, { questions: [{ q: "Q", answers: ["a", "b", "c", "d"], correct: 1 }] });
+    store.openQuiz(topic.id);
+    expect(store.getSnapshot().quizNodeId).toBe(topic.id);
+
+    store.closeQuiz();
+    expect(store.getSnapshot().quizNodeId).toBeNull();
+  });
+
+  it("records last / best / attempts, persisted through an op, and undo reverts one run", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = topicWithQuiz(store, 3);
+
+    store.submitQuizScore(id, 2);
+    expect(store.doc.node(id)!.style.quiz!.score).toEqual({ last: 2, best: 2, attempts: 1 });
+
+    store.submitQuizScore(id, 1);
+    expect(store.doc.node(id)!.style.quiz!.score).toEqual({ last: 1, best: 2, attempts: 2 });
+
+    store.submitQuizScore(id, 3);
+    expect(store.doc.node(id)!.style.quiz!.score).toEqual({ last: 3, best: 3, attempts: 3 });
+
+    store.undo();
+    expect(store.doc.node(id)!.style.quiz!.score).toEqual({ last: 1, best: 2, attempts: 2 });
+  });
+
+  it("clamps a score above the question count", () => {
+    const store = new EditorStore(memoryAdapter);
+    const id = topicWithQuiz(store, 2);
+    store.submitQuizScore(id, 99);
+    expect(store.doc.node(id)!.style.quiz!.score).toEqual({ last: 2, best: 2, attempts: 1 });
+  });
+});

@@ -146,6 +146,13 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
         </>
       )}
       <div className="ctx-sep" />
+      {/* A topic carrying a quiz offers to open it; the button sits next to the
+          one that copies a prompt to generate a new one. */}
+      {node.style.quiz && (
+        <button role="menuitem" onClick={act(() => store.openQuiz(node.id))}>
+          Start quiz
+        </button>
+      )}
       {/* Copies the branch's outline followed by a prompt that asks an LLM for
           a quiz; pasting the answer back attaches it to the selected topic. */}
       <button role="menuitem" onClick={act(() => void store.copyQuizPrompt(node.id))}>

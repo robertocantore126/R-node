@@ -11,6 +11,7 @@ import { Inspector } from "./ui/Inspector";
 import { ShapeLibrary } from "./ui/ShapeLibrary";
 import { Palette } from "./ui/Palette";
 import { SearchBar } from "./ui/SearchBar";
+import { QuizWindow } from "./ui/QuizWindow";
 
 export function App(): JSX.Element {
   const store = useStore();
@@ -80,6 +81,8 @@ export function App(): JSX.Element {
       </div>
 
       <Palette />
+
+      {state.quizNodeId && <QuizWindow />}
 
       {state.message && (
         <div className="toast" onClick={() => (store as unknown as { toast: (m: string) => void }).toast("")}>
