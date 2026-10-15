@@ -11,12 +11,14 @@
 import { guessCodeLang } from "../core/codeHighlight";
 import type { ShapeTemplate } from "./shapeLibrary";
 import { addRecentColor } from "./recentColors";
+import { quizClipText } from "./quizPrompts";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { parseQuiz, type QuizSeed } from "../core/quiz";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, galleryExtent, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
@@ -178,6 +180,9 @@ export interface EditorState {
   searchIndex: number;
   /** Whether the in-map search bar is open (Ctrl+F). */
   searchOpen: boolean;
+  /** The quiz window that is open — the topic and the quiz id within it — or
+   *  null. Opened from the topic's right-click menu; never drawn on the canvas. */
+  quizOpen: { nodeId: string; quizId: string } | null;
   /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
   pendingInsert: string | null;
   sync: "saved" | "dirty";
@@ -343,6 +348,7 @@ export class EditorStore {
       searchResults: [],
       searchIndex: 0,
       searchOpen: false,
+      quizOpen: null,
       pendingInsert: null,
       sync: "saved",
       message: null,
@@ -3305,6 +3311,64 @@ export class EditorStore {
     this.toast(`Copied outline (${text.split("\n").length} lines)`);
   }
 
+  /**
+   * Copy a branch's outline plus the quiz-generation prompt, ready to paste
+   * into an LLM. The result is the exact input the paste side reverses: the
+   * LLM answers with a quiz payload that, pasted back on a topic, becomes its
+   * `Style.quiz`. Takes a node id (not the selection): the menu item acts on
+   * the topic that was right-clicked.
+   */
+  async copyQuizPrompt(nodeId: string): Promise<void> {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const text = quizClipText(this.outlineText([nodeId]));
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be blocked; the prompt was still built */
+    }
+    this.toast("Copied quiz prompt");
+  }
+
+  /**
+   * APPEND a quiz to a topic's strip. One `setStyle` op in one batch, so the
+   * add is a single undoable step, like every other style change. Adding never
+   * replaces: a topic holds one quiz per square in its menu strip.
+   */
+  attachQuiz(nodeId: string, seed: QuizSeed): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const quiz: QuizInfo = { id: uid("quiz"), questions: seed.questions };
+    if (seed.name) quiz.name = seed.name;
+    const quizzes = [...(node.style.quizzes ?? []), quiz];
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style: { ...node.style, quizzes }, prev: node.style }),
+    ]);
+    const n = seed.questions.length;
+    this.toast(`Quiz added (${n} question${n > 1 ? "s" : ""})`);
+  }
+
+  /**
+   * Read a quiz payload from the clipboard and append it to a topic's strip —
+   * what the "+" square in the topic menu does. The clipboard is only readable
+   * from a user gesture, so this is the gesture; a bad payload is refused and
+   * traced rather than pasted into the topic as raw JSON.
+   */
+  async addQuizFromClipboard(nodeId: string): Promise<void> {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    let text: string | null = null;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      /* clipboard read blocked — treat as empty */
+    }
+    if (!text) return trace.ignored("quiz:add", "clipboard empty or blocked");
+    const seed = parseQuiz(text);
+    if (!seed) return trace.ignored("quiz:add", "clipboard does not hold a quiz payload");
+    this.attachQuiz(nodeId, seed);
+  }
+
   async cutSelection(): Promise<void> {
     await this.copySelection();
     this.deleteSelection();
@@ -3382,6 +3446,18 @@ export class EditorStore {
       parsed = JSON.parse(text);
     } catch {
       parsed = null;
+    }
+    // A quiz payload appends to the selected topic's strip BEFORE the
+    // map-payload check: it shares `app: "r-node"` but carries no `payload`,
+    // so without this it would fall through to the plain-text branch and be
+    // typed into the topic as raw JSON (and then show up in Ctrl+F).
+    // parseQuiz tolerates a ```json fence, which an LLM adds often enough.
+    const quizSeed = parseQuiz(text);
+    if (quizSeed) {
+      const target = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
+      if (!target) return trace.ignored("paste:quiz", "no topic selected to attach the quiz to");
+      this.attachQuiz(target.id, quizSeed);
+      return;
     }
     if (!parsed || parsed.app !== "r-node" || !parsed.payload) {
       // Plain text on the clipboard: XMind-style, paste it straight into the
@@ -3969,6 +4045,57 @@ export class EditorStore {
   }
 
   // -------------------------------------------------------------------------
+  // Quiz (opens a modal window; the quiz itself is never drawn)
+  // -------------------------------------------------------------------------
+
+  openQuiz(nodeId: string, quizId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node?.style.quizzes?.some((q) => q.id === quizId)) return;
+    this.state.quizOpen = { nodeId, quizId };
+    trace.mark("ui", "ui:modal", { open: true, quiz: quizId });
+    this.notify();
+  }
+
+  closeQuiz(): void {
+    if (this.state.quizOpen === null) return;
+    this.state.quizOpen = null;
+    trace.mark("ui", "ui:modal", { open: false });
+    this.notify();
+  }
+
+  /**
+   * Record one finished run of a topic's quiz. `correct` is the number of right
+   * answers; the total comes from the quiz itself. Written through a `setStyle`
+   * op so the result lives in the document (it survives a reload and an export)
+   * and one Ctrl+Z undoes the run like any other edit.
+   */
+  submitQuizScore(nodeId: string, quizId: string, correct: number): void {
+    const node = this.model.node(nodeId);
+    const quizzes = node?.style.quizzes;
+    if (!node || !quizzes) return;
+    const idx = quizzes.findIndex((q) => q.id === quizId);
+    if (idx < 0) return;
+    const quiz = quizzes[idx];
+    const total = quiz.questions.length;
+    const clamped = Math.max(0, Math.min(correct, total));
+    const prev = quiz.score;
+    const score = {
+      last: clamped,
+      best: Math.max(prev?.best ?? 0, clamped),
+      attempts: (prev?.attempts ?? 0) + 1,
+    };
+    const nextQuizzes = quizzes.map((q, i) => (i === idx ? { ...q, score } : q));
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: nodeId,
+        style: { ...node.style, quizzes: nextQuizzes },
+        prev: node.style,
+      }),
+    ]);
+    this.notify();
+  }
+
+  // -------------------------------------------------------------------------
   // Theme & UI toggles
   // -------------------------------------------------------------------------
 
@@ -4151,6 +4278,7 @@ export class EditorStore {
     this.state.search = "";
     this.state.searchResults = [];
     this.state.searchOpen = false;
+    this.state.quizOpen = null;
     this.state.sync = "saved"; // the loaded doc is its persisted version
     this.focusRoot();
     this.notify();

@@ -101,6 +101,38 @@ export interface GalleryItem {
   caption?: string;
 }
 
+/**
+ * One question of a quiz (`Style.quiz`). Exactly four answers by design: the
+ * payload is produced by an LLM from the "copy as quiz prompt" text, and a
+ * fixed count is what makes it parseable without a negotiation round. `correct`
+ * is the index 0..3 into `answers`.
+ */
+export interface QuizQuestion {
+  q: string;
+  answers: string[];
+  correct: number;
+  explain?: string;
+}
+
+/**
+ * A quiz carried by a topic, but never drawn on the canvas: the topic looks
+ * like any other and the quiz is opened from its right-click menu. Stored in
+ * `Style` as a presentation-adjacent variant (same rule as `code` and
+ * `gallery`) — no `NodeType`, no schema migration, no second renderer.
+ *
+ * `score` is the only mutable part and lives in the document, so it survives a
+ * reload and an export; it is written through a `setStyle` op, so one Ctrl+Z
+ * undoes a run's result like any other edit.
+ */
+export interface QuizInfo {
+  /** Stable id within the topic — keying, opening and scoring address a quiz
+   *  by id, never by array index (the list is editable). */
+  id: string;
+  name?: string;
+  questions: QuizQuestion[];
+  score?: { last: number; best: number; attempts: number };
+}
+
 export interface Style {
   fill?: string;
   stroke?: string;
@@ -160,6 +192,15 @@ export interface Style {
     /** Fixed column count. Absent or 0 = wrap to whatever the box allows. */
     cols?: number;
   };
+  /**
+   * The quizzes attached to this topic (see `QuizInfo`). Nothing renders them:
+   * the topic is an ordinary topic, and the quizzes are reached from its
+   * right-click menu as a strip of squares (each square opens one). A topic may
+   * hold several. A presentation-adjacent variant, deliberately not a
+   * `NodeType` — that enum drives topology and layout, and a quiz changes
+   * neither.
+   */
+  quizzes?: QuizInfo[];
   link?: string;
   /**
    * Marks the topic as a read-only code block (T22). The SOURCE lives in
