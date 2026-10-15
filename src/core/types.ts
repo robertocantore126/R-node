@@ -101,6 +101,35 @@ export interface GalleryItem {
   caption?: string;
 }
 
+/**
+ * One question of a quiz (`Style.quiz`). Exactly four answers by design: the
+ * payload is produced by an LLM from the "copy as quiz prompt" text, and a
+ * fixed count is what makes it parseable without a negotiation round. `correct`
+ * is the index 0..3 into `answers`.
+ */
+export interface QuizQuestion {
+  q: string;
+  answers: string[];
+  correct: number;
+  explain?: string;
+}
+
+/**
+ * A quiz carried by a topic, but never drawn on the canvas: the topic looks
+ * like any other and the quiz is opened from its right-click menu. Stored in
+ * `Style` as a presentation-adjacent variant (same rule as `code` and
+ * `gallery`) — no `NodeType`, no schema migration, no second renderer.
+ *
+ * `score` is the only mutable part and lives in the document, so it survives a
+ * reload and an export; it is written through a `setStyle` op, so one Ctrl+Z
+ * undoes a run's result like any other edit.
+ */
+export interface QuizInfo {
+  name?: string;
+  questions: QuizQuestion[];
+  score?: { last: number; best: number; attempts: number };
+}
+
 export interface Style {
   fill?: string;
   stroke?: string;
@@ -160,6 +189,13 @@ export interface Style {
     /** Fixed column count. Absent or 0 = wrap to whatever the box allows. */
     cols?: number;
   };
+  /**
+   * A quiz attached to this topic (see `QuizInfo`). Nothing renders it: the
+   * topic is an ordinary topic whose right-click menu offers "Start quiz".
+   * A presentation variant, deliberately not a `NodeType` — that enum drives
+   * topology and layout, and a quiz changes neither.
+   */
+  quiz?: QuizInfo;
   link?: string;
   /**
    * Marks the topic as a read-only code block (T22). The SOURCE lives in

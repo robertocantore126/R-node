@@ -16,7 +16,8 @@ import { History } from "../core/history";
 import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { normalizeQuiz } from "../core/quiz";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, galleryExtent, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
@@ -3305,6 +3306,21 @@ export class EditorStore {
     this.toast(`Copied outline (${text.split("\n").length} lines)`);
   }
 
+  /**
+   * Attach (or replace) the quiz stored on a topic's style. One `setStyle` op
+   * in one batch, so the attach — and the clearing of a previous quiz — is a
+   * single undoable step, exactly like every other style change.
+   */
+  attachQuiz(nodeId: string, quiz: QuizInfo): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style: { ...node.style, quiz }, prev: node.style }),
+    ]);
+    const n = quiz.questions.length;
+    this.toast(`Quiz attached (${n} question${n > 1 ? "s" : ""})`);
+  }
+
   async cutSelection(): Promise<void> {
     await this.copySelection();
     this.deleteSelection();
@@ -3382,6 +3398,18 @@ export class EditorStore {
       parsed = JSON.parse(text);
     } catch {
       parsed = null;
+    }
+    // A quiz payload attaches to the selected topic BEFORE the map-payload
+    // check: it shares `app: "r-node"` but carries no `payload`, so without
+    // this it would fall through to the plain-text branch and be typed into
+    // the topic as raw JSON. The topic looks unchanged — the quiz is opened
+    // from its right-click menu, never drawn (T-Q).
+    const quiz = normalizeQuiz(parsed);
+    if (quiz) {
+      const target = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
+      if (!target) return trace.ignored("paste:quiz", "no topic selected to attach the quiz to");
+      this.attachQuiz(target.id, quiz);
+      return;
     }
     if (!parsed || parsed.app !== "r-node" || !parsed.payload) {
       // Plain text on the clipboard: XMind-style, paste it straight into the
