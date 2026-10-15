@@ -30,9 +30,9 @@ export function Sidebar(): JSX.Element {
       <div className="sidebar-search">
         <input
           ref={searchRef}
-          placeholder="Search documents…  (Ctrl+F)"
+          placeholder="Search documents…  (Ctrl+Shift+F)"
           data-help="Search documents"
-          data-help-more="Filters the document list by title (Ctrl+F)."
+          data-help-more="Filters the document list by title (Ctrl+Shift+F)."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />

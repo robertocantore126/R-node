@@ -231,6 +231,8 @@ export function CanvasView(): JSX.Element {
       ghostImage: ghostRef.current,
       galleryDrop: galleryDropRef.current,
       marqueeSel: marqueeSelRef.current,
+      searchMatches: s.searchOpen && s.search ? new Set(s.searchResults) : null,
+      searchCurrent: s.searchOpen && s.searchResults.length > 0 ? s.searchResults[s.searchIndex] : null,
     };
     renderer.render(rs);
   }, [store]);

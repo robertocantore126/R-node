@@ -66,6 +66,14 @@ export interface RenderState {
    * DOM overlay; this is the live "what will be selected" feedback).
    */
   marqueeSel?: Set<string> | null;
+  /**
+   * In-map search (Ctrl+F): ids of topics whose title/notes match the query —
+   * each wears a dashed ring — and the one currently walked to, which wears a
+   * solid, heavier ring. Purely presentational: it never touches measure.ts or
+   * the runs, so it stays outside the §3 parity contract.
+   */
+  searchMatches?: Set<string> | null;
+  searchCurrent?: string | null;
   showHidden?: boolean; // export: include collapsed subtrees
   /**
    * Store revision — the invalidation key for the placement cache. Omit it and
@@ -355,6 +363,23 @@ export class Renderer {
     for (const p of placed) {
       if (!p.visible) continue;
       this.drawNode(theme, p, state);
+    }
+
+    // 3b) in-map search highlights. Drawn from the placed list, so only VISIBLE
+    // matches are ringed — a match inside a collapsed branch is not on screen,
+    // and the bar's count is what reports how many exist in total. The current
+    // match is solid and heavier; the rest are dashed.
+    if (state.searchMatches && state.searchMatches.size > 0) {
+      for (const p of placed) {
+        if (!p.visible || !state.searchMatches.has(p.node.id)) continue;
+        const isCurrent = state.searchCurrent === p.node.id;
+        const pad = RING_PAD + (isCurrent ? 1 : 0);
+        ctx.setLineDash(isCurrent ? [] : [5, 3]);
+        ctx.strokeStyle = isCurrent ? theme.searchMatchActive : theme.searchMatch;
+        ctx.lineWidth = isCurrent ? 3 : 1.5;
+        ctx.strokeRect(p.x - pad, p.y - pad, p.w + pad * 2, p.h + pad * 2);
+        ctx.setLineDash([]);
+      }
     }
 
     // 4) groups & summaries (drawn over the nodes, geometry derived from members)

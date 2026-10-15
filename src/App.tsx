@@ -10,6 +10,7 @@ import { Outliner } from "./ui/Outliner";
 import { Inspector } from "./ui/Inspector";
 import { ShapeLibrary } from "./ui/ShapeLibrary";
 import { Palette } from "./ui/Palette";
+import { SearchBar } from "./ui/SearchBar";
 
 export function App(): JSX.Element {
   const store = useStore();
@@ -31,7 +32,10 @@ export function App(): JSX.Element {
         // "Save page" dialog and nothing is saved.
         const mod = e.ctrlKey || e.metaKey;
         const key = e.key.toLowerCase();
-        if (mod && (key === "s" || key === "o")) {
+        // Ctrl+F / Ctrl+Shift+F too: "find" belongs to the map even while a
+        // field (Inspector, doc title…) has focus, and pressing it there must
+        // not fall through to the browser's own page find.
+        if (mod && (key === "s" || key === "o" || key === "f")) {
           e.preventDefault();
           (target as HTMLElement).blur();
           if (handleShortcut(store, e, viewSize.w, viewSize.h)) e.preventDefault();
@@ -59,6 +63,7 @@ export function App(): JSX.Element {
         <div className="workspace">
           <div className="canvas-area">
             <CanvasView />
+            <SearchBar />
             {state.showOutliner && <Outliner />}
           </div>
           {state.showInspector && (

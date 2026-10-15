@@ -33,6 +33,7 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
   "Mod+v": "paste",
   "Mod+k": "palette",
   "Mod+f": "search",
+  "Mod+Shift+f": "search-docs",
   "Mod+s": "save",
   "Mod+o": "open",
   "Mod+e": "export-json",
@@ -60,6 +61,10 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
     const s = store.getSnapshot();
     if (s.showPalette) {
       store.togglePalette();
+    } else if (s.searchOpen) {
+      // The in-map search bar is a full overlay: Escape closes it (and clears
+      // the query) before it touches the selection.
+      store.closeSearch();
     } else if (s.relFrom) {
       store.clearRelFrom();
     } else if (s.gallerySel) {
@@ -182,6 +187,11 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       store.togglePalette();
       return true;
     case "search":
+      e.preventDefault();
+      store.openSearch();
+      window.dispatchEvent(new CustomEvent("r-node:focus-map-search"));
+      return true;
+    case "search-docs":
       e.preventDefault();
       window.dispatchEvent(new CustomEvent("r-node:focus-search"));
       return true;

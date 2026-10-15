@@ -176,6 +176,8 @@ export interface EditorState {
   search: string;
   searchResults: string[];
   searchIndex: number;
+  /** Whether the in-map search bar is open (Ctrl+F). */
+  searchOpen: boolean;
   /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
   pendingInsert: string | null;
   sync: "saved" | "dirty";
@@ -340,6 +342,7 @@ export class EditorStore {
       search: "",
       searchResults: [],
       searchIndex: 0,
+      searchOpen: false,
       pendingInsert: null,
       sync: "saved",
       message: null,
@@ -3881,20 +3884,62 @@ export class EditorStore {
   // Search
   // -------------------------------------------------------------------------
 
+  /**
+   * Every node id in a deterministic order, INCLUDING those hidden inside a
+   * collapsed ancestor and detached (floating) topics. `visibleIds` would miss
+   * both, which is exactly what a "find in map" must not do: a match stays
+   * findable while its branch is collapsed, and jumping to it expands the
+   * branch (see `revealNode`).
+   */
+  private searchableNodeIds(): string[] {
+    const sheet = this.sheet;
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const visit = (id: string): void => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      out.push(id);
+      const n = this.model.node(id);
+      if (!n) return;
+      for (const c of n.childrenIds) visit(c);
+    };
+    visit(sheet.rootNodeId);
+    // Floating topics (parentId null, not the root) are reachable from nowhere.
+    for (const id of Object.keys(sheet.nodes)) if (!seen.has(id)) out.push(id);
+    return out;
+  }
+
+  /**
+   * Open the branch a hidden match lives in, so selecting it actually shows it.
+   * Expands only COLLAPSED ancestors, as one op batch: a jump that expands
+   * nothing emits no op and no history entry, so navigating between visible
+   * matches never pollutes undo.
+   */
+  private revealNode(id: string): void {
+    const ops: Op[] = [];
+    let cur = this.model.node(id)?.parentId ?? null;
+    while (cur) {
+      const n = this.model.node(cur);
+      if (n?.collapsed) {
+        ops.push(makeOp<Op & { type: "setCollapsed" }>("setCollapsed", { id: cur, collapsed: false, prev: true }));
+      }
+      cur = n?.parentId ?? null;
+    }
+    if (ops.length) this.execOps(ops);
+  }
+
   setSearch(q: string): void {
     this.state.search = q;
     const query = q.trim().toLowerCase();
     let results: string[] = [];
     if (query) {
-      results = this.model
-        .visibleIds(this.sheet.rootNodeId)
-        .filter((id) => {
-          const n = this.model.node(id);
-          return !!n && (n.title.toLowerCase().includes(query) || n.notes.toLowerCase().includes(query));
-        });
+      results = this.searchableNodeIds().filter((id) => {
+        const n = this.model.node(id);
+        return !!n && (n.title.toLowerCase().includes(query) || n.notes.toLowerCase().includes(query));
+      });
     }
     this.state.searchResults = results;
-    this.state.searchIndex = results.length > 0 ? 0 : 0;
+    this.state.searchIndex = 0;
     this.notify();
     if (results.length > 0) this.jumpToSearch(0);
   }
@@ -3904,7 +3949,22 @@ export class EditorStore {
     if (results.length === 0) return;
     const next = (this.state.searchIndex + offset + results.length) % results.length;
     this.state.searchIndex = next;
-    this.select(results[next], { center: true });
+    const id = results[next];
+    this.revealNode(id);
+    this.select(id, { center: true });
+    this.notify();
+  }
+
+  openSearch(): void {
+    this.state.searchOpen = true;
+    this.notify();
+  }
+
+  closeSearch(): void {
+    this.state.searchOpen = false;
+    this.state.search = "";
+    this.state.searchResults = [];
+    this.state.searchIndex = 0;
     this.notify();
   }
 
@@ -4090,6 +4150,7 @@ export class EditorStore {
     this.state.editingId = null;
     this.state.search = "";
     this.state.searchResults = [];
+    this.state.searchOpen = false;
     this.state.sync = "saved"; // the loaded doc is its persisted version
     this.focusRoot();
     this.notify();
