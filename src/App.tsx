@@ -82,7 +82,7 @@ export function App(): JSX.Element {
 
       <Palette />
 
-      {state.quizNodeId && <QuizWindow />}
+      {state.quizOpen && <QuizWindow key={`${state.quizOpen.nodeId}:${state.quizOpen.quizId}`} />}
 
       {state.message && (
         <div className="toast" onClick={() => (store as unknown as { toast: (m: string) => void }).toast("")}>

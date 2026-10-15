@@ -11,6 +11,7 @@
  * outside, Escape, or a wheel/pan gesture.
  */
 import { useEffect, useRef, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import { getRecentColors } from "../editor/recentColors";
 import { THEMES } from "../render/theme";
@@ -30,6 +31,9 @@ interface Props {
 
 export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
   const store = useStore();
+  // The quiz strip lives in this menu and changes while it is open (each "+"
+  // appends a quiz), so the menu must re-render on store changes.
+  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [recent, setRecent] = useState<string[]>(() => getRecentColors());
   const [pos, setPos] = useState({ x: menu.x, y: menu.y });
   const ref = useRef<HTMLDivElement>(null);
@@ -146,13 +150,35 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
         </>
       )}
       <div className="ctx-sep" />
-      {/* A topic carrying a quiz offers to open it; the button sits next to the
-          one that copies a prompt to generate a new one. */}
-      {node.style.quiz && (
-        <button role="menuitem" onClick={act(() => store.openQuiz(node.id))}>
-          Start quiz
+      {/* The quiz strip: one square per quiz on this topic — each opens it and
+          shows the last result under it — plus a "+" that appends a quiz from
+          the clipboard. The "+" does NOT close the menu on purpose: the point
+          is to paste several quizzes one after another. */}
+      <div className="ctx-quiz-row" role="group" aria-label="Quizzes">
+        {(node.style.quizzes ?? []).map((q) => {
+          const total = q.questions.length;
+          const pct = q.score && total > 0 ? Math.round((q.score.last / total) * 100) : null;
+          const active = state.quizOpen?.quizId === q.id;
+          return (
+            <button
+              key={q.id}
+              className={`quiz-chip${active ? " active" : ""}`}
+              title={q.name ?? "Quiz"}
+              onClick={act(() => store.openQuiz(node.id, q.id))}
+            >
+              <span className="quiz-chip-box" />
+              <span className="quiz-chip-pct">{pct === null ? "—" : `${pct}%`}</span>
+            </button>
+          );
+        })}
+        <button
+          className="quiz-chip quiz-chip-add"
+          title="Add a quiz from the clipboard"
+          onClick={() => void store.addQuizFromClipboard(node.id)}
+        >
+          +
         </button>
-      )}
+      </div>
       {/* Copies the branch's outline followed by a prompt that asks an LLM for
           a quiz; pasting the answer back attaches it to the selected topic. */}
       <button role="menuitem" onClick={act(() => void store.copyQuizPrompt(node.id))}>

@@ -125,6 +125,9 @@ export interface QuizQuestion {
  * undoes a run's result like any other edit.
  */
 export interface QuizInfo {
+  /** Stable id within the topic — keying, opening and scoring address a quiz
+   *  by id, never by array index (the list is editable). */
+  id: string;
   name?: string;
   questions: QuizQuestion[];
   score?: { last: number; best: number; attempts: number };
@@ -190,12 +193,14 @@ export interface Style {
     cols?: number;
   };
   /**
-   * A quiz attached to this topic (see `QuizInfo`). Nothing renders it: the
-   * topic is an ordinary topic whose right-click menu offers "Start quiz".
-   * A presentation variant, deliberately not a `NodeType` — that enum drives
-   * topology and layout, and a quiz changes neither.
+   * The quizzes attached to this topic (see `QuizInfo`). Nothing renders them:
+   * the topic is an ordinary topic, and the quizzes are reached from its
+   * right-click menu as a strip of squares (each square opens one). A topic may
+   * hold several. A presentation-adjacent variant, deliberately not a
+   * `NodeType` — that enum drives topology and layout, and a quiz changes
+   * neither.
    */
-  quiz?: QuizInfo;
+  quizzes?: QuizInfo[];
   link?: string;
   /**
    * Marks the topic as a read-only code block (T22). The SOURCE lives in

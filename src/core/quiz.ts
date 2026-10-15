@@ -11,7 +11,18 @@
  * The four-answer / index rules are checked here rather than tolerated: the
  * runtime has already fixed the shape by the time this returns non-null.
  */
-import type { QuizInfo, QuizQuestion } from "./types";
+import type { QuizQuestion } from "./types";
+
+/**
+ * A parsed quiz BEFORE it is attached to a topic: the LLM supplies a name and
+ * questions, and the store adds the `id` (and later the `score`). Keeping the
+ * seed separate from `QuizInfo` means the parser never invents the fields the
+ * document owns.
+ */
+export interface QuizSeed {
+  name?: string;
+  questions: QuizQuestion[];
+}
 
 export const QUIZ_APP = "r-node";
 export const QUIZ_KIND = "quiz";
@@ -40,7 +51,7 @@ function normalizeQuestion(value: unknown): QuizQuestion | null {
 }
 
 /** Accept a parsed object as a quiz, or null if any rule is broken. */
-export function normalizeQuiz(value: unknown): QuizInfo | null {
+export function normalizeQuiz(value: unknown): QuizSeed | null {
   const o = asRecord(value);
   if (!o) return null;
   if (o.app !== QUIZ_APP || o.kind !== QUIZ_KIND) return null;
@@ -52,16 +63,31 @@ export function normalizeQuiz(value: unknown): QuizInfo | null {
     questions.push(q);
   }
   const name = typeof o.name === "string" && o.name.trim() !== "" ? o.name.trim() : undefined;
-  const quiz: QuizInfo = { questions };
-  if (name) quiz.name = name;
-  return quiz;
+  const seed: QuizSeed = { questions };
+  if (name) seed.name = name;
+  return seed;
 }
 
-/** Parse clipboard text into a quiz, tolerating surrounding whitespace. */
-export function parseQuiz(text: string): QuizInfo | null {
+/**
+ * The JSON object inside `text`, fences and prose aside. An LLM asked for "JSON
+ * only" still wraps its answer in a ```json fence often enough that refusing
+ * those would make the feature feel broken; and anything before/after the first
+ * `{` … last `}` is dropped rather than typed into the document. `normalizeQuiz`
+ * is still the gate — this only finds the candidate object.
+ */
+export function extractQuizJson(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  return start >= 0 && end > start ? trimmed.slice(start, end + 1) : trimmed;
+}
+
+/** Parse clipboard text into a quiz seed, tolerating fences and prose around it. */
+export function parseQuiz(text: string): QuizSeed | null {
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(extractQuizJson(text));
   } catch {
     return null;
   }

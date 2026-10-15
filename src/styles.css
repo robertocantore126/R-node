@@ -1581,3 +1581,68 @@ textarea:focus {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+/* ---------- Quiz strip (topic context menu) ---------- */
+
+.ctx-quiz-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px 4px;
+}
+
+.quiz-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 34px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+
+.quiz-chip-box {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+}
+
+.quiz-chip:hover .quiz-chip-box {
+  background: var(--accent);
+}
+
+.quiz-chip.active .quiz-chip-box {
+  background: var(--accent);
+}
+
+.quiz-chip-pct {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.quiz-chip-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.quiz-chip-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

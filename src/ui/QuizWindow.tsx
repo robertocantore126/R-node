@@ -15,9 +15,10 @@ import { useStore } from "../editor/context";
 export function QuizWindow(): JSX.Element | null {
   const store = useStore();
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  const nodeId = state.quizNodeId;
+  const nodeId = state.quizOpen?.nodeId ?? null;
+  const quizId = state.quizOpen?.quizId ?? null;
   const node = nodeId ? store.doc.node(nodeId) : null;
-  const quiz = node?.style.quiz ?? null;
+  const quiz = nodeId && quizId ? node?.style.quizzes?.find((q) => q.id === quizId) ?? null : null;
 
   const [index, setIndex] = useState(0);
   const [picked, setPicked] = useState<number | null>(null);
@@ -42,10 +43,10 @@ export function QuizWindow(): JSX.Element | null {
 
   // Persist the score exactly once per finished run (a retry resets the guard).
   useEffect(() => {
-    if (!done || !nodeId || submitted.current) return;
+    if (!done || !nodeId || !quizId || submitted.current) return;
     submitted.current = true;
-    store.submitQuizScore(nodeId, correctCount);
-  }, [done, nodeId, correctCount, store]);
+    store.submitQuizScore(nodeId, quizId, correctCount);
+  }, [done, nodeId, quizId, correctCount, store]);
 
   if (!node || !quiz || questions.length === 0) return null;
 
