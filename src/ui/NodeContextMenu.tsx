@@ -145,6 +145,12 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
           </div>
         </>
       )}
+      <div className="ctx-sep" />
+      {/* Copies the branch's outline followed by a prompt that asks an LLM for
+          a quiz; pasting the answer back attaches it to the selected topic. */}
+      <button role="menuitem" onClick={act(() => void store.copyQuizPrompt(node.id))}>
+        Copy as quiz prompt
+      </button>
     </div>
   );
 }

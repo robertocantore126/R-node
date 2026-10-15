@@ -11,6 +11,7 @@
 import { guessCodeLang } from "../core/codeHighlight";
 import type { ShapeTemplate } from "./shapeLibrary";
 import { addRecentColor } from "./recentColors";
+import { quizClipText } from "./quizPrompts";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
@@ -3304,6 +3305,25 @@ export class EditorStore {
       /* clipboard may be blocked */
     }
     this.toast(`Copied outline (${text.split("\n").length} lines)`);
+  }
+
+  /**
+   * Copy a branch's outline plus the quiz-generation prompt, ready to paste
+   * into an LLM. The result is the exact input the paste side reverses: the
+   * LLM answers with a quiz payload that, pasted back on a topic, becomes its
+   * `Style.quiz`. Takes a node id (not the selection): the menu item acts on
+   * the topic that was right-clicked.
+   */
+  async copyQuizPrompt(nodeId: string): Promise<void> {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const text = quizClipText(this.outlineText([nodeId]));
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be blocked; the prompt was still built */
+    }
+    this.toast("Copied quiz prompt");
   }
 
   /**

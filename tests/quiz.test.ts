@@ -1,6 +1,9 @@
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeQuiz, parseQuiz } from "../src/core/quiz";
+import { makeOp, type Op } from "../src/core/ops";
+import { plainToRuns } from "../src/core/text";
+import { quizClipText } from "../src/editor/quizPrompts";
 import { EditorStore } from "../src/editor/store";
 import type { StorageAdapter } from "../src/persist/storage";
 
@@ -13,6 +16,19 @@ const memoryAdapter: StorageAdapter = {
     /* no-op */
   },
 };
+
+function setTitle(store: EditorStore, id: string, title: string): void {
+  const n = store.doc.requireNode(id);
+  store.execOps([
+    makeOp<Op & { type: "setTitle" }>("setTitle", {
+      id,
+      title,
+      prev: n.title,
+      titleRuns: plainToRuns(title),
+      prevRuns: n.titleRuns,
+    }),
+  ]);
+}
 
 const validPayload = {
   app: "r-node",
@@ -88,5 +104,39 @@ describe("quiz payload — attach on paste", () => {
     expect(s.editingId).toBeNull();
     expect(s.pendingInsert).toBeNull();
     expect(store.doc.node(store.sheet.rootNodeId)!.style.quiz).toBeUndefined();
+  });
+});
+
+describe("copy as quiz prompt", () => {
+  it("composes the branch outline and the prompt, and writes them to the clipboard", async () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    store.select(root.id);
+    store.createChild();
+    const branch = root.childrenIds[root.childrenIds.length - 1];
+    setTitle(store, branch, "Alpha");
+    store.select(branch);
+    store.createChild();
+    const leaf = store.doc.requireNode(branch).childrenIds[0];
+    setTitle(store, leaf, "Alpha One");
+
+    const writes: string[] = [];
+    vi.stubGlobal("navigator", { clipboard: { writeText: async (t: string) => void writes.push(t) } });
+    await store.copyQuizPrompt(branch);
+    vi.unstubAllGlobals();
+
+    expect(writes).toHaveLength(1);
+    // The outline of the right-clicked branch (with its child) …
+    expect(writes[0]).toContain("Alpha");
+    expect(writes[0]).toContain("Alpha One");
+    // … followed by the format the paste side accepts.
+    expect(writes[0]).toContain('"kind": "quiz"');
+    expect(writes[0]).toContain('"correct"');
+  });
+
+  it("quizClipText emits the prompt alone when there is no outline", () => {
+    const text = quizClipText("   ");
+    expect(text).toContain('"kind": "quiz"');
+    expect(text.startsWith("Create a multiple-choice quiz")).toBe(true);
   });
 });
