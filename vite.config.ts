@@ -59,6 +59,10 @@ function traceSink(): Plugin {
 }
 
 export default defineConfig({
+  // Where the site lives on its host. "/" for the dev server and for Tauri,
+  // which loads `dist/` from its own origin root; the GitHub Pages workflow
+  // sets RNODE_BASE=/R-node/ because Pages serves the repo from a subfolder.
+  base: process.env.RNODE_BASE ?? "/",
   plugins: [react(), traceSink()],
   server: {
     port: 5173,
