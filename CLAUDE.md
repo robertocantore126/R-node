@@ -50,7 +50,9 @@ Everything else — `theme.ts`, `shortcuts.ts`, `pasteSanitizer.ts`, `Outliner`,
   `Camera` (`zoomAt`, `panBy`, `worldToScreen`); the code never says "viewport
   state".
 - Save / open a document (.rnode.json, .rnode.zip) -> `src/editor/exportBridge.ts`
-  (`buildRnodeZip`, `importRnodeZip`), driven from `src/editor/store.ts`.
+  (`buildRnodeZip`, `importRnodeZip`), driven from `src/editor/store.ts`. The
+  web build's own `.rnode` (SQLite via sql.js, same schema as `src-tauri`) is
+  `src/persist/rnodeFile.ts` (`buildRnodeFile`, `readRnodeFile`).
   **Not** `src/export/`, which only produces SVG/PNG/HTML artifacts.
 - Image bytes -> `src/persist/assets.ts` — an `AssetStore` in IndexedDB keyed by
   SHA-256; the document itself carries only `AttachmentInfo` metadata.

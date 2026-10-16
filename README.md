@@ -14,9 +14,9 @@ established mind-mapping tools such as Xmind.
 - **Keyboard-first** — Enter/Tab/Shift+Tab to create and structure topics,
   arrow keys to navigate, every action undoable.
 - **Local-first** — documents save when you decide (Ctrl+S, no hidden
-  autosave). On the web they live in localStorage; on desktop each document is
-  **one `.rnode` file** (a SQLite database holding the document *and* its
-  images).
+  autosave). Each document is **one `.rnode` file** (a SQLite database
+  holding the document *and* its images) on desktop and on the web alike — the
+  web build runs SQLite in WebAssembly, so the same file opens in both.
 - **Images in nodes** — drop or paste an image onto a topic, resize it, share
   the map as a single `.rnode.zip`. The canvas only decodes pre-scaled levels
   inside a byte budget, so maps with hundreds of images stay fluid.

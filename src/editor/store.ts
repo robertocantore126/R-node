@@ -27,7 +27,8 @@ import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore } from "../persist/assets";
-import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode, type ZipPhase } from "./exportBridge";
+import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
+import { buildRnodeFile, isSqliteFile, readRnodeFile } from "../persist/rnodeFile";
 import { importImageFile, mimeFromName, validateImageSource, type ImportedImage } from "./imageImport";
 import { viewSize } from "./view";
 
@@ -37,6 +38,9 @@ declare global {
       suggestedName?: string;
       types?: { description?: string; accept: Record<string, string[]> }[];
     }) => Promise<FileSystemFileHandle>;
+    showOpenFilePicker?: (opts?: {
+      types?: { description?: string; accept: Record<string, string[]> }[];
+    }) => Promise<FileSystemFileHandle[]>;
   }
 }
 
@@ -67,7 +71,7 @@ function captionFromFileName(name?: string): string | undefined {
   return stem === "" ? undefined : stem;
 }
 
-export type PortableFormat = "json" | "zip";
+export type PortableFormat = "json" | "zip" | "rnode";
 
 /**
  * Storage key of the picked file handle for a document+format pair. The
@@ -452,19 +456,6 @@ export class EditorStore {
     this.notify();
   }
 
-  /** Map a zip-phase fraction onto the overall bar scale: the estimate
-   *  (prepare) is quick, reading assets is fast IndexedDB work, compression
-   *  dominates for hundreds of MB. */
-  private opProgress(phase: ZipPhase, fraction: number): void {
-    const map: Record<ZipPhase, { label: string; base: number; span: number }> = {
-      prepare: { label: "Saving document…", base: 0, span: 0.05 },
-      read: { label: "Reading images…", base: 0.05, span: 0.1 },
-      compress: { label: "Compressing…", base: 0.15, span: 0.85 },
-    };
-    const m = map[phase];
-    this.setOpProgress(m.label, Math.min(1, m.base + fraction * m.span));
-  }
-
   private endLongOp(): void {
     this.opAbort = null;
     this.state.op = null;
@@ -754,15 +745,20 @@ export class EditorStore {
         return;
       }
       await this.adapter.save(this.state.docs);
-      // Images live outside the document (T12a): a plain .rnode.json would
-      // arrive without them. With images the portable save is a .rnode.zip.
-      const hasImages = referencedAssetIds(this.sheet).size > 0;
-      const fileWritten = hasImages
-        ? await this.writePortableZip()
-        : await this.writePortableFile(JSON.stringify(this.model.doc, null, 2));
+      // The web saves the same `.rnode` file the desktop does — one SQLite
+      // database with the document and its images — so a map moves between
+      // the two without an export. `.rnode.json` / `.rnode.zip` stay as
+      // explicit exports and are still opened.
+      const fileWritten = await this.writePortableRnode();
       this.state.sync = "saved";
       trace.mark("state", "state:sync", { status: "saved", via: this.adapter.label });
-      this.toast(fileWritten ? "Saved" : "Saved locally (no file chosen)");
+      this.toast(
+        !fileWritten
+          ? "Saved locally (no file chosen)"
+          : this.lastSaveSkipped > 0
+            ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be written (missing from storage)`
+            : "Saved"
+      );
     } catch (e) {
       this.state.sync = "dirty";
       if (e instanceof Error && e.name === "AbortError") {
@@ -997,11 +993,9 @@ export class EditorStore {
   ): Promise<boolean> {
     const docId = this.model.doc.documentId;
     const key = portableFileKey(docId, format);
-    const otherKey = portableFileKey(docId, format === "zip" ? "json" : "zip");
 
     // 1) Reuse the stored handle for THIS format → silent overwrite, no
-    //    dialog, no download. The other format's handle is left alone: if the
-    //    document loses its images later, the save goes back to that file.
+    //    dialog, no download.
     let handle = this.fileHandles.get(key) ?? null;
     if (!handle) {
       handle = await this.loadFileHandle(key);
@@ -1023,17 +1017,6 @@ export class EditorStore {
 
     // 2) No handle but the API exists → let the user pick where to save.
     if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
-      // Reaching the picker with a handle for the OTHER format means the
-      // portable format of this document just changed: say why, instead of
-      // silently asking for a new location.
-      const otherHandle = this.fileHandles.get(otherKey) ?? (await this.loadFileHandle(otherKey));
-      if (otherHandle) {
-        this.toast(
-          format === "zip"
-            ? "The document now contains images — choose where to save the .rnode.zip"
-            : "The images were removed — choose where to save the .rnode.json"
-        );
-      }
       try {
         const picked = await window.showSaveFilePicker({ suggestedName: fileName, types: [pickerType] });
         const writable = await picked.createWritable();
@@ -1066,43 +1049,26 @@ export class EditorStore {
     return this.sheet.attachments.filter((a) => a.originalLost && referenced.has(a.id)).length;
   }
 
-  private async writePortableFile(json: string): Promise<boolean> {
-    return this.writePortableBytes(
-      new Blob([json], { type: "application/json" }),
-      this.docFileName(),
-      { description: "R-node document", accept: { "application/json": [".rnode.json", ".json"] } },
-      "json"
-    );
-  }
-
   /**
-   * Portable save with images. The size is estimated and shown BEFORE the
-   * zip is built — generating first and telling the user after would be the
-   * wrong order for a file that can weigh hundreds of MB.
+   * Portable save as a `.rnode` — the desktop's own file format. Building it
+   * copies every referenced image into the SQLite file, so on a picture-heavy
+   * map it is the long part of the save: it reports into the progress bar and
+   * can be cancelled between images.
    */
-  private async writePortableZip(): Promise<boolean> {
-    const store = getAssetStore();
-    // The estimate is computed BEFORE generating — the size tells the user
-    // WHY this save is heavy — and both phases report into the progress bar
-    // with an abort controller, so a hundreds-of-MB save can be cancelled
-    // instead of leaving the UI blocked with no idea how long it will take.
+  private async writePortableRnode(): Promise<boolean> {
     const signal = this.beginLongOp("Saving document…", true);
     try {
-      const hooks = { signal, onProgress: (p: ZipPhase, f: number) => this.opProgress(p, f) };
-      const estimate = await estimateRnodeZip(this.model.doc, this.sheet, store, "complete", hooks);
-      const degraded = this.degradedAssetCount();
-      const est = formatBytes(estimate);
-      this.toast(
-        degraded > 0
-          ? `${degraded} asset${degraded === 1 ? "" : "s"} lost their original in a compact import — saving display levels (~${est})`
-          : `Saving .rnode.zip (~${est})…`
-      );
-      const bytes = await buildRnodeZip(this.model.doc, this.sheet, store, "complete", hooks);
+      const { bytes, skipped } = await buildRnodeFile(this.model.doc, this.sheet, getAssetStore(), {
+        signal,
+        onProgress: (f) => this.setOpProgress("Writing images…", 0.05 + f * 0.85),
+      });
+      this.lastSaveSkipped = skipped;
+      this.setOpProgress("Writing document…", 0.95);
       return this.writePortableBytes(
-        new Blob([bytes.slice().buffer], { type: "application/zip" }),
-        this.docZipName(),
-        { description: "R-node document with images", accept: { "application/zip": [".rnode.zip"] } },
-        "zip"
+        new Blob([bytes.slice().buffer], { type: "application/vnd.sqlite3" }),
+        this.docRnodeName(),
+        { description: "R-node document", accept: { "application/vnd.sqlite3": [".rnode"] } },
+        "rnode"
       );
     } finally {
       this.endLongOp();
@@ -1190,9 +1156,10 @@ export class EditorStore {
   }
 
   /**
-   * Open a portable file (file picker): .rnode.zip (map + images), .rnode.json
-   * and legacy .rmind.json (plain documents). The container is sniffed by its
-   * PK\x03\x04 magic bytes, never by extension alone.
+   * Open a file (file picker): .rnode (the desktop's SQLite document),
+   * .rnode.zip (map + images), .rnode.json and legacy .rmind.json (plain
+   * documents). The container is sniffed by its magic bytes ("SQLite format
+   * 3", PK\x03\x04), never by extension alone.
    */
   async loadFile(): Promise<void> {
     // Desktop: "Open" picks the .rnode file itself. The web file-input flow
@@ -1201,18 +1168,17 @@ export class EditorStore {
       await this.openDesktop();
       return;
     }
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".rnode.json,.rmind.json,.rnode.zip,application/json,application/zip";
-    const file: File | null = await new Promise((resolve) => {
-      input.onchange = (): void => resolve(input.files?.[0] ?? null);
-      input.click();
-    });
-    if (!file) return;
+    const picked = await this.pickWebFile();
+    if (!picked) return;
+    const { file, handle } = picked;
     trace.mark("files", "files:open", { name: file.name, bytes: file.size });
     try {
       const buf = await file.arrayBuffer();
-      const head = new Uint8Array(buf, 0, 4);
+      if (isSqliteFile(new Uint8Array(buf, 0, Math.min(16, buf.byteLength)))) {
+        await this.openRnodeBytes(new Uint8Array(buf), file.name, handle);
+        return;
+      }
+      const head = new Uint8Array(buf, 0, Math.min(4, buf.byteLength));
       const isZip = head.length === 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
       if (isZip) {
         const doc = await importRnodeZip(new Uint8Array(buf), getAssetStore());
@@ -1232,6 +1198,89 @@ export class EditorStore {
       trace.error("loadFile", e instanceof Error ? e.message : String(e));
       this.toast("Could not read the file");
     }
+  }
+
+  /**
+   * Ask for a file to open. The File System Access picker is preferred
+   * because it hands back a HANDLE: an opened `.rnode` is then saved back
+   * into the same file by Ctrl+S, the way the desktop works. Elsewhere
+   * (Firefox, Safari) a plain file input — the file opens, and the first
+   * save asks where to put it.
+   */
+  private async pickWebFile(): Promise<{ file: File; handle: FileSystemFileHandle | null } | null> {
+    if (typeof window.showOpenFilePicker === "function") {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          types: [
+            {
+              description: "R-node document",
+              accept: {
+                "application/vnd.sqlite3": [".rnode"],
+                "application/zip": [".zip"],
+                "application/json": [".json"],
+              },
+            },
+          ],
+        });
+        if (!handle) return null;
+        return { file: await handle.getFile(), handle };
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return null;
+        // picker refused (permissions, embedded frame) → plain input below
+      }
+    }
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".rnode,.rnode.json,.rmind.json,.rnode.zip,application/json,application/zip";
+    const file: File | null = await new Promise((resolve) => {
+      input.onchange = (): void => resolve(input.files?.[0] ?? null);
+      input.click();
+    });
+    return file ? { file, handle: null } : null;
+  }
+
+  /**
+   * Open a desktop `.rnode` in the browser: images into the asset store, the
+   * document through the same validation as every other open, and — as on
+   * the desktop — the file's name becomes the map's title. With a handle the
+   * file is remembered, so the next save overwrites it.
+   */
+  private async openRnodeBytes(bytes: Uint8Array, fileName: string, handle: FileSystemFileHandle | null): Promise<void> {
+    this.beginLongOp("Opening document…", false);
+    let result: Awaited<ReturnType<typeof readRnodeFile>>;
+    try {
+      result = await readRnodeFile(bytes, getAssetStore(), {
+        onProgress: (f) => this.setOpProgress("Reading images…", f),
+      });
+    } finally {
+      this.endLongOp();
+    }
+    if (!result.ok) {
+      trace.mark("files", "files:failure", { op: "open-rnode", error: result.error });
+      this.toast(
+        result.error === "not-rnode"
+          ? "Not a valid R-node file"
+          : `Could not open ${fileName}: ${documentLoadErrorLabel(result.error)}`
+      );
+      return;
+    }
+    const id = this.importDocumentFromJson(JSON.stringify(result.doc));
+    if (!id) {
+      this.toast(`Could not open ${fileName}: ${documentLoadErrorLabel("incompatible-schema")}`);
+      return;
+    }
+    this.adoptFileTitle(fileName);
+    if (handle) {
+      const key = portableFileKey(id, "rnode");
+      this.fileHandles.set(key, handle);
+      await this.storeFileHandle(key, handle);
+    }
+    this.notify();
+    this.toast(
+      result.skipped > 0
+        ? `Opened ${fileName} — ${result.skipped} image${result.skipped === 1 ? "" : "s"} missing from the file`
+        : `Opened ${fileName}`
+    );
   }
 
   /**
@@ -1353,6 +1402,10 @@ export class EditorStore {
 
   private docZipName(): string {
     return `${docFileBaseName(this.model.doc.title)}.rnode.zip`;
+  }
+
+  private docRnodeName(): string {
+    return `${docFileBaseName(this.model.doc.title)}.rnode`;
   }
 
   // -------------------------------------------------------------------------

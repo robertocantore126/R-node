@@ -1,11 +1,19 @@
 import "fake-indexeddb/auto";
-import { describe, expect, it, vi } from "vitest";
+import initSqlJs from "sql.js";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { EditorStore, docFileBaseName, portableFileKey } from "../src/editor/store";
 import { DocumentModel } from "../src/core/doc";
 import { makeOp, type Op } from "../src/core/ops";
 import { createCanvasTextMeasurer, measureNode } from "../src/layout/measure";
 import { getAssetStore, IndexedDbAssetStore } from "../src/persist/assets";
+import { readRnodeFile, setSqlEngine } from "../src/persist/rnodeFile";
 import type { StorageAdapter } from "../src/persist/storage";
+
+// The web save writes a `.rnode` (SQLite). In the browser sql.js loads its
+// WASM through Vite; node has no Vite, so the engine is handed in here.
+beforeAll(async () => {
+  setSqlEngine(await initSqlJs());
+});
 
 const memoryAdapter: StorageAdapter = {
   label: "test",
@@ -421,8 +429,8 @@ describe("save / load file", () => {
 
     expect(store.getSnapshot().sync).toBe("saved");
     expect(download).toHaveBeenCalledTimes(2);
-    const parsed = JSON.parse(await blobs[1].text());
-    expect(parsed.sheets[0].nodes[main.id].title).toBe("Versione corrente");
+    const read = await readRnodeFile(new Uint8Array(await blobs[1].arrayBuffer()), new IndexedDbAssetStore("store-test-reread"));
+    expect(read.ok && read.doc.sheets[0].nodes[main.id].title).toBe("Versione corrente");
   });
 
   it("saves a document loaded from storage with current content after reload", async () => {

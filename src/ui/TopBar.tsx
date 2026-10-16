@@ -62,7 +62,7 @@ export function TopBar(): JSX.Element {
         <button className="btn small" data-help="New document" data-help-more="Creates a fresh empty map. Nothing is saved until you press Save." onClick={() => store.newDocument()}>
           + New
         </button>
-        <button className="btn" data-help="Open" data-help-more="Opens a .rnode document from disk (Ctrl+O)." title="Open a .rnode.json file (Ctrl+O)" onClick={() => void store.loadFile()}>
+        <button className="btn" data-help="Open" data-help-more="Opens a .rnode document from disk (Ctrl+O)." title="Open a .rnode file (Ctrl+O)" onClick={() => void store.loadFile()}>
           Open
         </button>
         <span className={`save-status ${state.sync}`} data-help="Save status" data-help-more="Saved: everything up to your last Save is on disk. Unsaved: there are changes not yet persisted." title="Changes are saved only when you press Save or Ctrl+S">
