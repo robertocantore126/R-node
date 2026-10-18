@@ -23,7 +23,7 @@
  *    below (vertical).
  *  - freeform: nothing — manual positions only.
  */
-import { freeformOwner, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
+import { freeformOwner, freeformOffset } from "../core/freeform";
 import type { MindNode, Sheet } from "../core/types";
 import { imageResolver, measureNode, type TextMeasurer } from "./measure";
 
@@ -189,7 +189,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       parent.childrenIds.forEach((childId, index) => {
         const child = sheet.nodes[childId];
         if (!child) return;
-        const offset = child.style.freeformPosition ?? { x: FREEFORM_PADDING + index * 24, y: FREEFORM_HEADER + FREEFORM_PADDING + index * 24 };
+        const offset = freeformOffset(child, index);
         positions.set(childId, { x: origin.x + offset.x, y: origin.y + offset.y });
         placeContents(childId);
       });

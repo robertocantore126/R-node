@@ -1905,10 +1905,14 @@ export class Renderer {
    */
   hitTest(state: RenderState, worldX: number, worldY: number, skip?: (id: string) => boolean): string | null {
     const placed = this.placedNodes(state).filter((p) => p.visible);
-    for (let i = placed.length - 1; i >= 0; i--) {
-      const p = placed[i];
-      if (skip?.(p.node.id)) continue;
-      if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
+    // Board backgrounds are painted before all ordinary topics. Use that
+    // same two-layer order here, including nested/overlapping canvases.
+    for (const background of [false, true]) {
+      for (let i = placed.length - 1; i >= 0; i--) {
+        const p = placed[i];
+        if (!!p.node.style.freeform !== background || skip?.(p.node.id)) continue;
+        if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
+      }
     }
     return null;
   }

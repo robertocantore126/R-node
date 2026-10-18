@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import initSqlJs, { type SqlJsStatic } from "sql.js";
 import { beforeAll, describe, expect, it } from "vitest";
 import { DocumentModel } from "../src/core/doc";
+import { EditorStore } from "../src/editor/store";
+import { applyLayout } from "../src/layout/mindmap";
 import { slotKey } from "../src/core/ops";
 import type { RnodeDocument } from "../src/core/types";
 import { IndexedDbAssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../src/persist/assets";
@@ -40,6 +42,32 @@ async function docWithImage(store: IndexedDbAssetStore): Promise<{ doc: RnodeDoc
 }
 
 describe(".rnode file in the browser", () => {
+  it("round-trips a freeform diagram with local geometry, links, notes and image bytes", async () => {
+    const assets = freshStore();
+    const imageId = await assets.put(levels("freeform"), {mime:"image/png", w:2048, h:1024, bytes:10, name:"diagram.png"});
+    const editor = new EditorStore({label:"test", async load(){return [];}, async save(){}});
+    editor.createFreeformTopic(editor.sheet.rootNodeId);
+    const board = editor.doc.requireNode(editor.getSnapshot().selection[0]);
+    editor.sheet.attachments.push({... (await assets.meta(imageId))!});
+    const a = editor.createFreeformItem(board.id,board.position.x+80,board.position.y+90,"Label")!;
+    const b = editor.createFreeformItem(board.id,board.position.x+280,board.position.y+180,"",imageId)!;
+    editor.doc.requireNode(b).notes = "Important diagram notes";
+    editor.createRelationship(a,b);
+    const {bytes} = await buildRnodeFile(editor.doc.doc,editor.sheet,assets,{sql:SQL});
+    const restoredAssets = freshStore();
+    const restored = await readRnodeFile(bytes,restoredAssets,{sql:SQL});
+    expect(restored.ok).toBe(true);
+    if (!restored.ok) throw new Error("Freeform file could not be read");
+    const sheet = restored.doc.sheets[0]; applyLayout(sheet,true);
+    expect(sheet.nodes[board.id].style.freeform).toBe(true);
+    expect(sheet.nodes[a].position.x-sheet.nodes[board.id].position.x).toBe(80);
+    expect(sheet.nodes[b].position.y-sheet.nodes[board.id].position.y).toBe(180);
+    expect(sheet.nodes[b].notes).toBe("Important diagram notes");
+    expect(sheet.relationships.some((r)=>r.fromId===a && r.toId===b)).toBe(true);
+    expect(sheet.nodes[b].style.image).toBe(imageId);
+    expect(await (await restoredAssets.get(imageId,"original"))!.text()).toBe("ORIGINAL-freeform");
+  });
+
   it("writes the same schema the desktop backend creates", async () => {
     // The two sides must agree on the tables byte for byte: lib.rs owns the
     // format, so its SCHEMA constant is the reference this file is held to.

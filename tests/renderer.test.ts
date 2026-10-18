@@ -326,8 +326,8 @@ describe("hitTest — what a drag is allowed to land on", () => {
     return r;
   }
 
-  const small = { node: { id: "small" }, x: 0, y: 300, w: 120, h: 40, visible: true };
-  const tall = { node: { id: "tall" }, x: 0, y: 0, w: 200, h: 400, visible: true };
+  const small = { node: makeNode("small"), x: 0, y: 300, w: 120, h: 40, visible: true };
+  const tall = { node: makeNode("tall"), x: 0, y: 0, w: 200, h: 400, visible: true };
   // Inside both boxes, in the LOWER half of `small` — the "drop after" zone.
   const PX = 60;
   const PY = 332;

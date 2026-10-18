@@ -1,4 +1,4 @@
-import { freeformOwner, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
+import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
 /**
  * EditorStore — the editor interaction layer.
  *
@@ -541,8 +541,42 @@ export class EditorStore {
   execOps(ops: Op[], opts?: { skipHistory?: boolean }): void {
     if (ops.length === 0) return;
     const t = typeof performance !== "undefined" ? performance.now() : 0;
+    ops = [...ops];
     const inverses: Op[][] = [];
-    for (const op of ops) inverses.push(applyWithInverse(this.sheet, op));
+    const canvases = new Set<string>();
+    const collect = (id: string): void => {
+      let node = this.model.node(id);
+      const seen = new Set<string>();
+      while (node && !seen.has(node.id)) {
+        seen.add(node.id);
+        if (node.style.freeform) canvases.add(node.id);
+        node = node.parentId ? this.model.node(node.parentId) : undefined;
+      }
+    };
+    for (const op of ops) {
+      const id = "id" in op ? op.id : "nodeId" in op ? op.nodeId : null;
+      if (id) collect(id);
+      inverses.push(applyWithInverse(this.sheet, op));
+      if (id) collect(id);
+    }
+    // Inner canvases grow before their enclosing canvas is measured.
+    const depth = (id: string): number => {
+      let n = this.model.node(id), count = 0;
+      const seen = new Set<string>();
+      while (n?.parentId && !seen.has(n.id)) { seen.add(n.id); count++; n = this.model.node(n.parentId); }
+      return count;
+    };
+    for (const id of [...canvases].sort((a, b) => depth(b) - depth(a))) {
+      const node = this.model.node(id);
+      if (!node?.style.freeform) continue;
+      const min = this.freeformMinimumSize(id);
+      const width = Math.max(node.style.width ?? 720, min.w);
+      const height = Math.max(node.style.height ?? 480, min.h);
+      if (width === node.style.width && height === node.style.height) continue;
+      const op = makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, width, height }, prev: node.style });
+      inverses.push(applyWithInverse(this.sheet, op));
+      ops.push(op);
+    }
     if (!opts?.skipHistory) this.history.push(ops, inverses);
     trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
     // Tracer 2.0 state row: creation vs deletion vs plain mutation, derived
@@ -2043,23 +2077,30 @@ export class EditorStore {
   moveIntoFreeform(id: string, parentId: string, x: number, y: number): void {
     const node = this.model.node(id), parent = this.model.node(parentId);
     if (!node || !parent?.style.freeform || node.type === "central" || id === parentId || this.isDescendant(id, parentId)) return;
-    const ext = measureNode(node, this.measurer, imageResolver(this.sheet));
+    const resolve = imageResolver(this.sheet);
+    const ext = measureNode(node, this.measurer, resolve);
+    const bounds = node.style.freeform ? { minX: 0, minY: 0, maxX: ext.w, maxY: ext.h } : freeformContentBounds(this.sheet, id, (n) => measureNode(n, this.measurer, resolve));
     const box = measureNode(parent, this.measurer);
-    const px = Math.max(FREEFORM_PADDING, Math.min(x - parent.position.x, box.w - ext.w - FREEFORM_PADDING));
-    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, Math.min(y - parent.position.y, box.h - ext.h - FREEFORM_PADDING));
+    const px = Math.max(FREEFORM_PADDING - bounds.minX, Math.min(x - parent.position.x, box.w - Math.max(ext.w, bounds.maxX) - FREEFORM_PADDING));
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING - bounds.minY, Math.min(y - parent.position.y, box.h - Math.max(ext.h, bounds.maxY) - FREEFORM_PADDING));
+    const internal = freeformOwner(this.sheet, id) === parentId;
+    const actualParent = internal && node.parentId ? this.model.requireNode(node.parentId) : parent;
+    const offset = { x: parent.position.x + px - actualParent.position.x, y: parent.position.y + py - actualParent.position.y };
     const ops: Op[] = [];
-    if (node.parentId !== parentId) ops.push(makeOp<Op & { type: "moveNode" }>("moveNode", {
+    if (!internal && node.parentId !== parentId) ops.push(makeOp<Op & { type: "moveNode" }>("moveNode", {
       id, fromParentId: node.parentId, fromIndex: node.parentId ? this.model.requireNode(node.parentId).childrenIds.indexOf(id) : 0,
       toParentId: parentId, toIndex: parent.childrenIds.length,
     }));
     const capture = (n: MindNode, offset: { x: number; y: number }): void => {
       ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: n.id, style: { ...n.style, freeformPosition: offset }, prev: n.style }));
-      for (const childId of n.childrenIds) {
+      if (internal || n.style.freeform) return;
+      n.childrenIds.forEach((childId, index) => {
         const child = this.model.requireNode(childId);
-        capture(child, child.style.freeformPosition ?? { x: child.position.x - n.position.x, y: child.position.y - n.position.y });
-      }
+        const local = freeformOwner(this.sheet, n.id) ? freeformOffset(child, index) : { x: child.position.x - n.position.x, y: child.position.y - n.position.y };
+        capture(child, local);
+      });
     };
-    capture(node, { x: px, y: py });
+    capture(node, offset);
     this.execOps(ops);
     this.settleLayoutNow();
     this.select(id);
@@ -2797,8 +2838,7 @@ export class EditorStore {
       this.notify();
       return;
     }
-    if (freeformOwner(this.sheet, nodeId) && !node.title && node.childrenIds.length === 0 && slot === "top" && !node.style.imageBottom && !node.style.imageLeft && !node.style.imageRight) this.deleteNodes([nodeId]);
-    else this.setNodeImage(nodeId, null, slot);
+    this.setNodeImage(nodeId, null, slot);
     this.notify();
   }
 
@@ -3261,6 +3301,12 @@ export class EditorStore {
   // Canvas resize drag (Xmind-style handle) — ephemeral draft, single commit
   // -------------------------------------------------------------------------
 
+  private freeformMinimumSize(id: string): { w: number; h: number } {
+    const resolve = imageResolver(this.sheet);
+    const bounds = freeformContentBounds(this.sheet, id, (node) => measureNode(node, this.measurer, resolve));
+    return { w: Math.max(240, Math.ceil(bounds.maxX + FREEFORM_PADDING)), h: Math.max(160, Math.ceil(bounds.maxY + FREEFORM_PADDING)) };
+  }
+
   /** A resize drag started on this node: capture the pre-drag style + position. */
   beginResize(nodeId: string): void {
     const node = this.model.node(nodeId);
@@ -3278,10 +3324,27 @@ export class EditorStore {
   setResizeDraft(nodeId: string, width: number, opts?: { anchorRight?: boolean; x?: number; height?: number }): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const w = Math.round(Math.min(node.style.freeform ? 6000 : 640, Math.max(node.style.freeform ? 240 : MIN_TOPIC_W, width)));
-    node.style = { ...node.style, width: w, ...(node.style.freeform && opts?.height !== undefined ? { height: Math.round(Math.min(6000, Math.max(160, opts.height))) } : {}) };
+    const min = node.style.freeform ? this.freeformMinimumSize(nodeId) : { w: MIN_TOPIC_W, h: 0 };
+    const w = Math.max(min.w, Math.round(Math.min(node.style.freeform ? 6000 : 640, width)));
+    node.style = { ...node.style, width: w, ...(node.style.freeform && opts?.height !== undefined ? { height: Math.max(min.h, Math.round(Math.min(6000, opts.height))) } : {}) };
     if (opts?.anchorRight && typeof opts.x === "number") {
-      node.position = { ...node.position, x: opts.x, manual: true };
+      const drag = this.resizeState;
+      if (drag?.nodeId === nodeId && freeformOwner(this.sheet, nodeId) && node.parentId) {
+        const parent = this.model.requireNode(node.parentId);
+        const oldWidth = measureNode({ ...node, style: drag.original }, this.measurer, imageResolver(this.sheet)).w;
+        let newWidth = measureNode(node, this.measurer, imageResolver(this.sheet)).w;
+        const original = drag.original.freeformPosition ?? freeformOffset(node, parent.childrenIds.indexOf(nodeId));
+        const canvasId = freeformOwner(this.sheet, nodeId)!;
+        const canvas = this.model.requireNode(canvasId);
+        const available = parent.position.x + original.x + oldWidth - canvas.position.x - FREEFORM_PADDING;
+        if (newWidth > available) {
+          node.style = { ...node.style, width: Math.max(MIN_TOPIC_W, Math.floor(w - (newWidth - available))) };
+          newWidth = measureNode(node, this.measurer, imageResolver(this.sheet)).w;
+        }
+        const local = { ...original, x: original.x + oldWidth - newWidth };
+        node.style = { ...node.style, freeformPosition: local };
+        node.position = { ...node.position, x: parent.position.x + local.x };
+      } else node.position = { ...node.position, x: opts.x, manual: true };
     }
     this.scheduleLayout(false);
     this.notify();
@@ -3299,9 +3362,10 @@ export class EditorStore {
     // A left-edge drag moves position.x. It persists only for floating or
     // already-manual nodes; auto-layout nodes return to the layout's slot
     // (the width is what survives there — the next applyLayout re-pins x).
-    const keepX = xChanged && (node.type === "floating" || r.origPos.manual);
+    const inFreeform = !!freeformOwner(this.sheet, node.id);
+    const keepX = !inFreeform && xChanged && (node.type === "floating" || r.origPos.manual);
     const ops: Op[] = [];
-    if (w !== undefined && (w !== r.original.width || node.style.height !== r.original.height)) {
+    if (w !== undefined && (w !== r.original.width || node.style.height !== r.original.height || node.style.freeformPosition?.x !== r.original.freeformPosition?.x)) {
       ops.push(
         makeOp<Op & { type: "setStyle" }>("setStyle", {
           id: r.nodeId,
@@ -3320,11 +3384,12 @@ export class EditorStore {
           prev: r.origPos,
         })
       );
-    } else if (xChanged) {
+    } else if (xChanged && !inFreeform) {
       node.position = { ...r.origPos };
     }
     if (ops.length > 0) {
       this.execOps(ops);
+      if (inFreeform) this.settleLayoutNow();
     } else {
       // click without a real change — restore the pre-drag state, no op
       node.style = r.original;
