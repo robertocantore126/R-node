@@ -2684,6 +2684,42 @@ export class EditorStore {
     this.execOps(ops);
   }
 
+  /** Quick emphasis for ordinary selected topics, as one reversible gesture. */
+  setSelectionTopicSize(choice: "smaller" | "larger" | "normal" | "large" | "heading"): void {
+    const steps = [10, 12, 14, 18, 24, 32, 40, 48, 64, 80, 96];
+    const presets = { normal: { fontSize: 14, padding: 10, fontWeight: 400 }, large: { fontSize: 24, padding: 16, fontWeight: 600 }, heading: { fontSize: 36, padding: 24, fontWeight: 700 } };
+    const ops: Op[] = [];
+    for (const id of this.state.selection) {
+      const node = this.model.node(id);
+      if (!node || node.style.code || node.style.gallery || node.style.freeform || node.style.shapeParts) continue;
+      const current = node.style.fontSize ?? 14;
+      const preset = choice === "smaller" || choice === "larger" ? null : presets[choice];
+      const fontSize = preset?.fontSize ?? (choice === "larger"
+        ? steps.find((size) => size > current) ?? Math.max(96, current)
+        : [...steps].reverse().find((size) => size < current) ?? Math.min(10, current));
+      const ratio = fontSize / current;
+      if (!preset && ratio === 1) continue;
+      const style = {
+        ...node.style,
+        ...(preset ?? { fontSize, padding: Math.round((node.style.padding ?? 10) * ratio * 10) / 10 }),
+        // Fixed boxes grow too, preventing an enlarged title from being clipped.
+        ...(node.style.width !== undefined ? { width: Math.round(node.style.width * ratio) } : {}),
+        ...(node.style.height !== undefined ? { height: Math.round(node.style.height * ratio) } : {}),
+      };
+      if (JSON.stringify(style) !== JSON.stringify(node.style)) ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: node.style }));
+      // Pasted headings may carry explicit inline sizes that override the base.
+      // Scale those proportionally while preserving all other inline formatting.
+      if (ratio !== 1 && node.titleRuns?.some((run) => run.fontSize !== undefined)) {
+        const runs = node.titleRuns.map((run) => run.fontSize === undefined ? { ...run } : { ...run, fontSize: Math.round(run.fontSize * ratio * 10) / 10 });
+        ops.push(makeOp<Op & { type: "setTitle" }>("setTitle", { id, title: node.title, prev: node.title, titleRuns: runs, prevRuns: node.titleRuns }));
+      }
+    }
+    if (ops.length === 0) return trace.ignored("topic:size", "no eligible topics or already at size limit");
+    this.execOps(ops);
+    this.settleLayoutNow();
+    trace.applied("topic:size", { choice, ops: ops.length });
+  }
+
   /** Clear the explicit fill on the selected topics only (menu "Reset"). */
   resetSelectionColor(): void {
     const ids = this.state.selection;

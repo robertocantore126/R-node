@@ -61,7 +61,9 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") onClose();
     };
-    const onWheel = (): void => onClose();
+    const onWheel = (e: WheelEvent): void => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
     window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("wheel", onWheel, true);
@@ -107,6 +109,20 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
       <button role="menuitem" onClick={act(() => store.createGalleryTopic(node.id))}>
         New gallery topic
       </button>
+      {!node.style.code && !node.style.gallery && !node.style.freeform && !node.style.shapeParts && <>
+        <div className="ctx-sep" />
+        <div className="ctx-size-row" role="group" aria-label="Topic size">
+          <span className="ctx-label">Size</span>
+          <button role="menuitem" aria-label="Smaller text" title="Smaller text and node" onClick={() => store.setSelectionTopicSize("smaller")}>A?</button>
+          <span className="ctx-size-value">{node.style.fontSize ?? 14} px</span>
+          <button role="menuitem" aria-label="Larger text" title="Larger text and node" onClick={() => store.setSelectionTopicSize("larger")}>A+</button>
+        </div>
+        <div className="ctx-size-presets" role="group" aria-label="Topic size presets">
+          <button role="menuitem" title="14 px ? regular" onClick={act(() => store.setSelectionTopicSize("normal"))}>Normal</button>
+          <button role="menuitem" title="24 px ? semibold" onClick={act(() => store.setSelectionTopicSize("large"))}>Large</button>
+          <button role="menuitem" title="36 px ? bold" onClick={act(() => store.setSelectionTopicSize("heading"))}>Heading</button>
+        </div>
+      </>}
       <div className="ctx-sep" />
       <button
         role="menuitem"
