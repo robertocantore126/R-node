@@ -15,10 +15,10 @@ describe("quick topic sizing", () => {
     const {store, node} = setup();
     const before = measureNode(node);
     store.setSelectionTopicSize("heading");
-    expect(node.style).toMatchObject({fontSize:36, padding:24, fontWeight:700});
+    expect(node.style).toMatchObject({fontSize:200, padding:24, fontWeight:700});
     expect(measureNode(node).h).toBeGreaterThan(before.h);
     store.setSelectionTopicSize("large");
-    expect(node.style).toMatchObject({fontSize:24, padding:16, fontWeight:600});
+    expect(node.style).toMatchObject({fontSize:80, padding:16, fontWeight:600});
     store.setSelectionTopicSize("normal");
     expect(node.style).toMatchObject({fontSize:14, padding:10, fontWeight:400});
   });
@@ -29,13 +29,13 @@ describe("quick topic sizing", () => {
     node.style = {fontSize:14,width:210,height:70,padding:10};
     const before = JSON.parse(JSON.stringify(node));
     store.setSelectionTopicSize("large");
-    expect(node.titleRuns?.[0]).toEqual({text:"Heading",fontSize:48,bold:true,color:"#123456"});
+    expect(node.titleRuns?.[0]).toEqual({text:"Heading",fontSize:160,bold:true,color:"#123456"});
     expect(node.titleRuns?.[1]).toEqual({text:" plain",italic:true});
-    expect(node.style).toMatchObject({width:360,height:120});
+    expect(node.style).toMatchObject({width:1200,height:400});
     expect(node.titleRuns?.map((r)=>r.text).join("")).toBe(node.title);
     store.undo();
     expect(node.style).toEqual(before.style); expect(node.titleRuns).toEqual(before.titleRuns);
-    store.redo(); expect(node.style.fontSize).toBe(24); expect(node.titleRuns?.[0].fontSize).toBe(48);
+    store.redo(); expect(node.style.fontSize).toBe(80); expect(node.titleRuns?.[0].fontSize).toBe(160);
   });
   it("changes only selected ordinary topics in one undo step", () => {
     const {store, node} = setup();
@@ -45,7 +45,7 @@ describe("quick topic sizing", () => {
     store.setNodeStyle(code, {code:{lang:"text"}});
     const a = {...node.style}, b = {...store.doc.requireNode(sibling).style};
     store.selectMany([node.id,sibling,code]); store.setSelectionTopicSize("heading");
-    expect(node.style.fontSize).toBe(36); expect(store.doc.requireNode(sibling).style.fontSize).toBe(36);
+    expect(node.style.fontSize).toBe(200); expect(store.doc.requireNode(sibling).style.fontSize).toBe(200);
     expect(store.doc.requireNode(child).style.fontSize).toBeUndefined();
     expect(store.doc.requireNode(code).style.fontSize).toBeUndefined();
     store.undo(); expect(node.style).toEqual(a); expect(store.doc.requireNode(sibling).style).toEqual(b);
@@ -54,10 +54,10 @@ describe("quick topic sizing", () => {
     const {store, node} = setup();
     store.setSelectionTopicSize("larger"); expect(node.style.fontSize).toBe(18);
     store.setSelectionTopicSize("smaller"); expect(node.style.fontSize).toBe(14);
-    store.setNodeStyle(node.id, {fontSize:80});
+    store.setNodeStyle(node.id, {fontSize:160});
     store.setSelectionTopicSize("larger"); store.setSelectionTopicSize("larger");
-    expect(node.style.fontSize).toBe(96);
-    store.undo(); expect(node.style.fontSize).toBe(80);
+    expect(node.style.fontSize).toBe(200);
+    store.undo(); expect(node.style.fontSize).toBe(160);
     store.select(node.id);
     store.setNodeStyle(node.id, {fontSize:12});
     store.setSelectionTopicSize("smaller"); store.setSelectionTopicSize("smaller");

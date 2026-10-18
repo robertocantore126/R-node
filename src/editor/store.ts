@@ -2736,8 +2736,8 @@ export class EditorStore {
 
   /** Quick emphasis for ordinary selected topics, as one reversible gesture. */
   setSelectionTopicSize(choice: "smaller" | "larger" | "normal" | "large" | "heading"): void {
-    const steps = [10, 12, 14, 18, 24, 32, 40, 48, 64, 80, 96];
-    const presets = { normal: { fontSize: 14, padding: 10, fontWeight: 400 }, large: { fontSize: 24, padding: 16, fontWeight: 600 }, heading: { fontSize: 36, padding: 24, fontWeight: 700 } };
+    const steps = [10, 12, 14, 18, 24, 32, 40, 48, 64, 80, 96, 120, 160, 200];
+    const presets = { normal: { fontSize: 14, padding: 10, fontWeight: 400 }, large: { fontSize: 80, padding: 16, fontWeight: 600 }, heading: { fontSize: 200, padding: 24, fontWeight: 700 } };
     const ops: Op[] = [];
     for (const id of this.state.selection) {
       const node = this.model.node(id);
@@ -2745,7 +2745,7 @@ export class EditorStore {
       const current = node.style.fontSize ?? 14;
       const preset = choice === "smaller" || choice === "larger" ? null : presets[choice];
       const fontSize = preset?.fontSize ?? (choice === "larger"
-        ? steps.find((size) => size > current) ?? Math.max(96, current)
+        ? steps.find((size) => size > current) ?? Math.max(200, current)
         : [...steps].reverse().find((size) => size < current) ?? Math.min(10, current));
       const ratio = fontSize / current;
       if (!preset && ratio === 1) continue;

@@ -119,8 +119,8 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
         </div>
         <div className="ctx-size-presets" role="group" aria-label="Topic size presets">
           <button role="menuitem" title="14 px ? regular" onClick={act(() => store.setSelectionTopicSize("normal"))}>Normal</button>
-          <button role="menuitem" title="24 px ? semibold" onClick={act(() => store.setSelectionTopicSize("large"))}>Large</button>
-          <button role="menuitem" title="36 px ? bold" onClick={act(() => store.setSelectionTopicSize("heading"))}>Heading</button>
+          <button role="menuitem" title="80 px - semibold" onClick={act(() => store.setSelectionTopicSize("large"))}>Large</button>
+          <button role="menuitem" title="200 px - bold" onClick={act(() => store.setSelectionTopicSize("heading"))}>Heading</button>
         </div>
       </>}
       <div className="ctx-sep" />
