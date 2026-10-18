@@ -1592,7 +1592,7 @@ textarea:focus {
   padding: 8px 10px 4px;
 }
 
-.quiz-chip {
+.ctx-menu .quiz-chip {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1603,6 +1603,37 @@ textarea:focus {
   background: transparent;
   cursor: pointer;
   color: inherit;
+}
+
+.quiz-chip-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* The delete "×": a small badge on the square's top-right corner. */
+.ctx-menu .quiz-chip-del {
+  position: absolute;
+  top: -6px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ctx-menu .quiz-chip-del:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
 }
 
 .quiz-chip-box {
@@ -1628,7 +1659,8 @@ textarea:focus {
   line-height: 1;
 }
 
-.quiz-chip-add {
+.ctx-menu .quiz-chip-add {
+  padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;

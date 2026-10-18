@@ -160,15 +160,25 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
           const pct = q.score && total > 0 ? Math.round((q.score.last / total) * 100) : null;
           const active = state.quizOpen?.quizId === q.id;
           return (
-            <button
-              key={q.id}
-              className={`quiz-chip${active ? " active" : ""}`}
-              title={q.name ?? "Quiz"}
-              onClick={act(() => store.openQuiz(node.id, q.id))}
-            >
-              <span className="quiz-chip-box" />
-              <span className="quiz-chip-pct">{pct === null ? "—" : `${pct}%`}</span>
-            </button>
+            <span key={q.id} className="quiz-chip-wrap">
+              <button
+                className={`quiz-chip${active ? " active" : ""}`}
+                title={q.name ?? "Quiz"}
+                onClick={act(() => store.openQuiz(node.id, q.id))}
+              >
+                <span className="quiz-chip-box" />
+                <span className="quiz-chip-pct">{pct === null ? "—" : `${pct}%`}</span>
+              </button>
+              {/* Like the "+", deleting keeps the menu open; undo restores it. */}
+              <button
+                className="quiz-chip-del"
+                title={`Delete ${q.name ?? "quiz"}`}
+                aria-label={`Delete ${q.name ?? "quiz"}`}
+                onClick={() => store.removeQuiz(node.id, q.id)}
+              >
+                ×
+              </button>
+            </span>
           );
         })}
         <button
@@ -183,6 +193,16 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
           a quiz; pasting the answer back attaches it to the selected topic. */}
       <button role="menuitem" onClick={act(() => void store.copyQuizPrompt(node.id))}>
         Copy as quiz prompt
+      </button>
+      <div className="ctx-sep" />
+      {/* The AI expand round trip: copy the branch with a prompt asking an LLM
+          to grow it, then paste its JSON answer back as new subtopics. A
+          separate paste from the quiz "+" so the two payloads never mix. */}
+      <button role="menuitem" onClick={act(() => void store.copyAiExpandPrompt(node.id))}>
+        Copy as AI expand prompt
+      </button>
+      <button role="menuitem" onClick={act(() => void store.pasteAiExpand(node.id))}>
+        Paste as AI expand
       </button>
     </div>
   );

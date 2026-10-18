@@ -19,6 +19,8 @@ import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
 import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { parseQuiz, type QuizSeed } from "../core/quiz";
+import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
+import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, galleryExtent, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
@@ -3422,6 +3424,78 @@ export class EditorStore {
     this.attachQuiz(nodeId, seed);
   }
 
+  /**
+   * Copy a branch's outline plus the expand prompt, ready to paste into an
+   * LLM; its answer goes back in through `pasteAiExpand`.
+   */
+  async copyAiExpandPrompt(nodeId: string): Promise<void> {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const text = aiExpandClipText(this.outlineText([nodeId]));
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be blocked; the prompt was still built */
+    }
+    this.toast("Copied AI expand prompt");
+  }
+
+  /**
+   * Merge an LLM's tree answer into the branch at `nodeId`. The AI tree's root
+   * stands for that topic, so its text is ignored; each AI child is matched by
+   * text against the existing children — a match recurses, a miss becomes a new
+   * subtree appended after them. The AI can therefore send back the whole
+   * expanded branch (the prompt asks for that) and only what is new gets added.
+   * One batch of createNode ops: a single undo step.
+   */
+  async pasteAiExpand(nodeId: string): Promise<void> {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    let text: string | null = null;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      /* clipboard read blocked — treat as empty */
+    }
+    if (!text) {
+      this.toast("Clipboard is empty");
+      return trace.ignored("ai:expand", "clipboard empty or blocked");
+    }
+    const tree = parseAiTree(text);
+    if (!tree) {
+      this.toast("Clipboard does not contain an AI tree");
+      return trace.ignored("ai:expand", "clipboard does not hold a tree payload");
+    }
+    const ops: Op[] = [];
+    const create = (src: AiTreeNode, parentId: string, index: number, nodeType: NodeType): void => {
+      const id = uid("n");
+      ops.push(makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType, parentId, index, title: src.text }));
+      src.children.forEach((c, i) => create(c, id, i, "subtopic"));
+    };
+    const merge = (target: MindNode, src: AiTreeNode): void => {
+      const byKey = new Map<string, MindNode>();
+      for (const cid of target.childrenIds) {
+        const c = this.model.node(cid);
+        if (c) byKey.set(topicKey(runsToPlain(nodeRuns(c.title, c.titleRuns))), c);
+      }
+      let index = target.childrenIds.length;
+      const childType: NodeType = target.type === "central" ? "main" : "subtopic";
+      for (const child of src.children) {
+        const existing = byKey.get(topicKey(child.text));
+        if (existing) merge(existing, child);
+        else create(child, target.id, index++, childType);
+      }
+    };
+    merge(node, tree);
+    const added = ops.length;
+    if (added === 0) {
+      this.toast("Nothing new to add");
+      return;
+    }
+    this.execOps(ops);
+    this.toast(`Added ${added} topic${added > 1 ? "s" : ""} from AI`);
+  }
+
   async cutSelection(): Promise<void> {
     await this.copySelection();
     this.deleteSelection();
@@ -4114,6 +4188,20 @@ export class EditorStore {
     this.state.quizOpen = null;
     trace.mark("ui", "ui:modal", { open: false });
     this.notify();
+  }
+
+  /** Delete one quiz from a topic's strip — the "×" beside its square. One
+   *  `setStyle` op, so undo brings it back with its score. */
+  removeQuiz(nodeId: string, quizId: string): void {
+    const node = this.model.node(nodeId);
+    const quizzes = node?.style.quizzes;
+    if (!node || !quizzes?.some((q) => q.id === quizId)) return;
+    if (this.state.quizOpen?.quizId === quizId) this.closeQuiz();
+    const rest = quizzes.filter((q) => q.id !== quizId);
+    const style: Style = { ...node.style, quizzes: rest };
+    if (rest.length === 0) delete style.quizzes;
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style, prev: node.style })]);
+    this.toast("Quiz deleted");
   }
 
   /**
