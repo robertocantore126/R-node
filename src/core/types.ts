@@ -112,6 +112,8 @@ export interface QuizQuestion {
   answers: string[];
   correct: number;
   explain?: string;
+  /** Topics in the copied outline that support this question. Optional for old quizzes. */
+  sourceNodeIds?: string[];
 }
 
 /**
@@ -120,9 +122,8 @@ export interface QuizQuestion {
  * `Style` as a presentation-adjacent variant (same rule as `code` and
  * `gallery`) — no `NodeType`, no schema migration, no second renderer.
  *
- * `score` is the only mutable part and lives in the document, so it survives a
- * reload and an export; it is written through a `setStyle` op, so one Ctrl+Z
- * undoes a run's result like any other edit.
+ * Scores and latest answers live in the document and are written together
+ * through a `setStyle` op, so one Ctrl+Z undoes a run's result.
  */
 export interface QuizInfo {
   /** Stable id within the topic — keying, opening and scoring address a quiz
@@ -131,6 +132,8 @@ export interface QuizInfo {
   name?: string;
   questions: QuizQuestion[];
   score?: { last: number; best: number; attempts: number };
+  /** Answer indices from the latest completed attempt, in question order. */
+  lastAnswers?: number[];
 }
 
 export interface Style {
@@ -205,6 +208,8 @@ export interface Style {
    * neither.
    */
   quizzes?: QuizInfo[];
+  /** Show study arrows for mistakes in this topic's quizzes. */
+  showQuizMistakes?: boolean;
   link?: string;
   /**
    * Marks the topic as a read-only code block (T22). The SOURCE lives in

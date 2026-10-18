@@ -45,8 +45,8 @@ export function QuizWindow(): JSX.Element | null {
   useEffect(() => {
     if (!done || !nodeId || !quizId || submitted.current) return;
     submitted.current = true;
-    store.submitQuizScore(nodeId, quizId, correctCount);
-  }, [done, nodeId, quizId, correctCount, store]);
+    store.submitQuizScore(nodeId, quizId, results);
+  }, [done, nodeId, quizId, results, store]);
 
   if (!node || !quiz || questions.length === 0) return null;
 
@@ -127,12 +127,18 @@ export function QuizWindow(): JSX.Element | null {
               {correctCount} / {questions.length}
             </p>
             <p className="quiz-score-label">{pct}% correct</p>
+            {results.some((answer,i) => answer !== questions[i]?.correct && !questions[i]?.sourceNodeIds?.length) &&
+              <p className="quiz-best">Unlinked questions mark the topic holding this quiz. Generate a new quiz to link questions to individual topics.</p>}
             {score && (
               <p className="quiz-best">
                 Best {score.best} / {questions.length} · {score.attempts} attempt{score.attempts > 1 ? "s" : ""}
               </p>
             )}
             <div className="quiz-actions">
+              {correctCount < questions.length && <button className="btn" onClick={() => {
+                store.setQuizMistakesVisible(node.id,true);
+                store.closeQuiz();
+              }}>Show mistakes on map</button>}
               <button className="btn" onClick={retry}>
                 Retry
               </button>

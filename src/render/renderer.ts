@@ -1,4 +1,6 @@
 import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
+import { quizMistakeNodeIds } from "../core/quiz";
+import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
 /**
  * Canvas renderer — one <canvas>, no DOM/SVG nodes per topic.
  *
@@ -76,6 +78,8 @@ export interface RenderState {
   searchMatches?: Set<string> | null;
   searchCurrent?: string | null;
   showHidden?: boolean; // export: include collapsed subtrees
+  /** Study annotations are editor overlays, omitted from document exports. */
+  hideStudyMarkers?: boolean;
   /**
    * Store revision — the invalidation key for the placement cache. Omit it and
    * nothing is cached, which is the honest default for a state assembled by
@@ -105,6 +109,7 @@ const RING_W_HOVER = 1.5;
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private dpr = 1;
+  private quizMarkerCache: { sheet: Sheet; rev: number; targets: Set<string> } | null = null;
   /** Same measurer the layout engine uses — extents always agree. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
   /** Camera scale of the current frame (used to pick the text-cache resolution). */
@@ -387,6 +392,19 @@ export class Renderer {
 
     // 4) groups & summaries (drawn over the nodes, geometry derived from members)
     this.drawGroupsAndSummaries(theme, state, byId);
+
+    if (!state.hideStudyMarkers) {
+      let targets = this.quizMarkerCache?.sheet === state.sheet && state.rev !== undefined && this.quizMarkerCache.rev === state.rev
+        ? this.quizMarkerCache.targets : null;
+      if (!targets) {
+        targets = displayedMistakeNodes(state.sheet,new Set(byId.keys()),quizMistakeNodeIds(state.sheet));
+        if (state.rev !== undefined) this.quizMarkerCache = { sheet: state.sheet, rev: state.rev, targets };
+      }
+      for (const id of targets) {
+        const p = byId.get(id);
+        if (p) drawQuizMistakeArrow(ctx,p,s);
+      }
+    }
 
     // 5) drop indicator
     if (state.drop && state.drop.mode !== "none") {
@@ -2135,10 +2153,11 @@ export class Renderer {
     this.dpr = pixelRatio;
     this.resolveImage = imageResolver(state.sheet);
     for (const placed of this.placedNodes(state)) if (placed.visible) await this.preloadNodeImages(placed,state.camera.scale*this.dpr,true);
-    this.render({...state,selection:new Set(),editingId:null,hoverId:null,drop:null,imageSel:null,gallerySel:null,relSel:null,groupSel:null,summarySel:null,searchMatches:undefined,searchCurrent:undefined,marqueeSel:null,ghostImage:null,galleryDrop:null});
+    this.render({...state,hideStudyMarkers:true,selection:new Set(),editingId:null,hoverId:null,drop:null,imageSel:null,gallerySel:null,relSel:null,groupSel:null,summarySel:null,searchMatches:undefined,searchCurrent:undefined,marqueeSel:null,ghostImage:null,galleryDrop:null});
   }
 
   dispose(): void {
+    this.quizMarkerCache=null;
     for (const item of this.imageCache.values()) item.bitmap.close();
     for (const item of this.textCache.values()) { item.canvas.width=0;item.canvas.height=0; }
     this.imageCache.clear();this.textCache.clear();this.imageBytes=0;this.textBytes=0;

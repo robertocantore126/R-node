@@ -1693,3 +1693,13 @@ textarea:focus {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+.ctx-menu .quiz-mistakes-toggle {
+  color: #d52629;
+  border-radius: 6px;
+}
+.ctx-menu .quiz-mistakes-toggle[aria-pressed="true"] {
+  background: #fee2e2;
+  box-shadow: 0 0 0 1px #d52629;
+}
+.ctx-menu .quiz-mistakes-toggle:disabled { opacity: .35; cursor: default; }

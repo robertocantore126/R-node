@@ -11,7 +11,8 @@
  * The four-answer / index rules are checked here rather than tolerated: the
  * runtime has already fixed the shape by the time this returns non-null.
  */
-import type { QuizQuestion } from "./types";
+import type { QuizInfo, QuizQuestion, Sheet } from "./types";
+import { nodeRuns, runsToPlain } from "./text";
 
 /**
  * A parsed quiz BEFORE it is attached to a topic: the LLM supplies a name and
@@ -47,7 +48,62 @@ function normalizeQuestion(value: unknown): QuizQuestion | null {
   const explain = typeof o.explain === "string" && o.explain.trim() !== "" ? o.explain.trim() : undefined;
   const question: QuizQuestion = { q, answers, correct };
   if (explain) question.explain = explain;
+  if (o.sourceNodeIds !== undefined) {
+    if (!Array.isArray(o.sourceNodeIds) || !o.sourceNodeIds.length || o.sourceNodeIds.length > 32 ||
+        o.sourceNodeIds.some(id => typeof id !== "string" || !id.trim() || id.length > 256)) return null;
+    question.sourceNodeIds = [...new Set(o.sourceNodeIds as string[])];
+  }
   return question;
+}
+
+/** Direct traversal also works for a selected floating topic or a freeform. */
+export function quizBranchIds(sheet: Sheet, rootId: string): Set<string> {
+  const seen = new Set<string>(), stack = [rootId];
+  while (stack.length) {
+    const id = stack.pop()!, node = sheet.nodes[id];
+    if (!node || seen.has(id)) continue;
+    seen.add(id); stack.push(...node.childrenIds.slice().reverse());
+  }
+  return seen;
+}
+
+export function quizTopicOutline(sheet: Sheet, rootId: string): string {
+  const lines: string[] = [], seen = new Set<string>();
+  const stack = [{ id: rootId, depth: 0 }];
+  while (stack.length) {
+    const { id, depth } = stack.pop()!, node = sheet.nodes[id];
+    if (!node || seen.has(id)) continue;
+    seen.add(id);
+    // JSON strings keep newlines and bracket-like text from impersonating another source.
+    lines.push(`${"  ".repeat(depth)}[topic ${JSON.stringify(id)}] ${JSON.stringify(runsToPlain(nodeRuns(node.title,node.titleRuns)))}`);
+    stack.push(...node.childrenIds.slice().reverse().map(id => ({ id, depth: depth + 1 })));
+  }
+  return lines.join("\n");
+}
+
+export function quizHasMistakes(quiz: QuizInfo): boolean {
+  return Array.isArray(quiz.lastAnswers) && quiz.lastAnswers.length === quiz.questions.length
+    ? quiz.lastAnswers.some((answer,i) => answer !== quiz.questions[i].correct)
+    : !!quiz.score && quiz.score.last < quiz.questions.length;
+}
+
+/** Explicit question links only; unlinked/obsolete questions fall back to their quiz owner. */
+export function quizMistakeNodeIds(sheet: Sheet): Set<string> {
+  const result = new Set<string>();
+  for (const owner of Object.values(sheet.nodes)) {
+    if (!owner.style.showQuizMistakes) continue;
+    const allowed = quizBranchIds(sheet,owner.id);
+    for (const quiz of owner.style.quizzes ?? []) {
+      if (!quizHasMistakes(quiz)) continue;
+      if (!Array.isArray(quiz.lastAnswers) || quiz.lastAnswers.length !== quiz.questions.length) { result.add(owner.id); continue; }
+      quiz.questions.forEach((question,i) => {
+        if (quiz.lastAnswers![i] === question.correct) return;
+        const targets = Array.isArray(question.sourceNodeIds) ? question.sourceNodeIds.filter(id => allowed.has(id)) : [];
+        for (const id of targets.length ? targets : [owner.id]) result.add(id);
+      });
+    }
+  }
+  return result;
 }
 
 /** Accept a parsed object as a quiz, or null if any rule is broken. */

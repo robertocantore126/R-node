@@ -20,7 +20,7 @@ import { applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../cor
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
 import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
-import { parseQuiz, type QuizSeed } from "../core/quiz";
+import { parseQuiz, quizTopicOutline, type QuizSeed } from "../core/quiz";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
@@ -3627,7 +3627,8 @@ export class EditorStore {
   async copyQuizPrompt(nodeId: string): Promise<void> {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const text = quizClipText(this.outlineText([nodeId]));
+    this.commitEdit();
+    const text = quizClipText(quizTopicOutline(this.sheet,nodeId));
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -4036,6 +4037,13 @@ export class EditorStore {
         );
         queue.push(c);
       }
+    }
+    for (const op of ops) if (op.type === "createNode" && op.style?.quizzes) {
+      op.style = { ...op.style, quizzes: op.style.quizzes.map(quiz => ({ ...quiz,
+        questions: quiz.questions.map(question => ({ ...question,
+          ...(question.sourceNodeIds ? { sourceNodeIds: question.sourceNodeIds.map(id => idMap.get(id) ?? id) } : {}),
+        })),
+      })) };
     }
     return ops;
   }
@@ -4527,12 +4535,12 @@ export class EditorStore {
   }
 
   /**
-   * Record one finished run of a topic's quiz. `correct` is the number of right
-   * answers; the total comes from the quiz itself. Written through a `setStyle`
+   * Record one finished run with its selected answer indices. A numeric score
+   * remains accepted for legacy callers. Written through a `setStyle`
    * op so the result lives in the document (it survives a reload and an export)
    * and one Ctrl+Z undoes the run like any other edit.
    */
-  submitQuizScore(nodeId: string, quizId: string, correct: number): void {
+  submitQuizScore(nodeId: string, quizId: string, answers: number | readonly number[]): void {
     const node = this.model.node(nodeId);
     const quizzes = node?.style.quizzes;
     if (!node || !quizzes) return;
@@ -4540,6 +4548,9 @@ export class EditorStore {
     if (idx < 0) return;
     const quiz = quizzes[idx];
     const total = quiz.questions.length;
+    if (typeof answers !== "number" && (answers.length !== total || answers.some(a => !Number.isInteger(a) || a < 0 || a > 3))) return;
+    const correct = typeof answers === "number" ? answers : answers.filter((answer,i) => answer === quiz.questions[i].correct).length;
+    if (!Number.isFinite(correct)) return;
     const clamped = Math.max(0, Math.min(correct, total));
     const prev = quiz.score;
     const score = {
@@ -4547,7 +4558,12 @@ export class EditorStore {
       best: Math.max(prev?.best ?? 0, clamped),
       attempts: (prev?.attempts ?? 0) + 1,
     };
-    const nextQuizzes = quizzes.map((q, i) => (i === idx ? { ...q, score } : q));
+    const nextQuizzes = quizzes.map((q, i) => {
+      if (i !== idx) return q;
+      const next = { ...q, score, lastAnswers: typeof answers === "number" ? undefined : [...answers] };
+      if (next.lastAnswers === undefined) delete next.lastAnswers;
+      return next;
+    });
     this.execOps([
       makeOp<Op & { type: "setStyle" }>("setStyle", {
         id: nodeId,
@@ -4556,6 +4572,14 @@ export class EditorStore {
       }),
     ]);
     this.notify();
+  }
+
+  setQuizMistakesVisible(nodeId: string, visible: boolean): void {
+    const node = this.model.node(nodeId);
+    if (!node || !!node.style.showQuizMistakes === visible) return;
+    const style: Style = { ...node.style, showQuizMistakes: visible };
+    if (!visible) delete style.showQuizMistakes;
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style, prev: node.style })]);
   }
 
   // -------------------------------------------------------------------------

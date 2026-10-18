@@ -8,6 +8,7 @@ import { EditorStore } from "../src/editor/store";
 import { applyLayout } from "../src/layout/mindmap";
 import { slotKey } from "../src/core/ops";
 import type { RnodeDocument } from "../src/core/types";
+import { quizMistakeNodeIds } from "../src/core/quiz";
 import { IndexedDbAssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../src/persist/assets";
 import { buildRnodeFile, isSqliteFile, readRnodeFile } from "../src/persist/rnodeFile";
 
@@ -53,6 +54,9 @@ describe(".rnode file in the browser", () => {
     const b = editor.createFreeformItem(board.id,board.position.x+280,board.position.y+180,"",imageId)!;
     editor.doc.requireNode(b).notes = "Important diagram notes";
     editor.createRelationship(a,b);
+    editor.attachQuiz(board.id,{questions:[{q:"Label?",answers:["a","b","c","d"],correct:0,sourceNodeIds:[a]}]});
+    editor.submitQuizScore(board.id,board.style.quizzes![0].id,[1]);
+    editor.setQuizMistakesVisible(board.id,true);
     const {bytes} = await buildRnodeFile(editor.doc.doc,editor.sheet,assets,{sql:SQL});
     const restoredAssets = freshStore();
     const restored = await readRnodeFile(bytes,restoredAssets,{sql:SQL});
@@ -65,6 +69,8 @@ describe(".rnode file in the browser", () => {
     expect(sheet.nodes[b].notes).toBe("Important diagram notes");
     expect(sheet.relationships.some((r)=>r.fromId===a && r.toId===b)).toBe(true);
     expect(sheet.nodes[b].style.image).toBe(imageId);
+    expect(sheet.nodes[board.id].style.quizzes![0].lastAnswers).toEqual([1]);
+    expect(quizMistakeNodeIds(sheet)).toEqual(new Set([a]));
     expect(await (await restoredAssets.get(imageId,"original"))!.text()).toBe("ORIGINAL-freeform");
   });
 

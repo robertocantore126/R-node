@@ -17,6 +17,10 @@ Rules:
 - "correct" is the 0-based index (0, 1, 2 or 3) of the right answer inside "answers".
 - "explain" is optional: one short sentence on why the correct answer is right.
 - Only ask about material that is IN the outline; do not invent facts.
+- Each outline entry has a [topic "..."] identifier. For EVERY question, include
+  "sourceNodeIds": an array of the exact topic identifiers whose text supports
+  the question. Include at least one, use only identifiers from this outline,
+  and choose the most specific topics. Do not use titles as identifiers.
 - Reply with the JSON object ONLY - no prose, no markdown fence. Any sentence
   before or after it is a parse error when this is pasted back into R-node.
 
@@ -26,7 +30,7 @@ Format:
   "kind": "quiz",
   "name": "short title for the quiz",
   "questions": [
-    { "q": "Question text?", "answers": ["first", "second", "third", "fourth"], "correct": 0, "explain": "optional" }
+    { "q": "Question text?", "answers": ["first", "second", "third", "fourth"], "correct": 0, "explain": "optional", "sourceNodeIds": ["exact topic identifier from the outline"] }
   ]
 }
 

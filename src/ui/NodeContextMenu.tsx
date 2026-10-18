@@ -15,6 +15,7 @@ import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import { getRecentColors } from "../editor/recentColors";
 import { THEMES } from "../render/theme";
+import { quizHasMistakes } from "../core/quiz";
 
 export interface CtxMenuState {
   /** Canvas-wrap coordinates of the cursor when the menu opened. */
@@ -207,6 +208,17 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
           onClick={() => void store.addQuizFromClipboard(node.id)}
         >
           +
+        </button>
+        <button
+          className="quiz-chip quiz-mistakes-toggle"
+          aria-label="Show quiz mistakes on map"
+          aria-pressed={!!node.style.showQuizMistakes}
+          disabled={!node.style.showQuizMistakes && !(node.style.quizzes ?? []).some(quizHasMistakes)}
+          title={node.style.showQuizMistakes ? "Hide mistake arrows" : "Show red arrows on topics missed in the latest quiz attempts"}
+          onClick={() => store.setQuizMistakesVisible(node.id,!node.style.showQuizMistakes)}
+        >
+          <svg viewBox="0 0 40 52" width="24" height="28" aria-hidden="true"><path fill="currentColor" d="M13 2H27Q30 2 30 5V29H37Q41 29 38 33L22 49Q20 51 18 49L2 33Q-1 29 3 29H10V5Q10 2 13 2Z"/></svg>
+          <span className="quiz-chip-pct">Review</span>
         </button>
       </div>
       {/* Copies the branch's outline followed by a prompt that asks an LLM for
