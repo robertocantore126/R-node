@@ -1,4 +1,4 @@
-import { FREEFORM_HEADER } from "../core/freeform";
+import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
 /**
  * Canvas renderer — one <canvas>, no DOM/SVG nodes per topic.
  *
@@ -531,6 +531,7 @@ export class Renderer {
    */
   private resolveFill(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     if (n.style.fill) return n.style.fill;
+    if (!n.style.freeform && freeformOwner(sheet, n.id)) return "transparent";
     const depth = this.depthOf(n, sheet);
     if (depth === 0) return theme.rootFill;
     if (depth === 1) {

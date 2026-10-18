@@ -8,6 +8,7 @@ Right-click a topic and choose **New freeform topic**, immediately below **New c
 - Drag existing topics into the canvas. Their subtrees and relative geometry are preserved. Drag the items inside to reposition them.
 - Drop plain text, image files or browser images into the canvas. Images become independent movable items. Existing image attachments can also be dragged into it.
 - Paste text or images with the canvas selected. Shape-library drops are positioned at the pointer.
+- Ordinary topics inside a freeform canvas have a transparent fill by default. Picking Fill in the Inspector or a context-menu colour gives text-only items a visible box; resetting the colour restores transparency. Explicitly chosen fills are preserved.
 - Link internal topics using R-node's existing relationship command.
 - Move the outer canvas to move its contents together. Resize using its lower-right handle or the Inspector's canvas width/height fields. Shrinking stops at the occupied content bounds. Adding or enlarging content grows the affected canvas and its enclosing canvases in the same undo step.
 - Moving a topic already inside a canvas preserves its parent and connector. Left-edge resizing preserves the opposite edge and stops at the canvas margin.
@@ -20,7 +21,7 @@ This is a native freeform diagram surface, not an embedded diagrams.net applicat
 
 Automated coverage includes the original freeform tests plus `tests/freeformHardening.test.ts`: the five pre-merge defects now have regressions requiring correct behavior, with additional coverage for nested canvas growth, subtree capture with negative offsets, and containment during resize. `tests/rnodeFile.test.ts` also writes and rereads an actual SQLite `.rnode` container, preserving local geometry, relationships, notes and image bytes.
 
-Final hardening checks: `npm test` passed all 591 tests across 34 files, `npm run typecheck` passed, `npm run build` passed, `npm run check:map` passed, and `git diff --check` passed. The hit-test regression uses a simulated Canvas2D context and does not establish pixel fidelity or real pointer behavior.
+Latest automated checks: `npm test` passed all 594 tests across 34 files, `npm run typecheck` passed, `npm run build` passed, `npm run check:map` passed, and `git diff --check` passed. The hit-test regression uses a simulated Canvas2D context and does not establish pixel fidelity or real pointer behavior.
 
 Browser UI smoke and the real-browser parity harness are **not verified** in this session: the browser automation inventory returned no available browsers. Desktop/Tauri runtime is also untested. Existing general PDF limitations still apply; the new board surface is handled by Canvas/PNG, the HTML viewer and SVG.
 

@@ -2056,7 +2056,7 @@ export class EditorStore {
     this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
       id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
       title: text, titleRuns: [{ text }],
-      style: { freeformPosition: { x: px, y: py }, ...(imageId ? { image: imageId, imageWidth: 180 } : { shape: "none", fill: "transparent", align: "left" }) },
+      style: { freeformPosition: { x: px, y: py }, ...(imageId ? { image: imageId, imageWidth: 180 } : { shape: "none", align: "left" }) },
       position: { x: parent.position.x + px, y: parent.position.y + py, manual: false },
     })]);
     this.settleLayoutNow();
@@ -2695,11 +2695,20 @@ export class EditorStore {
   // Style / tasks
   // -------------------------------------------------------------------------
 
+  /** A Fill choice turns a text-only freeform item into a visible box. */
+  private topicStyle(node: MindNode, patch: Partial<Style>): Style {
+    const style = { ...node.style, ...patch };
+    if (patch.fill && patch.fill !== "transparent" && patch.shape === undefined && style.shape === "none" && freeformOwner(this.sheet, node.id)) {
+      style.shape = "rounded";
+    }
+    return style;
+  }
+
   setNodeStyle(id: string, patch: Partial<Style>): void {
     const node = this.model.node(id);
     if (!node) return;
     if (typeof patch.fill === "string") addRecentColor(patch.fill);
-    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: this.topicStyle(node, patch), prev: node.style })]);
   }
 
   /**
@@ -2718,7 +2727,7 @@ export class EditorStore {
       // theme at paint time, so a colour pick — even inside a multi-selection
       // — must never write a fill onto it.
       if (!n || n.style.code) continue;
-      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, fill: color }, prev: n.style }));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: this.topicStyle(n, { fill: color }), prev: n.style }));
     }
     if (ops.length === 0) return;
     addRecentColor(color);
@@ -2791,7 +2800,7 @@ export class EditorStore {
       // so the block keeps the code surface instead of wearing the branch
       // colour.
       if (!n || n.style.code) continue;
-      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: sid, style: { ...n.style, fill: color }, prev: n.style }));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: sid, style: this.topicStyle(n, { fill: color }), prev: n.style }));
     }
     this.execOps(ops);
   }
