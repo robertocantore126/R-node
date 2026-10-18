@@ -142,7 +142,7 @@ export function TopBar(): JSX.Element {
             <div className="menu">
               <button data-help="Export Markdown" data-help-more="The map as a bulleted Markdown outline. Text only." onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
               <button data-help="Interactive viewer" data-help-more="A self-contained HTML file with the renderer built in — open it anywhere, no R-node needed." onClick={() => { runExportHtml(); setExportOpen(false); }}>Interactive viewer (.html) — read on screen</button>
-              <button data-help="Export PDF" data-help-more="The map across A4 sheets at true size, with an index sheet and page numbers where a branch continues. Prints." onClick={() => { runExportPdf(); setExportOpen(false); }}>Pages (.pdf) — print or read on paper</button>
+              <button data-help="Export PDF" data-help-more="The whole map with the editor grid, freeform canvases, original fonts and images. Lossless 300 dpi pages rendered by the editor." onClick={() => { runExportPdf(); setExportOpen(false); }}>Pages (.pdf) — print or read on paper</button>
               {/* JSON, ZIP and image-carrying exports existed here but were
                   removed from the GUI: this menu ships Markdown, the HTML
                   viewer and the paginated PDF. SVG and PNG exist in the code

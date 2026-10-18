@@ -3,6 +3,9 @@ import { Renderer } from "../src/render/renderer";
 import type { GalleryItem, MindNode } from "../src/core/types";
 import { positionedImageSlots } from "../src/layout/measure";
 import { THEMES } from "../src/render/theme";
+import { DocumentModel } from "../src/core/doc";
+import type { RenderState } from "../src/render/renderer";
+import type { AssetStore } from "../src/persist/assets";
 
 /**
  * Every offscreen canvas reports the SAME fixed dimensions (2048×2048 → exactly
@@ -63,6 +66,55 @@ function makeFakeCanvas(ctx: CanvasRenderingContext2D): HTMLCanvasElement {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("print rendering", () => {
+  function setup(assetStore?: AssetStore) {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const renderer = new Renderer(makeFakeCanvas(ctx), { assetStore });
+    const sheet = new DocumentModel(DocumentModel.blank("print")).sheet;
+    const state: RenderState = { sheet, camera: { x: 100000, y: 100000, scale: 1 }, viewW: 100, viewH: 100,
+      selection: new Set([sheet.rootNodeId]), editingId: sheet.rootNodeId, hoverId: sheet.rootNodeId,
+      drop: null, themeName: "light", searchMatches: new Set([sheet.rootNodeId]) };
+    return { renderer, state };
+  }
+
+  it("includes content outside the viewport while respecting collapsed branches", () => {
+    const { renderer, state } = setup();
+    const root = state.sheet.nodes[state.sheet.rootNodeId];
+    const child = makeNode("far");
+    child.parentId = root.id; child.position.x = 10000;
+    root.childrenIds.push(child.id); state.sheet.nodes[child.id] = child;
+    expect(renderer.printBounds(state).maxX).toBeGreaterThan(10000);
+    root.collapsed = true;
+    expect(renderer.printBounds(state).maxX).toBeLessThan(10000);
+  });
+
+  it("prints editing text and clears temporary rings without changing editor state", async () => {
+    const { renderer, state } = setup();
+    const paint = vi.spyOn(renderer, "render").mockImplementation(() => {});
+    await renderer.renderForPrint(state, 3.125);
+    const printed = paint.mock.calls[0][0];
+    expect(printed.editingId).toBeNull();
+    expect(printed.hoverId).toBeNull();
+    expect(printed.selection.size).toBe(0);
+    expect(printed.searchMatches).toBeUndefined();
+    expect(state.selection.size).toBe(1);
+    expect(state.editingId).toBe(state.sheet.rootNodeId);
+  });
+
+  it("stops export on missing images instead of silently printing placeholders", async () => {
+    const get = vi.fn(async () => null);
+    const { renderer, state } = setup({ get } as unknown as AssetStore);
+    const root = state.sheet.nodes[state.sheet.rootNodeId];
+    root.style.image = "missing";
+    state.sheet.attachments.push({ id: "missing", w: 100, h: 100 } as never);
+    state.camera = { x: root.position.x, y: root.position.y, scale: 1 };
+    await expect(renderer.renderForPrint(state)).rejects.toThrow("Missing image");
+    expect(get).toHaveBeenCalled();
+    renderer.dispose();
+  });
 });
 
 describe("text cache (T21-D)", () => {

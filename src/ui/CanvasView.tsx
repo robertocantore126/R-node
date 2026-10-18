@@ -8,8 +8,7 @@ import { Renderer, type RenderState } from "../render/renderer";
 import { THEMES } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
 import { sheetToHtmlViewer } from "../export/htmlViewer";
-import { sheetToPdf } from "../export/pdf";
-import { pdfImageSource } from "../export/pdfImage";
+import { editorMapToPdf } from "../export/editorPdf";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
@@ -456,6 +455,7 @@ export function CanvasView(): JSX.Element {
     });
 
     setExportPdfHandler(async () => {
+      store.commitEdit();
       const s = store.getSnapshot();
       const rs: RenderState = {
         sheet: store.sheet,
@@ -471,13 +471,9 @@ export function CanvasView(): JSX.Element {
       };
       store.beginExport("Building PDF…");
       try {
-        const out = await sheetToPdf(store.sheet, {
-          measurer: createCanvasTextMeasurer(),
-          colorOf: (id) => renderer.nodeColors(rs, id),
-          linkColorOf: (id) => renderer.branchColorOf(rs, id),
-          // Every format the browser can decode, not JPEG alone — see
-          // src/export/pdfImage.ts for which encoding each one takes.
-          imageBytes: (assetId) => pdfImageSource(getAssetStore(), assetId),
+        const out = await editorMapToPdf(rs, {
+          assetStore: getAssetStore(),
+          onProgress: (done,total) => store.beginExport(`Building PDF: ${Math.round(done/total*100)}%`),
         });
         const url = URL.createObjectURL(out.blob);
         const a = document.createElement("a");
@@ -485,19 +481,7 @@ export function CanvasView(): JSX.Element {
         a.download = `${store.doc.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "map"}.pdf`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
-        store.toast(
-          `PDF — ${out.nodes.toLocaleString()} topics down ${out.mapPages} sheets, full width on each, ` +
-            `${out.report.units.percentOfTrueSize}% of true size (text ${out.report.units.minFontPt}pt), ` +
-            `${out.images} images, ` +
-            `${out.bytes < 1048576 ? `${Math.round(out.bytes / 1024)}KB` : `${(out.bytes / 1048576).toFixed(1)}MB`}` +
-            // Said out loud, because both were once silent: an unreadable
-            // asset used to be a picture that simply was not there, and a
-            // character with no glyph used to be a "?" mid-word.
-            (out.report.units.imagesMissing > 0 ? ` — ${out.report.units.imagesMissing} unreadable` : "") +
-            (out.report.units.unmappableChars > 0
-              ? ` — ${out.report.units.unmappableChars} characters Helvetica cannot draw`
-              : "")
-        );
+        store.toast(`PDF: ${out.pages} pages, editor rendering at ${out.dpi} dpi, ${(out.bytes/1048576).toFixed(1)} MB`);
       } catch (e) {
         store.toast(`PDF export failed — ${String(e)}`);
       } finally {

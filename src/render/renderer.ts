@@ -1810,12 +1810,12 @@ export class Renderer {
   }
 
   /** Decode every picture this node uses, at the size the export will draw it. */
-  private async preloadNodeImages(placed: Placed, scale: number): Promise<void> {
+  private async preloadNodeImages(placed: Placed, scale: number, strict = false): Promise<void> {
     const wanted: { id: string; w: number; crop?: { sw: number } | null }[] = [];
     const pos = positionedImageSlots(placed, placed.node, this.resolveImage);
     for (const it of pos.items) wanted.push({ id: it.id, w: it.size.w });
     for (const c of pos.cells) wanted.push({ id: c.id, w: c.w, crop: c.crop });
-    await Promise.all(
+    const results = await Promise.allSettled(
       wanted.map(async ({ id, w, crop }) => {
         // Same bucket arithmetic paintSlot uses, so the draw finds these
         // entries instead of missing and starting its own decode.
@@ -1825,21 +1825,29 @@ export class Renderer {
           Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx))))
         );
         const key = `${id}@${bucket}`;
-        if (this.imageCache.has(key) || this.imageFailed.has(key)) return;
+        if (this.imageCache.has(key)) return;
+        if (this.imageFailed.has(key)) {
+          if (strict) throw new Error(`Cannot print image ${id}`);
+          return;
+        }
         try {
           const blob = await this.assetStore.get(id, bucket <= 256 ? "small" : "large");
           if (!blob) {
             this.imageFailed.add(key);
+            if (strict) throw new Error(`Missing image ${id}`);
             return;
           }
           const bitmap = await createImageBitmap(blob, { resizeWidth: bucket, resizeQuality: "high" });
           this.imageCache.set(key, { bitmap, bytes: bitmap.width * bitmap.height * 4 });
           this.imageBytes += bitmap.width * bitmap.height * 4;
-        } catch {
+        } catch (error) {
           this.imageFailed.add(key);
+          if (strict) throw error;
         }
       })
     );
+    // Finish every decode before the print renderer can be disposed on failure.
+    if (strict) for (const result of results) if (result.status === "rejected") throw result.reason;
   }
 
   /**
@@ -2111,6 +2119,30 @@ export class Renderer {
   // -------------------------------------------------------------------------
   // Export
   // -------------------------------------------------------------------------
+
+  /** Bounds of the same expanded/collapsed content that is present in the editor. */
+  printBounds(state: RenderState): { minX: number; minY: number; maxX: number; maxY: number } {
+    const all = this.placedNodes(state);
+    if (!all.length) return { minX:0,minY:0,maxX:100,maxY:100 };
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    for (const p of all) { minX=Math.min(minX,p.x);minY=Math.min(minY,p.y);maxX=Math.max(maxX,p.x+p.w);maxY=Math.max(maxY,p.y+p.h); }
+    return {minX:minX-20,minY:minY-20,maxX:maxX+20,maxY:maxY+20};
+  }
+
+  /** Used on a dedicated offscreen renderer so printing cannot disturb the editor. */
+  async renderForPrint(state: RenderState, pixelRatio = 1): Promise<void> {
+    if (!Number.isFinite(pixelRatio) || pixelRatio <= 0) throw new Error("Invalid print pixel ratio");
+    this.dpr = pixelRatio;
+    this.resolveImage = imageResolver(state.sheet);
+    for (const placed of this.placedNodes(state)) if (placed.visible) await this.preloadNodeImages(placed,state.camera.scale*this.dpr,true);
+    this.render({...state,selection:new Set(),editingId:null,hoverId:null,drop:null,imageSel:null,gallerySel:null,relSel:null,groupSel:null,summarySel:null,searchMatches:undefined,searchCurrent:undefined,marqueeSel:null,ghostImage:null,galleryDrop:null});
+  }
+
+  dispose(): void {
+    for (const item of this.imageCache.values()) item.bitmap.close();
+    for (const item of this.textCache.values()) { item.canvas.width=0;item.canvas.height=0; }
+    this.imageCache.clear();this.textCache.clear();this.imageBytes=0;this.textBytes=0;
+  }
 
   exportPng(state: RenderState, transparent = false, maxSize = 8192): HTMLCanvasElement {
     const bounds = this.exportBounds(state);
