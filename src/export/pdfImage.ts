@@ -20,6 +20,9 @@
  *     images are graphics rather than photographs, so deflate does well on
  *     them anyway.
  *
+ * The UI vector print opts out of the opaque-image JPEG conversion and asks
+ * for original assets, using lossless RGB for non-JPEG pictures.
+ *
  * Everything the browser can decode is therefore embeddable, which is the
  * point: the version this replaces took JPEG only, and a pasted screenshot —
  * the most common image in a map by a distance — is a PNG.
@@ -42,21 +45,22 @@ const LEVEL_ORDER: AssetLevel[] = ["large", "original", "small"];
  *  not ring; low enough that a photo is a few hundred KB, not a few MB. */
 const JPEG_QUALITY = 0.92;
 
-/** Decode one asset into the form `sheetToPdf` embeds, or null if unreadable. */
-export async function pdfImageSource(store: AssetStore, assetId: string): Promise<PdfImageSource | null> {
+/** Decode an asset for PDF. Vector printing requests originals and lossless
+ *  RGB; the legacy defaults remain available to size-sensitive callers. */
+export async function pdfImageSource(store: AssetStore, assetId: string, options: { lossless?: boolean; original?: boolean } = {}): Promise<PdfImageSource | null> {
   const meta = await store.meta(assetId);
   if (!meta) return null;
   let blob: Blob | null = null;
-  for (const level of LEVEL_ORDER) {
+  for (const level of options.original ? ["original", "large", "small"] as AssetLevel[] : LEVEL_ORDER) {
     blob = await store.get(assetId, level);
     if (blob) break;
   }
   if (!blob) return null;
-  return decodeForPdf(blob, meta.mime);
+  return decodeForPdf(blob, meta.mime, options.lossless);
 }
 
 /** The decode itself, separated so it can be driven from a blob directly. */
-export async function decodeForPdf(blob: Blob, mime: string): Promise<PdfImageSource | null> {
+export async function decodeForPdf(blob: Blob, mime: string, lossless = false): Promise<PdfImageSource | null> {
   // A JPEG still needs decoding, but only to learn its pixel size: the bytes
   // that go into the file are the file's own.
   const bitmap = await createImageBitmap(blob);
@@ -90,6 +94,7 @@ export async function decodeForPdf(blob: Blob, mime: string): Promise<PdfImageSo
       if (data[i + 3] !== 255) opaque = false;
     }
     if (!opaque) return { w, h, rgb, alpha };
+    if (lossless) return { w, h, rgb };
 
     const jpegBlob = await new Promise<Blob | null>((resolve) =>
       canvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY),

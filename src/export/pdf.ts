@@ -1,3 +1,6 @@
+import { FREEFORM_HEADER } from "../core/freeform";
+import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
+import { THEMES, type RenderTheme } from "../render/theme";
 /**
  * PDF export — one tall strip of paper, cut into pages.
  *
@@ -54,8 +57,9 @@
  *
  * Pictures go in whatever their format: JPEG bytes pass through untouched,
  * everything else is decoded to RGB by the caller and deflated here, with
- * transparency carried as an /SMask. Shapes other than a rounded rectangle,
- * code topics, groups and summaries are absent and declared in the report.
+ * transparency carried as an /SMask. Freeform canvases, grids, standard topic
+ * shapes and group boundaries are vector paths. Code topics, custom artwork
+ * and summaries still have the limitations declared in the export report.
  */
 // zlibSync, NOT deflateSync: /FlateDecode means zlib (RFC 1950), and fflate's
 // deflateSync emits RAW deflate with no header. A viewer cannot decode that, so
@@ -214,6 +218,9 @@ export interface PdfExportOptions {
   index?: boolean;
   /** Page background. Pass null to leave the paper white. */
   background?: string | null;
+  /** Editor surfaces and grid, while keeping text and geometry vector. */
+  theme?: RenderTheme;
+  grid?: boolean;
 }
 
 export interface PdfExportResult {
@@ -626,28 +633,65 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   // Drawing
   // -------------------------------------------------------------------------
 
+  const theme = opts.theme ?? THEMES.light;
+  const alphaStates = new Map<number, string>();
+  const opacityCommand = (color: string, opacity = 1): string => {
+    const match = /^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/i.exec(color);
+    const value = Math.max(0,Math.min(1,(match ? Number(match[1]) : 1)*opacity));
+    let name=alphaStates.get(value);
+    if(!name) {name=`A${alphaStates.size}`;alphaStates.set(value,name);}
+    return `/${name} gs`;
+  };
+  const roundedPath = (x: number, y: number, w: number, h: number, radius: number, fr: Frame): string => {
+    const r = Math.max(0, Math.min(radius, w / 2, h / 2)), k = r * 0.5522847498;
+    const M = (a: number, b: number) => `${f(fr.X(a))} ${f(fr.Y(b))} m`;
+    const L = (a: number, b: number) => `${f(fr.X(a))} ${f(fr.Y(b))} l`;
+    const C = (a: number,b: number,c: number,d: number,e: number,g: number) => `${f(fr.X(a))} ${f(fr.Y(b))} ${f(fr.X(c))} ${f(fr.Y(d))} ${f(fr.X(e))} ${f(fr.Y(g))} c`;
+    return [M(x+r,y),L(x+w-r,y),C(x+w-r+k,y,x+w,y+r-k,x+w,y+r),L(x+w,y+h-r),C(x+w,y+h-r+k,x+w-r+k,y+h,x+w-r,y+h),L(x+r,y+h),C(x+r-k,y+h,x,y+h-r+k,x,y+h-r),L(x,y+r),C(x,y+r-k,x+r-k,y,x+r,y),"h"].join("\n");
+  };
   const drawBox = (cmds: string[], p: Placed, fill: string, fr: Frame): void => {
     const shape = p.node.style.shape ?? "rounded";
     if (shape === "none") return;
-    cmds.push(`${rgb(fill)} rg`);
-    const r = Math.min((p.node.style.cornerRadius ?? 10) * fr.s, (p.w * fr.s) / 2, (p.h * fr.s) / 2);
-    const x0 = fr.X(p.x), y0 = fr.Y(p.y + p.h), w = p.w * fr.s, h = p.h * fr.s;
-    if (r > 0.2) {
-      // Four Bezier quarters. A sharp-cornered rectangle reads as a slab rather
-      // than a topic, and the canvas rounds them.
-      const k = r * 0.5523;
-      cmds.push(
-        `${f(x0 + r)} ${f(y0)} m`,
-        `${f(x0 + w - r)} ${f(y0)} l ${f(x0 + w - r + k)} ${f(y0)} ${f(x0 + w)} ${f(y0 + r - k)} ${f(x0 + w)} ${f(y0 + r)} c`,
-        `${f(x0 + w)} ${f(y0 + h - r)} l ${f(x0 + w)} ${f(y0 + h - r + k)} ${f(x0 + w - r + k)} ${f(y0 + h)} ${f(x0 + w - r)} ${f(y0 + h)} c`,
-        `${f(x0 + r)} ${f(y0 + h)} l ${f(x0 + r - k)} ${f(y0 + h)} ${f(x0)} ${f(y0 + h - r + k)} ${f(x0)} ${f(y0 + h - r)} c`,
-        `${f(x0)} ${f(y0 + r)} l ${f(x0)} ${f(y0 + r - k)} ${f(x0 + r - k)} ${f(y0)} ${f(x0 + r)} ${f(y0)} c f`,
-      );
-      ops += 6;
-    } else {
-      cmds.push(`${f(x0)} ${f(y0)} ${f(w)} ${f(h)} re f`);
-      ops += 2;
+    const {x,y,w,h} = p;
+    let path: string;
+    if (shape === "diamond" || shape === "hexagon") {
+      const points = shape === "diamond" ? [[x+w/2,y],[x+w,y+h/2],[x+w/2,y+h],[x,y+h/2]] : [[x+w*.25,y],[x+w*.75,y],[x+w,y+h/2],[x+w*.75,y+h],[x+w*.25,y+h],[x,y+h/2]];
+      path = points.map(([a,b],i)=>`${f(fr.X(a))} ${f(fr.Y(b))} ${i ? "l" : "m"}`).join("\n")+" h";
+    } else if (shape === "circle") {
+      const radius=Math.max(w,h)/2;
+      path=roundedPath(x+w/2-radius,y+h/2-radius,radius*2,radius*2,radius,fr);
+    } else path=roundedPath(x,y,w,h,shape === "rect" ? 0 : shape === "capsule" ? h/2 : p.node.style.cornerRadius??10,fr);
+    const stroke=p.node.style.borderWidth && p.node.style.stroke && p.node.style.stroke!=="transparent" ? p.node.style.stroke : opts.theme ? theme.nodeBorder : null;
+    cmds.push("q");
+    if (fill !== "transparent" && fill !== "none") cmds.push(opacityCommand(fill),`${rgb(fill)} rg`,path,"f");
+    if (stroke) {
+      const dash=p.node.style.borderStyle==="dashed" ? "[6 4]" : p.node.style.borderStyle==="dotted" ? "[2 3]" : "[]";
+      cmds.push(opacityCommand(stroke),`${rgb(stroke)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,`${dash} 0 d`,path,"S");
     }
+    cmds.push("Q"); ops+=8;
+  };
+
+  const plainText = (cmds: string[], text: string, x: number, baseline: number, size: number, color: string, fr: Frame, bold=false, maxWidth?: number): void => {
+    const encoded=winAnsiText(text), width=advance(encoded,bold,false,size);
+    const stretch=maxWidth && width>maxWidth ? maxWidth/width : 1;
+    cmds.push("BT",`/${bold ? "F2" : "F1"} ${f(size*fr.s)} Tf`,`${rgb(color)} rg`,`${f(stretch)} 0 0 1 ${f(fr.X(x))} ${f(fr.Y(baseline))} Tm`,`(${pdfEscape(encoded)}) Tj`,"ET");
+    fontSizes.push(size*fr.s);ops+=6;
+  };
+
+  const drawFreeform = (cmds: string[], p: Placed, fr: Frame): void => {
+    const fill=p.node.style.fill??theme.background;
+    const path=roundedPath(p.x,p.y,p.w,p.h,12,fr);
+    cmds.push("q",opacityCommand(fill),`${rgb(fill)} rg`,path,"f",opacityCommand(p.node.style.stroke??theme.nodeBorder),`${rgb(p.node.style.stroke??theme.nodeBorder)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,path,"S",opacityCommand("#000000"),path,"W n");
+    // Composite the editor's 13% muted grid over its solid surface, losslessly.
+    const foreground=rgb(theme.textMuted).split(" ").map(Number),background=rgb(fill).split(" ").map(Number);
+    const grid=foreground.map((v,i)=>(v*.13+background[i]*.87).toFixed(4)).join(" ");
+    cmds.push(`${grid} RG`,`${f(.5*fr.s)} w`);
+    for(let x=p.x;x<p.x+p.w;x+=20) cmds.push(`${f(fr.X(x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} m ${f(fr.X(x))} ${f(fr.Y(p.y+p.h))} l`);
+    for(let y=p.y+FREEFORM_HEADER;y<p.y+p.h;y+=20) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(y))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(y))} l`);
+    cmds.push("S","Q");
+    plainText(cmds,p.node.title||"Freeform",p.x+14,p.y+FREEFORM_HEADER/2+4.5,13,theme.text,fr,true,p.w-28);
+    if(!p.node.childrenIds.length) plainText(cmds,"Double-click to add text. Drop nodes, text or images here.",p.x+18,p.y+FREEFORM_HEADER+32.5,13,theme.textMuted,fr,false,p.w-36);
+    ops+=12;
   };
 
   /**
@@ -973,12 +1017,20 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     // two: the same box is drawn on both sheets and each keeps its own half.
     cmds.push("q", `${f(margin)} ${f(margin)} ${f(usableWpt)} ${f(usableHpt)} re W n`);
 
+    if (opts.grid) {
+      cmds.push("q",`${rgb(theme.grid)} RG`,`${f(PT_PER_UNIT)} w`);
+      for(let x=Math.floor(minX/40)*40;x<=maxX;x+=40) cmds.push(`${f(fr.X(x))} ${f(fr.Y(pg.top))} m ${f(fr.X(x))} ${f(fr.Y(pg.top+pg.height))} l`);
+      for(let y=Math.floor(pg.top/40)*40;y<=pg.top+pg.height;y+=40) cmds.push(`${f(fr.X(minX))} ${f(fr.Y(y))} m ${f(fr.X(maxX))} ${f(fr.Y(y))} l`);
+      cmds.push("S","Q");
+    }
+    for(const p of pg.nodes) if(p.node.style.freeform) drawFreeform(cmds,p,fr);
+
     // Connectors first, so every box paints over the line that reaches it.
     cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
     for (const p of placed) {
       if (!p.node.parentId) continue;
       const parent = byId.get(p.node.parentId);
-      if (!parent) continue;
+      if (!parent || parent.node.style.freeform) continue;
       const curve = connectorCurve(parent, p, sheet);
       if (!curveTouches(curve, pg.top, pg.height)) continue;
       cmds.push(`${rgb(opts.linkColorOf(p.node.id))} RG`, curveCmd(curve, fr));
@@ -997,6 +1049,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     }
 
     for (const p of pg.nodes) {
+      if (p.node.style.freeform) continue;
       const colors = opts.colorOf(p.node.id);
       drawBox(cmds, p, colors?.fill ?? "#ffffff", fr);
       drawImages(cmds, p, fr);
@@ -1004,6 +1057,16 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       drawTitle(cmds, p, colors?.text ?? "#111111", fr);
     }
 
+    if (opts.theme) for (const group of sheet.boundaries) {
+      const members=group.memberIds.map(id=>byId.get(id)).filter((p):p is Placed=>!!p);
+      if(!members.length) continue;
+      const x=Math.min(...members.map(p=>p.x))-16,y=Math.min(...members.map(p=>p.y))-16;
+      const w=Math.max(...members.map(p=>p.x+p.w))+16-x,h=Math.max(...members.map(p=>p.y+p.h))+16-y;
+      const width=group.borderWidth??DEFAULT_GROUP_BORDER_WIDTH;
+      const screenScale=fr.s/PT_PER_UNIT;
+      cmds.push("q",`${rgb(group.color??theme.textMuted)} RG`,`${f(width*PT_PER_UNIT)} w`,`[${f(Math.max(7,width*4)*PT_PER_UNIT)} ${f(Math.max(5,width*2.6)*PT_PER_UNIT)}] 0 d`,roundedPath(x,y,w,h,10/screenScale,fr),"S","Q");
+      ops+=7;
+    }
     cmds.push("Q");
     // The sheet number, bottom-centre, outside the clip.
     cmds.push(
@@ -1087,6 +1150,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   const ID_FIRST_FONT = 3;
   const ID_FIRST_DESC = ID_FIRST_FONT + BASE_FONTS.length;
   let next = ID_FIRST_DESC + BASE_FONTS.length;
+  const alphaIds = Array.from(alphaStates, ([value,name])=>({value,name,id:next++}));
   // An asset with transparency costs two objects: the picture and its mask.
   const imgIds: number[] = [];
   const maskIds: number[] = [];
@@ -1098,6 +1162,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   const objCount = next;
 
   const fontDict = BASE_FONTS.map((ft, i) => `/${ft.name} ${ID_FIRST_FONT + i} 0 R`).join(" ");
+  const alphaDict = alphaIds.map(a=>`/${a.name} ${a.id} 0 R`).join(" ");
   const xobjDict = xobjects.map((x, i) => `/${x.name} ${imgIds[i]} 0 R`).join(" ");
 
   putStr("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
@@ -1115,6 +1180,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     );
     obj(ID_FIRST_DESC + i, fontDescriptor(ft.base, ft.bold, ft.italic));
   });
+  for (const a of alphaIds) obj(a.id,`<< /Type /ExtGState /ca ${a.value} /CA ${a.value} >>`);
   xobjects.forEach((x, i) => {
     if (x.smask) {
       obj(
@@ -1138,7 +1204,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     obj(
       sheetIds[i].page,
       `<< /Type /Page /Parent ${ID_PAGES} 0 R /MediaBox [0 0 ${f(paper.w)} ${f(paper.h)}] ` +
-        `/Resources << /Font << ${fontDict} >> /XObject << ${xobjDict} >> >> ` +
+        `/Resources << /ExtGState << ${alphaDict} >> /Font << ${fontDict} >> /XObject << ${xobjDict} >> >> ` +
         `/Contents ${sheetIds[i].content} 0 R >>`,
     );
     obj(sheetIds[i].content, `<< /Length ${stream.length} /Filter /FlateDecode >>`, stream);
@@ -1186,7 +1252,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       nodes: placed.length,
       images,
       relationships: sheet.relationships.filter((r) => byId.has(r.fromId) && byId.has(r.toId)).length,
-      boundaries: 0,
+      boundaries: opts.theme ? sheet.boundaries.filter(g=>g.memberIds.some(id=>byId.has(id))).length : 0,
       summaries: 0,
     },
     // Declared, not detected: an exporter cannot notice what it never thought
@@ -1195,10 +1261,13 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     honoured: [
       "fill", "textColor", "fontSize", "fontWeight", "italic", "underline",
       "strikethrough", "cornerRadius", "image", "imageWidth", "align", "width",
-      "height",
+      "height", "stroke", "borderWidth", "borderStyle",
+      ...(placed.some(p=>p.node.style.shape==="custom") ? [] : ["shape" as const]),
     ],
     units: {
       operators: ops,
+      codeTopicsUnsupported: placed.filter(p=>!!p.node.style.code).length,
+      customArtworkUnsupported: placed.filter(p=>p.node.style.shape==="custom").length,
       streamBytes,
       imageBytes: xobjects.reduce((sum, x) => sum + x.body.length + (x.smask?.length ?? 0), 0),
       pages: streams.length,

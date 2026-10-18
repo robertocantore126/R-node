@@ -24,7 +24,7 @@ Automated coverage includes the original freeform tests plus `tests/freeformHard
 
 Latest automated checks: `npm test` passed all 611 tests across 36 files, `npm run typecheck` passed, `npm run build` passed, `npm run check:map` passed, and `git diff --check` passed. Clipboard tests use simulated clipboard APIs, and the AVIF worker test uses a simulated decoder; actual OS clipboard behavior and AVIF decoding still require browser/Tauri verification. The hit-test regression uses a simulated Canvas2D context and does not establish pixel fidelity or real pointer behavior.
 
-Browser UI smoke and the real-browser parity harness are **not verified** in this session: the browser automation inventory returned no available browsers. Desktop/Tauri runtime is also untested. The PDF command now renders through the editor Canvas2D painter, including freeform surfaces and grids; see [PDF_PRINT.md](PDF_PRINT.md) for format tradeoffs and validation.
+Browser UI smoke and the real-browser parity harness are **not verified** in this session: the browser automation inventory returned no available browsers. Desktop/Tauri runtime is also untested. The PDF command exports vector text, freeform surfaces and grids; see [PDF_PRINT.md](PDF_PRINT.md) for format tradeoffs and validation.
 
 Manual completion at `http://127.0.0.1:5173/` (start with `npm run dev`):
 

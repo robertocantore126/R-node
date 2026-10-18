@@ -54,8 +54,8 @@ Everything else — `theme.ts`, `shortcuts.ts`, `pasteSanitizer.ts`, `Outliner`,
   web build's own `.rnode` (SQLite via sql.js, same schema as `src-tauri`) is
   `src/persist/rnodeFile.ts` (`buildRnodeFile`, `readRnodeFile`).
   **Not** `src/export/`, which produces SVG/PNG/HTML/PDF artifacts. The UI PDF command uses
-    `src/export/editorPdf.ts` and `src/export/canvasPdf.ts` to print through
-    `src/render/renderer.ts`; `src/export/pdf.ts` retains the legacy vector writer.
+    `src/export/editorPdf.ts` and the vector writer `src/export/pdf.ts`;
+    `src/export/canvasPdf.ts` retains the explicit raster rendering utility.
 - Image bytes -> `src/persist/assets.ts` — an `AssetStore` in IndexedDB keyed by
   SHA-256; the document itself carries only `AttachmentInfo` metadata.
 - Dashed boundary around sibling topics -> `src/core/types.ts` — stored as

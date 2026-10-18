@@ -473,7 +473,6 @@ export function CanvasView(): JSX.Element {
       try {
         const out = await editorMapToPdf(rs, {
           assetStore: getAssetStore(),
-          onProgress: (done,total) => store.beginExport(`Building PDF: ${Math.round(done/total*100)}%`),
         });
         const url = URL.createObjectURL(out.blob);
         const a = document.createElement("a");
@@ -481,7 +480,7 @@ export function CanvasView(): JSX.Element {
         a.download = `${store.doc.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "map"}.pdf`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
-        store.toast(`PDF: ${out.pages} pages, editor rendering at ${out.dpi} dpi, ${(out.bytes/1048576).toFixed(1)} MB`);
+        store.toast(`PDF: ${out.pages} pages, vector text and shapes, ${(out.bytes/1048576).toFixed(1)} MB`);
       } catch (e) {
         store.toast(`PDF export failed — ${String(e)}`);
       } finally {

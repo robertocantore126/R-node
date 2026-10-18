@@ -1,9 +1,38 @@
-/** Print the whole map through the exact Canvas2D painter used by the editor. */
+/** Whole-map vector printing, plus the explicit raster rendering utility. */
 import { Renderer, type RenderState } from "../render/renderer";
 import { getAssetStore, type AssetStore } from "../persist/assets";
 import { canvasMapToPdf, type CanvasPdfOptions } from "./canvasPdf";
+import { sheetToPdf } from "./pdf";
+import { pdfImageSource } from "./pdfImage";
+import { createCanvasTextMeasurer } from "../layout/measure";
+import { THEMES } from "../render/theme";
 
-export async function editorMapToPdf(state: RenderState, options: CanvasPdfOptions & { assetStore?: AssetStore } = {}) {
+type EditorPdfOptions = Pick<CanvasPdfOptions, "page" | "margin"> & { assetStore?: AssetStore };
+
+/** Vector map printing: only attached pictures are raster images. */
+export async function editorMapToPdf(state: RenderState, options: EditorPdfOptions = {}) {
+  const snapshot: RenderState={...state,sheet:structuredClone(state.sheet),rev:undefined};
+  const assetStore=options.assetStore??getAssetStore();
+  const renderer=new Renderer(document.createElement("canvas"),{assetStore});
+  try {
+    if(document.fonts?.ready) await document.fonts.ready;
+    const theme=THEMES[snapshot.themeName];
+    return await sheetToPdf(snapshot.sheet,{
+      page:options.page,margin:options.margin,measurer:createCanvasTextMeasurer(),theme,grid:true,background:theme.background,
+      colorOf:id=>renderer.nodeColors(snapshot,id),
+      linkColorOf:id=>renderer.branchColorOf(snapshot,id),
+      relColorOf:id=>snapshot.sheet.relationships.find(rel=>rel.id===id)?.color??theme.selection,
+      imageBytes:async id=>{
+        const image=await pdfImageSource(assetStore,id,{lossless:true,original:true});
+        if(!image) throw new Error(`Cannot print image ${id}`);
+        return image;
+      },
+    });
+  } finally { renderer.dispose(); }
+}
+
+
+export async function editorMapToRasterPdf(state: RenderState, options: CanvasPdfOptions & { assetStore?: AssetStore } = {}) {
   const canvas=document.createElement("canvas");
   const printer=new Renderer(canvas,{assetStore:options.assetStore??getAssetStore()});
   const snapshot:RenderState={...state,sheet:structuredClone(state.sheet),rev:undefined,showHidden:false};

@@ -15,6 +15,7 @@ import { HEURISTIC_MEASURER } from "../src/layout/measure";
 import { applyLayout } from "../src/layout/mindmap";
 import { DocumentModel } from "../src/core/doc";
 import type { MindNode, Sheet, TextRun } from "../src/core/types";
+import { THEMES } from "../src/render/theme";
 
 const MARGIN = 28.35;
 
@@ -69,6 +70,53 @@ const OPTS = {
   colorOf: () => ({ fill: "#ffffff", text: "#000000" }),
   linkColorOf: () => "#888888",
 };
+
+describe("vector editor surfaces", () => {
+  function boardMap() {
+    const { sheet, add } = makeSheet();
+    const board = add(sheet.rootNodeId, "Canvas title", { freeform: true, width: 720, height: 480 });
+    board.position = { x: 300, y: 100, manual: true };
+    const text = add(board.id, "Independent text", { shape: "none" });
+    text.position = { x: 340, y: 180, manual: true };
+    return { sheet, board, text };
+  }
+
+  it("keeps freeform labels and inner text as PDF text, without page-sized images", async () => {
+    const { sheet } = boardMap();
+    const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light, grid: true });
+    const content = (await pageStreams(out.blob)).join("\n");
+    const bytes = new Uint8Array(await out.blob.arrayBuffer());
+    const file = new TextDecoder("latin1").decode(bytes);
+    expect(content).toContain("(Canvas title) Tj");
+    expect(content).toContain("(Independent text) Tj");
+    expect(content.match(/\(Canvas title\) Tj/g)).toHaveLength(1);
+    expect(file).not.toContain("/Subtype /Image");
+    expect(content).toContain("W n"); // board grid is clipped to its rounded outline
+  });
+
+  it("does not connect freeform children or paint transparent text boxes grey", async () => {
+    const { sheet, text } = boardMap();
+    text.style.shape = "rect";
+    const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light,
+      colorOf: id => ({ fill: id === text.id ? "transparent" : "#ffffff", text: "#111111" }) });
+    const content = (await pageStreams(out.blob)).join("\n");
+    // Only root -> board is a tree connector; inner nodes are freely positioned.
+    expect(content.match(/ c S/g)).toHaveLength(1);
+    expect(content).not.toContain("0.5 0.5 0.5 rg");
+  });
+
+  it("emits the global grid, subtle alpha borders and group boundaries as vectors", async () => {
+    const { sheet, board } = boardMap();
+    sheet.boundaries.push({ id: "g", memberIds: [board.id], borderWidth: 3, color: "#ff0000" });
+    const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light, grid: true });
+    const content = (await pageStreams(out.blob)).join("\n");
+    const file = new TextDecoder("latin1").decode(await out.blob.arrayBuffer());
+    expect(content).toContain("0.961 0.969 0.980 RG");
+    expect(content).toContain("[9 5.85] 0 d");
+    expect(file).toContain("/ca 0.06 /CA 0.06");
+    expect(out.report.coverage.boundaries.emitted).toBe(1);
+  });
+});
 
 /** Every FlateDecode stream, decompressed. Image streams are DCT, not zlib. */
 async function pageStreams(blob: Blob): Promise<string[]> {
