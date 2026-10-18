@@ -100,6 +100,10 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
       <button role="menuitem" onClick={act(() => store.createCodeTopic(node.id))}>
         New code topic
       </button>
+      <button role="menuitem" onClick={act(() => store.createFreeformTopic(node.id))}>
+        New freeform topic
+      </button>
+      {node.style.freeform && <button role="menuitem" onClick={act(() => store.createFreeformItem(node.id))}>Add text / node</button>}
       <button role="menuitem" onClick={act(() => store.createGalleryTopic(node.id))}>
         New gallery topic
       </button>

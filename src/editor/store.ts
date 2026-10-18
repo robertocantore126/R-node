@@ -1,3 +1,4 @@
+import { freeformOwner, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
 /**
  * EditorStore — the editor interaction layer.
  *
@@ -22,7 +23,7 @@ import { parseQuiz, type QuizSeed } from "../core/quiz";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
-import { applyLayout, layoutSheet } from "../layout/mindmap";
+import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, galleryExtent, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
@@ -1606,14 +1607,14 @@ export class EditorStore {
     // because two renderers over one title drift. The refusal still selects
     // the topic, so the double-click shows what it acted on; a mute return
     // would be indistinguishable from a defect (§4bis).
-    if (node.style.code || node.style.gallery) {
+    if (node.style.code || node.style.gallery || node.style.freeform) {
       this.state.selection = [id];
       this.state.editingId = null;
       this.state.pendingInsert = null;
       this.state.imageSel = null;
       this.state.imageSlot = null;
       this.state.gallerySel = null;
-      const why = node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
       return trace.ignored("edit:start", why, { nodeId: id });
     }
     this.state.selection = [id];
@@ -1641,8 +1642,8 @@ export class EditorStore {
     // Same refusal as startEdit: a code topic never enters the editor, not
     // even through type/paste-to-edit (T22), and neither does a gallery
     // topic, whose body is pictures (T25).
-    if (node.style.code || node.style.gallery) {
-      const why = node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+    if (node.style.code || node.style.gallery || node.style.freeform) {
+      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
       return trace.ignored("paste-to-edit:trigger", why, { nodeId: node.id });
     }
     trace.applied("paste-to-edit:trigger", {
@@ -1924,6 +1925,7 @@ export class EditorStore {
 
   private createNodePosition(parent: MindNode): { x: number; y: number; manual: boolean } {
     const base = parent.position;
+    if (parent.style.freeform || freeformOwner(this.sheet, parent.id)) return { x: base.x + 24, y: base.y + 60, manual: false };
     const st = this.sheet.structure;
     const pSize = measureNode(parent, this.measurer);
     const estimatedW = 140;
@@ -1992,6 +1994,75 @@ export class EditorStore {
     this.settleLayoutNow();
     this.startEdit(id);
     return id;
+  }
+
+  /** Create a diagram canvas as a child of the selected topic. */
+  createFreeformTopic(parentId?: string): void {
+    const parent = parentId ? this.model.node(parentId) : this.selectionNode ?? this.model.rootNode;
+    if (!parent) return;
+    const id = uid("n");
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: parent.type === "central" ? "main" : "subtopic",
+      parentId: parent.id, index: parent.childrenIds.length,
+      title: "Freeform", titleRuns: [{ text: "Freeform" }],
+      style: { freeform: true, width: 720, height: 480, shape: "rounded", fill: "#ffffff", stroke: "#94a3b8", borderWidth: 1 },
+      position: this.createNodePosition(parent),
+    })]);
+    this.settleLayoutNow();
+    this.select(id);
+  }
+
+  /** Real document nodes share editing, links, copy, undo and persistence. */
+  createFreeformItem(parentId: string, x?: number, y?: number, text = "", imageId?: string): string | null {
+    const parent = this.model.node(parentId);
+    if (!parent?.style.freeform) return null;
+    const id = uid("n"), offset = parent.childrenIds.length * 24;
+    const px = Math.max(FREEFORM_PADDING, (x ?? parent.position.x + FREEFORM_PADDING + offset) - parent.position.x);
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, (y ?? parent.position.y + FREEFORM_HEADER + FREEFORM_PADDING + offset) - parent.position.y);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
+      title: text, titleRuns: [{ text }],
+      style: { freeformPosition: { x: px, y: py }, ...(imageId ? { image: imageId, imageWidth: 180 } : { shape: "none", fill: "transparent", align: "left" }) },
+      position: { x: parent.position.x + px, y: parent.position.y + py, manual: false },
+    })]);
+    this.settleLayoutNow();
+    if (!text && !imageId) this.startEdit(id); else this.select(id);
+    return id;
+  }
+
+  async addFreeformImageFile(parentId: string, file: Blob & { name?: string }, x: number, y: number): Promise<void> {
+    const sheet = this.sheet;
+    const res = await this.importToCard(file);
+    if (!res.ok) { this.toast(res.reason); return; }
+    if (this.sheet !== sheet || !sheet.nodes[parentId]?.style.freeform) return;
+    if (!sheet.attachments.some((a) => a.id === res.card.id)) sheet.attachments.push({ ...res.card });
+    this.createFreeformItem(parentId, x, y, "", res.card.id);
+  }
+
+  /** Capture a subtree into a canvas in one reversible history entry. */
+  moveIntoFreeform(id: string, parentId: string, x: number, y: number): void {
+    const node = this.model.node(id), parent = this.model.node(parentId);
+    if (!node || !parent?.style.freeform || node.type === "central" || id === parentId || this.isDescendant(id, parentId)) return;
+    const ext = measureNode(node, this.measurer, imageResolver(this.sheet));
+    const box = measureNode(parent, this.measurer);
+    const px = Math.max(FREEFORM_PADDING, Math.min(x - parent.position.x, box.w - ext.w - FREEFORM_PADDING));
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, Math.min(y - parent.position.y, box.h - ext.h - FREEFORM_PADDING));
+    const ops: Op[] = [];
+    if (node.parentId !== parentId) ops.push(makeOp<Op & { type: "moveNode" }>("moveNode", {
+      id, fromParentId: node.parentId, fromIndex: node.parentId ? this.model.requireNode(node.parentId).childrenIds.indexOf(id) : 0,
+      toParentId: parentId, toIndex: parent.childrenIds.length,
+    }));
+    const capture = (n: MindNode, offset: { x: number; y: number }): void => {
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: n.id, style: { ...n.style, freeformPosition: offset }, prev: n.style }));
+      for (const childId of n.childrenIds) {
+        const child = this.model.requireNode(childId);
+        capture(child, child.style.freeformPosition ?? { x: child.position.x - n.position.x, y: child.position.y - n.position.y });
+      }
+    };
+    capture(node, { x: px, y: py });
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.select(id);
   }
 
   /**
@@ -2376,6 +2447,11 @@ export class EditorStore {
       this.setDrop(null);
       return;
     }
+    if (targetId && this.model.node(targetId)?.style.freeform && mode === "child") {
+      this.moveIntoFreeform(draggedId, targetId, worldX, worldY);
+      this.setDrop(null);
+      return;
+    }
     if (targetId) {
       const target = this.model.node(targetId);
       if (!target || this.isDescendant(draggedId, targetId)) {
@@ -2508,13 +2584,13 @@ export class EditorStore {
    * emits ONE setPosition op whose `prev` is the PRE-drag position, so a
    * single undo restores the exact pre-drag state.
    */
-  private nodeDragState: { nodeId: string; origPos: Position } | null = null;
+  private nodeDragState: { nodeId: string; origPos: Position; origStyle: Style } | null = null;
 
   /** A node drag started: capture the pre-drag position for the final op. */
   beginNodeDrag(nodeId: string): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    this.nodeDragState = { nodeId, origPos: { ...node.position } };
+    this.nodeDragState = { nodeId, origPos: { ...node.position }, origStyle: { ...node.style } };
   }
 
   /**
@@ -2526,6 +2602,10 @@ export class EditorStore {
   setNodeDragDraft(nodeId: string, worldX: number, worldY: number): void {
     const node = this.model.node(nodeId);
     if (!node) return;
+    if (freeformOwner(this.sheet, nodeId) && node.parentId) {
+      const parent = this.model.requireNode(node.parentId);
+      node.style = { ...node.style, freeformPosition: { x: worldX - parent.position.x, y: worldY - parent.position.y } };
+    }
     node.position = { ...node.position, x: worldX, y: worldY, manual: true };
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
@@ -2538,6 +2618,7 @@ export class EditorStore {
     const node = this.model.node(nodeId);
     if (!node) return;
     node.position = { ...d.origPos };
+    node.style = { ...d.origStyle };
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
@@ -2558,7 +2639,7 @@ export class EditorStore {
     this.nodeDragState = null;
     if (d) {
       const node = this.model.node(d.nodeId);
-      if (node) node.position = { ...d.origPos };
+      if (node) { node.position = { ...d.origPos }; node.style = { ...d.origStyle }; }
     }
     this.dropAt(draggedId, targetId, mode, worldX, worldY);
     if (this.layoutTimer) {
@@ -2680,7 +2761,8 @@ export class EditorStore {
       this.notify();
       return;
     }
-    this.setNodeImage(nodeId, null, slot);
+    if (freeformOwner(this.sheet, nodeId) && !node.title && node.childrenIds.length === 0 && slot === "top" && !node.style.imageBottom && !node.style.imageLeft && !node.style.imageRight) this.deleteNodes([nodeId]);
+    else this.setNodeImage(nodeId, null, slot);
     this.notify();
   }
 
@@ -2759,15 +2841,38 @@ export class EditorStore {
     this.setNodeImage(nodeId, card.id, position);
   }
 
+  moveImageIntoFreeform(fromId: string, slot: ImageSlot, canvasId: string, x: number, y: number): void {
+    const source = this.model.node(fromId), canvas = this.model.node(canvasId);
+    const imageId = source?.style[slotKey(slot)];
+    if (!source || !canvas?.style.freeform || !imageId) return;
+    const id = uid("n");
+    const offset = { x: Math.max(FREEFORM_PADDING, x - canvas.position.x), y: Math.max(FREEFORM_HEADER + FREEFORM_PADDING, y - canvas.position.y) };
+    this.execOps([
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id, nodeType: "subtopic", parentId: canvasId, index: canvas.childrenIds.length,
+        title: "", titleRuns: [], style: { image: imageId, imageWidth: source.style.imageWidth ?? 180, freeformPosition: offset },
+        position: { x, y, manual: false },
+      }),
+      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: fromId, imageId: null, prevImageId: imageId, position: slot }),
+    ]);
+    this.settleLayoutNow(); this.select(id);
+  }
+
   /**
    * Full import+attach flow (T13-2): validate, import in the worker, store
    * the three levels in the AssetStore, then reference the node. Every
    * rejection says why (rule §4bis of AGENT_GUIDE).
    */
   async attachImageFile(nodeId: string, file: Blob & { name?: string }, position: ImageSlot = "top"): Promise<{ ok: boolean; reason?: string }> {
+    const sheet = this.sheet;
     const res = await this.importToCard(file);
     if (!res.ok) return { ok: false, reason: res.reason };
-    this.attachImage(nodeId, res.card, position);
+    if (this.sheet !== sheet || !this.model.node(nodeId)) return { ok: false, reason: "Target topic is no longer open" };
+    const node = this.model.requireNode(nodeId);
+    if (node.style.freeform) {
+      if (!sheet.attachments.some((a) => a.id === res.card.id)) sheet.attachments.push({ ...res.card });
+      this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
+    } else this.attachImage(nodeId, res.card, position);
     trace.applied("drop:image", { bytes: res.card.bytes, w: res.card.w, h: res.card.h });
     return { ok: true };
   }
@@ -3134,11 +3239,11 @@ export class EditorStore {
    * nodes and would otherwise snap the position back every 30ms. The flag
    * is restored to its original value by commitResize.
    */
-  setResizeDraft(nodeId: string, width: number, opts?: { anchorRight?: boolean; x?: number }): void {
+  setResizeDraft(nodeId: string, width: number, opts?: { anchorRight?: boolean; x?: number; height?: number }): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const w = Math.round(Math.min(640, Math.max(MIN_TOPIC_W, width)));
-    node.style = { ...node.style, width: w };
+    const w = Math.round(Math.min(node.style.freeform ? 6000 : 640, Math.max(node.style.freeform ? 240 : MIN_TOPIC_W, width)));
+    node.style = { ...node.style, width: w, ...(node.style.freeform && opts?.height !== undefined ? { height: Math.round(Math.min(6000, Math.max(160, opts.height))) } : {}) };
     if (opts?.anchorRight && typeof opts.x === "number") {
       node.position = { ...node.position, x: opts.x, manual: true };
     }
@@ -3160,7 +3265,7 @@ export class EditorStore {
     // (the width is what survives there — the next applyLayout re-pins x).
     const keepX = xChanged && (node.type === "floating" || r.origPos.manual);
     const ops: Op[] = [];
-    if (w !== undefined && w !== r.original.width) {
+    if (w !== undefined && (w !== r.original.width || node.style.height !== r.original.height)) {
       ops.push(
         makeOp<Op & { type: "setStyle" }>("setStyle", {
           id: r.nodeId,
@@ -3596,6 +3701,10 @@ export class EditorStore {
         // would be a second renderer over the source, which is the §3 drift
         // this feature deliberately stays out of — but pasting code into it
         // is exactly how it gets content now that it can be born empty.
+        if (target.style.freeform) {
+          this.createFreeformItem(target.id, undefined, undefined, text);
+          return;
+        }
         if (target.style.code) {
           this.setCodeSource(target.id, text);
           this.toast("Pasted code into topic");
@@ -3671,6 +3780,16 @@ export class EditorStore {
       place
         ? { x: place.origin.x + (n.position.x - place.rootPos.x), y: place.origin.y + (n.position.y - place.rootPos.y), manual: true }
         : undefined;
+    const canvasParent = parentId ? this.model.node(parentId) : undefined;
+    const inCanvas = !!canvasParent && (canvasParent.style.freeform || freeformOwner(this.sheet, canvasParent.id));
+    const localStyle = (n: MindNode, root: boolean): Style => {
+      if (!inCanvas) return n.style;
+      const oldParent = source.find((candidate) => candidate.id === n.parentId);
+      const offset = root
+        ? { x: (place?.origin.x ?? canvasParent!.position.x + 24) - canvasParent!.position.x, y: (place?.origin.y ?? canvasParent!.position.y + 60) - canvasParent!.position.y }
+        : n.style.freeformPosition ?? { x: n.position.x - (oldParent?.position.x ?? 0), y: n.position.y - (oldParent?.position.y ?? 0) };
+      return { ...n.style, freeformPosition: offset };
+    };
     const idMap = new Map<string, string>();
     this.lastRemap = idMap;
     const ops: Op[] = [];
@@ -3686,7 +3805,7 @@ export class EditorStore {
         index,
         title: srcRoot.title,
         titleRuns: srcRoot.titleRuns,
-        style: srcRoot.style,
+        style: localStyle(srcRoot, true),
         task: srcRoot.task,
         position: placed(srcRoot),
       })
@@ -3707,7 +3826,7 @@ export class EditorStore {
             index: src.childrenIds.indexOf(cid),
             title: c.title,
             titleRuns: c.titleRuns,
-            style: c.style,
+            style: localStyle(c, false),
             task: c.task,
             position: placed(c),
           })
@@ -3727,7 +3846,7 @@ export class EditorStore {
    * a single Ctrl+Z removes the whole thing, which is the only behaviour that
    * makes sense for something inserted with one gesture.
    */
-  insertShape(template: ShapeTemplate, anchorId: string): void {
+  insertShape(template: ShapeTemplate, anchorId: string, at?: { x: number; y: number }): void {
     const anchorNode = this.model.node(anchorId);
     if (!anchorNode) return trace.ignored("shape:insert", "anchor topic is gone");
     const { rootId, nodes, relationships } = template.payload;
@@ -3735,7 +3854,7 @@ export class EditorStore {
     if (!srcRoot) return trace.ignored("shape:insert", "template has no root", { shape: template.id });
 
     const type: NodeType = anchorNode.type === "central" ? "main" : "subtopic";
-    const origin = this.createNodePosition(anchorNode);
+    const origin = at ?? this.createNodePosition(anchorNode);
     // Freeze each topic's box at the size it is born with.
     //
     // `position` is a top-left corner, so a topic that grows extends right and

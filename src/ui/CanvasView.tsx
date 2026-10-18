@@ -1,3 +1,4 @@
+import { freeformOwner } from "../core/freeform";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { viewSize } from "../editor/view";
@@ -89,6 +90,9 @@ interface DragState {
   resizeSide: "left" | "right" | null;
   resizeStartWorldX: number;
   resizeStartWidth: number;
+  resizeStartHeight: number;
+  resizeStartWorldY: number;
+  freeformResizing: boolean;
   resizeStartX: number;
   /** Image resize (T14): dragging the image corner handle. */
   imgResizing: string | null;
@@ -150,6 +154,9 @@ export function CanvasView(): JSX.Element {
     resizeSide: null,
     resizeStartWorldX: 0,
     resizeStartWidth: 0,
+    resizeStartHeight: 0,
+    resizeStartWorldY: 0,
+    freeformResizing: false,
     resizeStartX: 0,
     imgResizing: null,
     imgResizeStartWorldX: 0,
@@ -626,6 +633,17 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
 
+    for (const id of s.relFrom ? [] : s.selection) {
+      const n = store.doc.node(id);
+      const r = n?.style.freeform ? renderer.nodeWorldRect(rs, id) : null;
+      if (r && Math.abs(world.x - r.x - r.w) < 12 / s.camera.scale && Math.abs(world.y - r.y - r.h) < 12 / s.camera.scale) {
+        drag.resizing = id; drag.freeformResizing = true;
+        drag.resizeStartWorldX = world.x; drag.resizeStartWorldY = world.y;
+        drag.resizeStartWidth = r.w; drag.resizeStartHeight = r.h;
+        store.beginResize(id); setResizing(true);
+        return;
+      }
+    }
     // Image resize (T14): grab the corner handle on the node's image. Same
     // precedence as the width handle — before the body hit test.
     const imgResizeHit = s.relFrom ? null : renderer.hitTestImageResize(rs, world.x, world.y);
@@ -693,6 +711,14 @@ export function CanvasView(): JSX.Element {
     }
 
     const imgHit = s.relFrom ? null : renderer.hitTestImageSlot(rs, world.x, world.y);
+    if (imgHit && freeformOwner(store.sheet, imgHit.nodeId)) {
+      const rect = renderer.nodeWorldRect(rs, imgHit.nodeId)!;
+      drag.grabOffsetX = world.x - rect.x; drag.grabOffsetY = world.y - rect.y;
+      drag.dragging = imgHit.nodeId; drag.marqueeStartX = null;
+      store.selectImage(imgHit.nodeId, imgHit.slot);
+      store.beginNodeDrag(imgHit.nodeId);
+      return;
+    }
     if (imgHit) {
       drag.grabOffsetX = world.x - imgHit.rect.x;
       drag.grabOffsetY = world.y - imgHit.rect.y;
@@ -724,6 +750,14 @@ export function CanvasView(): JSX.Element {
       return;
     }
 
+    if (hit && store.doc.node(hit)?.style.freeform) {
+      const rel = renderer.hitTestRelationship(rs, world.x, world.y);
+      if (rel) {
+        store.selectRelationship(rel); drag.marqueeStartX = null;
+        trace.applied("pointerdown:relationship", { id: rel, insideFreeform: true });
+        return;
+      }
+    }
     if (hit) {
       const rect = renderer.nodeWorldRect(rs, hit);
       drag.grabOffsetX = rect ? world.x - rect.x : 0;
@@ -802,7 +836,9 @@ export function CanvasView(): JSX.Element {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const dx = world.x - drag.resizeStartWorldX;
-      if (drag.resizeSide === "left") {
+      if (drag.freeformResizing) {
+        store.setResizeDraft(drag.resizing, drag.resizeStartWidth + dx, { height: drag.resizeStartHeight + world.y - drag.resizeStartWorldY });
+      } else if (drag.resizeSide === "left") {
         // Right edge stays anchored; the left edge (position.x) follows the cursor.
         store.setResizeDraft(drag.resizing, drag.resizeStartWidth - dx, {
           anchorRight: true,
@@ -916,7 +952,12 @@ export function CanvasView(): JSX.Element {
       const rs = currentRenderState();
       const rh = renderer?.hitTestResize(rs, w.x, w.y) ?? null;
       const ih = renderer?.hitTestImageResize(rs, w.x, w.y) ?? null;
-      setResizeHover(!!rh);
+      const canvasCorner = s0.selection.some((id) => {
+        const n = store.doc.node(id);
+        const r = n?.style.freeform ? renderer?.nodeWorldRect(rs, id) : null;
+        return !!r && Math.abs(w.x - r.x - r.w) < 12 / s0.camera.scale && Math.abs(w.y - r.y - r.h) < 12 / s0.camera.scale;
+      });
+      setResizeHover(!!rh || canvasCorner);
       setImgResizeHover(!!ih);
       store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
     }
@@ -946,6 +987,14 @@ export function CanvasView(): JSX.Element {
     if (hit) {
       const r = renderer.nodeWorldRect(rs, hit);
       if (r) {
+        const owner = store.doc.node(hit)?.style.freeform ? hit : freeformOwner(store.sheet, hit);
+        const draggedOwner = freeformOwner(store.sheet, dragging);
+        if (owner && (owner === draggedOwner || store.doc.node(hit)?.style.freeform)) {
+          store.setDrop({ mode: "child", nodeId: owner });
+          if (owner === draggedOwner) store.setNodeDragDraft(dragging, world.x - drag.grabOffsetX, world.y - drag.grabOffsetY);
+          else store.resetNodeDragDraft(dragging);
+          return;
+        }
         const relY = (world.y - r.y) / r.h;
         dropMode = relY < 0.28 ? "before" : relY > 0.72 ? "after" : "child";
         store.setDrop({ mode: dropMode, nodeId: hit });
@@ -1002,6 +1051,7 @@ export function CanvasView(): JSX.Element {
       store.commitResize();
       drag.resizing = null;
       drag.resizeSide = null;
+      drag.freeformResizing = false;
       drag.moved = false;
       setResizing(false);
       return;
@@ -1033,7 +1083,11 @@ export function CanvasView(): JSX.Element {
       if (drag.moved) {
         const drop = store.getSnapshot().drop;
         if (drop && drop.mode !== "none" && drop.nodeId !== drag.imgDragging) {
-          store.assignImageToNode(drag.imgDragging, drop.nodeId, drag.imgDropSlot, drag.imgSlot);
+          if (store.doc.node(drop.nodeId)?.style.freeform) {
+            const { x, y } = localPoint(e);
+            const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+            store.moveImageIntoFreeform(drag.imgDragging, drag.imgSlot, drop.nodeId, world.x, world.y);
+          } else store.assignImageToNode(drag.imgDragging, drop.nodeId, drag.imgDropSlot, drag.imgSlot);
         }
       }
       store.setDrop(null);
@@ -1069,6 +1123,10 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const hit = renderer.hitTest(currentRenderState(), world.x, world.y);
     if (hit) {
+      if (store.doc.node(hit)?.style.freeform) {
+        store.createFreeformItem(hit, world.x, world.y);
+        return;
+      }
       // A code topic is read-only (T22) and a gallery topic's body is
       // pictures (T25): select and return instead of mounting the RichEditor
       // overlay. startEdit refuses both too — this skips the call entirely so
@@ -1335,6 +1393,14 @@ export function CanvasView(): JSX.Element {
           // Accept the drop (T13-2): without preventDefault the browser would
           // navigate away on drop. Highlight the node under the cursor while
           // dragging so the user sees the target.
+          if (!acceptsExternalDrop(e.dataTransfer) && e.dataTransfer.types.includes("text/plain")) {
+            const { x, y } = localPoint(e as unknown as RPointerEvent);
+            const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+            const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y);
+            const owner = hit && (store.doc.node(hit)?.style.freeform ? hit : freeformOwner(store.sheet, hit));
+            if (owner) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; store.setHover(owner); }
+            return;
+          }
           if (!acceptsExternalDrop(e.dataTransfer)) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
@@ -1368,7 +1434,7 @@ export function CanvasView(): JSX.Element {
           const el = extGhostElRef.current;
           const rect = canvasRef.current!.getBoundingClientRect();
           let side: ImageSlot | null = null;
-          if (hit && !isGallery) {
+          if (hit && !isGallery && !store.doc.node(hit)?.style.freeform) {
             const r = rendererRef.current?.nodeWorldRect(rs, hit);
             if (r) side = nearestImageSide(r, world.x, world.y);
           }
@@ -1415,7 +1481,27 @@ export function CanvasView(): JSX.Element {
             }
             const template = listShapes().find((t) => t.id === shapeId);
             if (!template) return trace.ignored("drop:shape", "shape is no longer in the library", { shape: shapeId });
-            store.insertShape(template, target);
+            store.insertShape(template, target, store.doc.node(target)?.style.freeform ? world : undefined);
+            return;
+          }
+          const point = localPoint(e as unknown as RPointerEvent);
+          const dropWorld = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, point.x, point.y);
+          const dropHit = rendererRef.current?.hitTest(currentRenderState(), dropWorld.x, dropWorld.y);
+          const canvasId = dropHit && (store.doc.node(dropHit)?.style.freeform ? dropHit : freeformOwner(store.sheet, dropHit));
+          if (canvasId) {
+            e.preventDefault(); clearExternalGhost(); store.setDrop(null); store.setHover(null);
+            let files = imageFiles(e.dataTransfer.files);
+            const url = firstUriFromList(e.dataTransfer.getData("text/uri-list"));
+            if (files.length === 0 && url) {
+              const file = await fetchImageAsFile(url);
+              if (file) files = [file];
+            }
+            if (files.length) {
+              for (let i = 0; i < files.length; i++) await store.addFreeformImageFile(canvasId, files[i], dropWorld.x + i * 24, dropWorld.y + i * 24);
+            } else {
+              const text = e.dataTransfer.getData("text/plain");
+              if (text) store.createFreeformItem(canvasId, dropWorld.x, dropWorld.y, text);
+            }
             return;
           }
           // External sources: an OS file (Explorer, or a browser image that
