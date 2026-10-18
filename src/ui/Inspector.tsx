@@ -373,7 +373,7 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
       <input
         ref={fileRef}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp"
+        accept="image/png,image/jpeg,image/gif,image/webp,image/avif"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {

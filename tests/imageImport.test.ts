@@ -41,6 +41,8 @@ describe("mimeFromName (T13-1)", () => {
     expect(mimeFromName("pic.jpeg")).toBe("image/jpeg");
     expect(mimeFromName("anim.gif")).toBe("image/gif");
     expect(mimeFromName("sticker.webp")).toBe("image/webp");
+    expect(mimeFromName("PHOTO.AVIF")).toBe("image/avif");
+    expect(validateImageSource("image/avif", 100)).toEqual({ok:true});
   });
 
   it("returns null for an unknown extension or no extension", () => {

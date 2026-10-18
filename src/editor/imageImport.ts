@@ -12,7 +12,7 @@
 import type { AssetBlob, AssetLevel, AssetMeta } from "../persist/assets";
 
 /** Raster formats only. SVG is an executable document: excluded (XSS hardening is deferred). */
-export const IMAGE_MIME_ALLOWLIST = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+export const IMAGE_MIME_ALLOWLIST = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"];
 
 export const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
 
@@ -33,6 +33,7 @@ const EXT_TO_MIME: Record<string, string> = {
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
+  avif: "image/avif",
 };
 
 /** The MIME a file NAME claims, or null when the extension is unknown. */

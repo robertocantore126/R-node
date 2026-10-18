@@ -116,6 +116,7 @@ const EXT_BY_MIME: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/gif": "gif",
   "image/webp": "webp",
+  "image/avif": "avif",
   "image/svg+xml": "svg",
 };
 
@@ -125,6 +126,7 @@ const MIME_BY_EXT: Record<string, string> = {
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
+  avif: "image/avif",
   svg: "image/svg+xml",
 };
 
@@ -312,7 +314,7 @@ export async function generateLevelsFromSource(
     original: { blob, w: srcW, h: srcH },
   } as Record<AssetLevel, AssetBlob>;
   const outMime =
-    mime === "image/png" || mime === "image/webp" || mime === "image/gif" ? "image/png" : "image/jpeg";
+    mime === "image/png" || mime === "image/webp" || mime === "image/gif" || mime === "image/avif" ? "image/png" : "image/jpeg";
   for (const [key, targetLong] of [
     ["large", LEVEL_LONG_SIDE.large],
     ["small", LEVEL_LONG_SIDE.small],

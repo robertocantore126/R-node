@@ -1,12 +1,13 @@
 # Freeform topic
 
-Branch: `feat/freeform-topic`.
+Freeform is merged into `main`. AVIF and clipboard fixes: `fix/freeform-clipboard-avif`.
 
 Right-click a topic and choose **New freeform topic**, immediately below **New code topic**. This creates a connected 720 x 480 canvas with a grid.
 
 - Double-click an empty part of the canvas to create and edit a text item. The context menu also offers **Add text / node**. Use the usual Inspector to give an item a box/shape, colour and text formatting.
 - Drag existing topics into the canvas. Their subtrees and relative geometry are preserved. Drag the items inside to reposition them.
-- Drop plain text, image files or browser images into the canvas. Images become independent movable items. Existing image attachments can also be dragged into it.
+- Ctrl+C / Ctrl+V copies selected images, side-image slots, gallery cells, individual topics or multiple selected branches. Pasted items remain separate items in their canvas, offset from the source; rich text, sizes, internal links and image references are preserved. Browser clipboard restrictions have a session fallback, and native paste events handle images copied as files.
+- Drop plain text, image files or browser images into the canvas. AVIF is accepted alongside PNG/JPEG/GIF/WebP, including typeless `.avif` files. Images become independent movable items. Existing image attachments can also be dragged into it.
 - Paste text or images with the canvas selected. Shape-library drops are positioned at the pointer.
 - Ordinary topics inside a freeform canvas have a transparent fill by default. Picking Fill in the Inspector or a context-menu colour gives text-only items a visible box; resetting the colour restores transparency. Explicitly chosen fills are preserved.
 - Link internal topics using R-node's existing relationship command.
@@ -21,7 +22,7 @@ This is a native freeform diagram surface, not an embedded diagrams.net applicat
 
 Automated coverage includes the original freeform tests plus `tests/freeformHardening.test.ts`: the five pre-merge defects now have regressions requiring correct behavior, with additional coverage for nested canvas growth, subtree capture with negative offsets, and containment during resize. `tests/rnodeFile.test.ts` also writes and rereads an actual SQLite `.rnode` container, preserving local geometry, relationships, notes and image bytes.
 
-Latest automated checks: `npm test` passed all 594 tests across 34 files, `npm run typecheck` passed, `npm run build` passed, `npm run check:map` passed, and `git diff --check` passed. The hit-test regression uses a simulated Canvas2D context and does not establish pixel fidelity or real pointer behavior.
+Latest automated checks: `npm test` passed all 611 tests across 36 files, `npm run typecheck` passed, `npm run build` passed, `npm run check:map` passed, and `git diff --check` passed. Clipboard tests use simulated clipboard APIs, and the AVIF worker test uses a simulated decoder; actual OS clipboard behavior and AVIF decoding still require browser/Tauri verification. The hit-test regression uses a simulated Canvas2D context and does not establish pixel fidelity or real pointer behavior.
 
 Browser UI smoke and the real-browser parity harness are **not verified** in this session: the browser automation inventory returned no available browsers. Desktop/Tauri runtime is also untested. Existing general PDF limitations still apply; the new board surface is handled by Canvas/PNG, the HTML viewer and SVG.
 

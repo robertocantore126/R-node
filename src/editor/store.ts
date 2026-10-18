@@ -9,13 +9,14 @@ import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, 
  *
  * The store is framework-free: React subscribes via useSyncExternalStore.
  */
+import { topicClipboardHtml, topicClipboardFromHtml, type TopicClipboard } from "./topicClipboard";
 import { guessCodeLang } from "../core/codeHighlight";
 import type { ShapeTemplate } from "./shapeLibrary";
 import { addRecentColor } from "./recentColors";
 import { quizClipText } from "./quizPrompts";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
-import { applyWithInverse, makeOp, slotKey, type Op } from "../core/ops";
+import { applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
 import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
@@ -24,15 +25,15 @@ import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
-import { createCanvasTextMeasurer, galleryExtent, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
+import { createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
-import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore } from "../persist/assets";
+import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { buildRnodeFile, isSqliteFile, readRnodeFile } from "../persist/rnodeFile";
-import { importImageFile, mimeFromName, validateImageSource, type ImportedImage } from "./imageImport";
+import { importImageFile, mimeFromName, validateImageSource, computeLevelDims, LEVEL_LONG_SIDE as IMAGE_LEVEL_LONG_SIDE, type ImportedImage } from "./imageImport";
 import { viewSize } from "./view";
 
 declare global {
@@ -306,6 +307,10 @@ export class EditorStore {
    * the exact pre-drag state.
    */
   private resizeState: { nodeId: string; original: Style; origPos: Position } | null = null;
+  private copiedElements: { payload: string; plain: string; assets: Promise<Array<{ meta: AssetMeta; levels: Record<AssetLevel, AssetBlob> }>> } | null = null;
+  private clipboardPasteCount = 0;
+  private pendingPastes = new Set<ReturnType<typeof setTimeout>>();
+
   private imageResizeState: { nodeId: string; original: Style } | null = null;
   /** Canvas-backed measurer: layout and renderer agree on every topic size. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
@@ -2867,7 +2872,7 @@ export class EditorStore {
    * second one.
    */
   async pasteImageFile(file: Blob & { name?: string }, anchorId?: string | null): Promise<boolean> {
-    const node = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
+    const node = this.clipboardTarget(anchorId);
     if (!node) {
       trace.ignored("paste:image", "no node selected");
       return false;
@@ -3534,34 +3539,65 @@ export class EditorStore {
   async copySelection(): Promise<void> {
     const ids = this.state.selection;
     const pruned = ids.filter((id) => !ids.some((other) => other !== id && this.isDescendant(other, id)));
-    const rootId = pruned[0];
-    if (!rootId) return;
-    const subtreeIds = this.model.subtreeIds(rootId);
-    const nodes = subtreeIds.map((id) => this.model.node(id)!).filter(Boolean);
-    const rels = this.sheet.relationships.filter((r) => subtreeIds.includes(r.fromId) && subtreeIds.includes(r.toId));
-    const payload = JSON.stringify({ app: "r-node", payload: { rootId, nodes, relationships: rels } });
-    const text = this.outlineText(pruned);
-    try {
-      // Two formats on the clipboard at once: the full map as the custom
-      // `text/rnode` MIME (internal paste keeps every run/style), and the
-      // plain-text outline as `text/plain` so pasting OUTSIDE R-node (chat,
-      // Word, notes) yields readable text instead of raw JSON.
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          "text/rnode": new Blob([payload], { type: "text/rnode" }),
-          "text/plain": new Blob([text], { type: "text/plain" }),
-        }),
-      ]);
-    } catch {
-      // ClipboardItem with custom types unsupported (older engines / blocked) —
-      // fall back to plain text only.
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch {
-        /* clipboard may be blocked; copying still succeeded in-memory */
-      }
+    let roots = pruned;
+    let nodes = [...new Set(pruned.flatMap((id) => this.model.subtreeIds(id)))].map((id) => this.model.requireNode(id));
+    const imageNode = this.state.imageSel ? this.model.node(this.state.imageSel) : undefined;
+    const cell = this.state.gallerySel;
+    const source = imageNode ?? (cell ? this.model.node(cell.nodeId) : undefined);
+    const imageId = imageNode ? imageNode.style[slotKey(this.state.imageSlot ?? "top")] : cell ? source?.style.gallery?.items[cell.index]?.id : undefined;
+    if (source && imageId) {
+      const caption = cell ? source.style.gallery?.items[cell.index]?.caption ?? "" : "";
+      nodes = [{ ...source, id: "clipboard-image", type: "subtopic", parentId: null, childrenIds: [], title: caption, titleRuns: [{ text: caption }], notes: "", task: null, labels: [], markers: [],
+        style: { image: imageId, imageWidth: cell ? galleryExtent(source)?.cellW ?? 180 : source.style.imageWidth ?? Math.min(this.sheet.attachments.find((card) => card.id === imageId)?.w ?? 180, MAX_IMAGE_W) } }];
+      roots = [nodes[0].id];
     }
-    this.toast(`Copied ${nodes.length} topic${nodes.length > 1 ? "s" : ""}`);
+    if (roots.length === 0) return trace.ignored("copy", "no topic or image selected");
+    const selectedIds = new Set(nodes.map((node) => node.id));
+    const assetIds = new Set(nodes.flatMap(nodeImageIds));
+    const attachments = this.sheet.attachments.filter((card) => assetIds.has(card.id));
+    const originId = source?.id ?? roots[0];
+    const canvasId = freeformOwner(this.sheet, originId);
+    const sameCanvas = canvasId && (source || roots.every((id) => freeformOwner(this.sheet, id) === canvasId));
+    const canvas = sameCanvas ? this.model.requireNode(canvasId!) : undefined;
+    const data: TopicClipboard = { rootId: roots[0], rootIds: roots, nodes, relationships: this.sheet.relationships.filter((rel) => selectedIds.has(rel.fromId) && selectedIds.has(rel.toId)), attachments,
+      ...(canvas ? { canvas: { id: canvas.id, x: canvas.position.x, y: canvas.position.y } } : {}) };
+    const payload = JSON.stringify({ app: "r-node", payload: data });
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const lines: string[] = [];
+    const outline = (id: string, depth: number): void => {
+      const node = byId.get(id); if (!node) return;
+      lines.push("  ".repeat(depth) + (node.title || (nodeImageIds(node).length ? "[Image]" : "")));
+      node.childrenIds.forEach((child) => outline(child, depth + 1));
+    };
+    roots.forEach((id) => outline(id, 0));
+    const plain = lines.join("\n");
+    // Retain original bytes while the source document is still open. This also
+    // makes copy -> delete/GC -> paste and switching desktop files safe.
+    const assetStore = getAssetStore();
+    const assets = Promise.all(attachments.map(async (card) => {
+      const [original, large, small] = await Promise.all([assetStore.get(card.id, "original"), assetStore.get(card.id, "large"), assetStore.get(card.id, "small")]);
+      if (!original || !large || !small) return null;
+      return { meta: { ...card }, levels: { original: { blob: original, w: card.w, h: card.h }, large: { blob: large, ...computeLevelDims(card.w, card.h, IMAGE_LEVEL_LONG_SIDE.large) }, small: { blob: small, ...computeLevelDims(card.w, card.h, IMAGE_LEVEL_LONG_SIDE.small) } } };
+    })).then((items) => items.filter((item): item is NonNullable<typeof item> => item !== null)).catch(() => []);
+    this.copiedElements = { payload, plain, assets };
+    this.clipboardPasteCount = 0;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([topicClipboardHtml(payload, plain)], { type: "text/html" }),
+        "text/plain": new Blob([plain], { type: "text/plain" }),
+      })]);
+    } catch {
+      try { await navigator.clipboard.writeText(plain); } catch { /* Session clipboard remains available. */ }
+    }
+    this.toast(imageId ? "Copied image" : `Copied ${nodes.length} topic${nodes.length > 1 ? "s" : ""}`);
+  }
+
+  private clipboardTarget(anchorId?: string | null): MindNode | undefined {
+    if (anchorId) return this.model.node(anchorId);
+    const selected = this.selectionNode ?? (this.state.imageSel ? this.model.node(this.state.imageSel) : undefined);
+    if (!selected) return undefined;
+    const owner = freeformOwner(this.sheet, selected.id);
+    return owner ? this.model.node(owner) : selected;
   }
 
   /** Copy the selected branches to the clipboard as an indented text outline
@@ -3716,14 +3752,32 @@ export class EditorStore {
     this.deleteSelection();
   }
 
-  async paste(anchorId?: string | null): Promise<void> {
-    // Prefer the full-fidelity `text/rnode` payload that copySelection writes;
-    // fall back to whatever plain text is on the clipboard (external sources,
-    // or older engines that can't read custom MIME types).
-    let text: string | null = null;
+  /** Let the native paste event expose OS file copies; fall back when no event arrives. */
+  requestPaste(): void {
+    const sheet = this.sheet;
+    const anchorId = this.clipboardTarget()?.id;
+    const timer = setTimeout(() => {
+      this.pendingPastes.delete(timer);
+      if (this.sheet !== sheet) return trace.ignored("paste", "document changed before paste");
+      void this.paste(anchorId);
+    }, 150);
+    this.pendingPastes.add(timer);
+  }
+
+  cancelPendingPaste(): void {
+    const timer = this.pendingPastes.values().next().value;
+    if (timer !== undefined) { clearTimeout(timer); this.pendingPastes.delete(timer); }
+  }
+
+  async paste(anchorId?: string | null, suppliedText?: string): Promise<void> {
+    const sheet = this.sheet;
+    const destination = this.clipboardTarget(anchorId);
+    // Prefer the full-fidelity HTML snapshot (or legacy text/rnode), then
+    // image files and external text. Session data covers restricted browsers.
+    let text: string | null = suppliedText ?? null;
     let items: ClipboardItems | null = null;
     try {
-      items = await navigator.clipboard.read();
+      if (suppliedText === undefined) items = await navigator.clipboard.read();
     } catch {
       /* clipboard read with MIME types blocked — fall through to readText */
     }
@@ -3740,7 +3794,9 @@ export class EditorStore {
       for (const item of items) {
         if (item.types.includes("text/html")) {
           try {
-            htmlSample = (await item.getType("text/html").then((b) => b.text())).slice(0, 240);
+            const html = await item.getType("text/html").then((b) => b.text());
+            htmlSample = html.slice(0, 240);
+            text = topicClipboardFromHtml(html);
           } catch {
             /* html read failed — not fatal for the paste itself */
           }
@@ -3748,21 +3804,7 @@ export class EditorStore {
         }
       }
     }
-    if (items) {
-      // An image on the clipboard beats text (T13-2): with a node selected, a
-      // copied/screenshotted image attaches instead of inserting text.
-      const imageItem = items.find((i) => i.types.some((t) => t.startsWith("image/")));
-      if (imageItem) {
-        const type = imageItem.types.find((t) => t.startsWith("image/"))!;
-        const blob = await imageItem.getType(type);
-        const node = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
-        if (node) {
-          await this.attachImageFile(node.id, new File([blob], "pasted-image", { type: blob.type || type }));
-        } else {
-          trace.ignored("paste:image", "no node selected");
-        }
-        return;
-      }
+    if (items && text === null) {
       for (const item of items) {
         if (item.types.includes("text/rnode")) {
           text = await item.getType("text/rnode").then((blob) => blob.text());
@@ -3770,7 +3812,28 @@ export class EditorStore {
         }
       }
     }
-    if (text === null) text = await navigator.clipboard.readText().catch(() => null);
+    if (items && text === null) {
+      // An image on the clipboard beats text (T13-2): with a node selected, a
+      // copied/screenshotted image attaches instead of inserting text.
+      const imageItem = items.find((i) => i.types.some((t) => t.startsWith("image/")));
+      if (imageItem) {
+        const type = imageItem.types.find((t) => t.startsWith("image/"))!;
+        const blob = await imageItem.getType(type);
+        const node = destination;
+        if (this.sheet !== sheet) return trace.ignored("paste", "document changed while reading clipboard");
+        if (node) {
+          await this.attachImageFile(node.id, new File([blob], "pasted-image", { type: blob.type || type }));
+        } else {
+          trace.ignored("paste:image", "no node selected");
+        }
+        return;
+      }
+    }
+    if (text === null) {
+      try { text = await navigator.clipboard.readText(); } catch { /* Session clipboard fallback below. */ }
+    }
+    if (this.copiedElements && (text === this.copiedElements.plain || (text === null && items === null))) text = this.copiedElements.payload;
+    if (this.sheet !== sheet) return trace.ignored("paste", "document changed while reading clipboard");
     // §4bis: this return used to be mute, and a mute return is indistinguishable
     // from a defect. A clipboard item that advertises NO mime type reaches here
     // — an image copied as a FILE does exactly that on Windows — and the trace
@@ -3783,7 +3846,7 @@ export class EditorStore {
         { mimeItems: items?.length ?? 0 },
       );
     }
-    let parsed: { app?: string; payload?: { rootId: string; nodes: MindNode[]; relationships: { fromId: string; toId: string; label?: string }[] } } | null = null;
+    let parsed: { app?: string; payload?: TopicClipboard } | null = null;
     try {
       parsed = JSON.parse(text);
     } catch {
@@ -3804,7 +3867,7 @@ export class EditorStore {
     if (!parsed || parsed.app !== "r-node" || !parsed.payload) {
       // Plain text on the clipboard: XMind-style, paste it straight into the
       // selected topic instead of rejecting it as "not a map".
-      const target = this.selectionNode;
+      const target = destination;
       if (target) {
         // A selected CODE topic swallows the clipboard as its new source
         // (T22): the block is read-only for rich text — the Lexical overlay
@@ -3845,26 +3908,56 @@ export class EditorStore {
       return;
     }
     const payload = parsed.payload;
-    const anchor = anchorId ?? this.state.selection[this.state.selection.length - 1] ?? this.sheet.rootNodeId;
-    const anchorNode = this.model.node(anchor);
-    const srcRoot = payload.nodes.find((n) => n.id === payload.rootId);
-    if (!anchorNode || !srcRoot) return;
-    const type: NodeType = anchorNode.type === "central" ? "main" : "subtopic";
-    const ops = this.remapOps(payload.nodes, anchor, anchorNode.childrenIds.length, type);
-    if (ops.length === 0) return;
-    for (const rel of payload.relationships ?? []) {
-      const from = this.lastRemap.get(rel.fromId);
-      const to = this.lastRemap.get(rel.toId);
-      if (from && to) {
-        ops.push(
-          makeOp<Op & { type: "createRelationship" }>("createRelationship", {
-            relationship: { id: uid("rel"), fromId: from, toId: to, label: rel.label },
-          })
-        );
+    const anchorNode = destination ?? this.model.rootNode;
+    if (!Array.isArray(payload.nodes) || !payload.nodes.length || payload.nodes.some((node) =>
+      !node || typeof node.id !== "string" || typeof node.title !== "string" || !node.style || !node.position ||
+      !Number.isFinite(node.position.x) || !Number.isFinite(node.position.y) || !Array.isArray(node.childrenIds) || node.childrenIds.some((id) => typeof id !== "string")
+    )) return trace.ignored("paste", "invalid topic payload");
+    const roots = payload.rootIds ?? [payload.rootId];
+    const sourceById = new Map(payload.nodes.map((node) => [node.id, node]));
+    if (!Array.isArray(roots) || !roots.length || new Set(roots).size !== roots.length || sourceById.size !== payload.nodes.length || roots.some((id) => !sourceById.has(id))) return trace.ignored("paste", "invalid clipboard roots");
+    if (payload.attachments && (!Array.isArray(payload.attachments) || payload.attachments.some((card) => !card || typeof card.id !== "string" || typeof card.mime !== "string" || !Number.isFinite(card.w) || !Number.isFinite(card.h)))) return trace.ignored("paste", "invalid clipboard attachments");
+    if (payload.relationships && !Array.isArray(payload.relationships)) return trace.ignored("paste", "invalid clipboard relationships");
+    if (text === this.copiedElements?.payload) {
+      const saved = await this.copiedElements.assets;
+      if (this.sheet !== sheet || !this.model.node(anchorNode.id)) return trace.ignored("paste", "destination changed");
+      for (const asset of saved) {
+        if (!await getAssetStore().get(asset.meta.id, "large")) await getAssetStore().putUnderId(asset.meta.id, asset.levels, asset.meta);
       }
     }
+    if (this.sheet !== sheet || !this.model.node(anchorNode.id)) return trace.ignored("paste", "destination changed");
+    const type: NodeType = anchorNode.type === "central" ? "main" : "subtopic";
+    const ops: Op[] = [];
+    const missing = (payload.attachments ?? []).filter((card) => !sheet.attachments.some((existing) => existing.id === card.id));
+    if (missing.length) ops.push(makeOp<Op & { type: "setAttachments" }>("setAttachments", { attachments: [...sheet.attachments, ...missing], prev: sheet.attachments }));
+    const rootNodes = roots.map((id) => sourceById.get(id)!);
+    const minX = Math.min(...rootNodes.map((node) => node.position.x)), minY = Math.min(...rootNodes.map((node) => node.position.y));
+    const sameCanvas = payload.canvas?.id === anchorNode.id;
+    const shift = text === this.copiedElements?.payload ? ++this.clipboardPasteCount * 24 : 24;
+    const origin = { x: anchorNode.position.x + (sameCanvas ? minX - payload.canvas!.x : 0) + shift, y: anchorNode.position.y + (sameCanvas ? minY - payload.canvas!.y : FREEFORM_HEADER) + shift };
+    const remapped = new Map<string, string>();
+    const pastedSource = new Set<string>();
+    for (const [index, sourceRoot] of rootNodes.entries()) {
+      const nodes: MindNode[] = [], seen = new Set<string>(), queue = [sourceRoot.id];
+      while (queue.length) {
+        const id = queue.shift()!;
+        if (seen.has(id) || pastedSource.has(id)) return trace.ignored("paste", "cyclic or overlapping topic payload");
+        seen.add(id);pastedSource.add(id);
+        const node = sourceById.get(id);
+        if (!node || !Array.isArray(node.childrenIds) || !node.style || !node.position) return trace.ignored("paste", "incomplete topic payload");
+        nodes.push(node);queue.push(...node.childrenIds);
+      }
+      const place = anchorNode.style.freeform ? { origin: { x: origin.x + sourceRoot.position.x - minX, y: origin.y + sourceRoot.position.y - minY }, rootPos: sourceRoot.position } : undefined;
+      ops.push(...this.remapOps(nodes, anchorNode.id, anchorNode.childrenIds.length + index, type, place));
+      for (const [oldId, newId] of this.lastRemap) remapped.set(oldId, newId);
+    }
+    for (const rel of payload.relationships ?? []) {
+      const from = remapped.get(rel.fromId), to = remapped.get(rel.toId);
+      if (from && to) ops.push(makeOp<Op & { type: "createRelationship" }>("createRelationship", { relationship: { ...rel, id: uid("rel"), fromId: from, toId: to } }));
+    }
     this.execOps(ops);
-    this.select(this.lastRemap.get(srcRoot.id)!);
+    this.settleLayoutNow();
+    this.selectMany(roots.map((id) => remapped.get(id)!));
     this.toast("Pasted");
   }
 

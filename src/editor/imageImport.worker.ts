@@ -27,7 +27,8 @@ function hex(buffer: ArrayBuffer): string {
 function levelMime(sourceMime: string): string {
   return sourceMime === "image/png" ||
     sourceMime === "image/webp" ||
-    sourceMime === "image/gif"
+    sourceMime === "image/gif" ||
+    sourceMime === "image/avif"
     ? "image/png"
     : "image/jpeg";
 }

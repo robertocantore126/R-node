@@ -2,7 +2,8 @@
  * Keyboard shortcuts.
  *
  * Central, customizable mapping (a profile object so users can rebind later).
- * Returns true when a key combo was consumed. While a topic is being edited
+ * Returns true when browser defaults should be suppressed. Native paste
+ * schedules a fallback but leaves its default event enabled. While a topic is being edited
  * inline, the editor overlay owns the keyboard and shortcuts are skipped.
  */
 import type { EditorStore } from "./store";
@@ -173,15 +174,16 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       store.redo();
       return true;
     case "copy":
+      e.preventDefault();
       void store.copySelection();
       return true;
     case "cut":
+      e.preventDefault();
       void store.cutSelection();
       return true;
     case "paste":
-      e.preventDefault();
-      void store.paste();
-      return true;
+      store.requestPaste();
+      return false; // App must allow the native paste event (including OS files).
     case "palette":
       e.preventDefault();
       store.togglePalette();

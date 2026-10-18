@@ -254,6 +254,23 @@ describe(".rnode.zip progress and cancellation hooks", () => {
 });
 
 describe(".rnode.zip import", () => {
+  it("preserves an AVIF original through complete zip export and import", async () => {
+    const source = new IndexedDbAssetStore(uniqueDb());
+    const blob = new Blob(["AVIF original fixture"], {type:"image/avif"});
+    const level = {blob,w:64,h:48};
+    const id = await source.put({original:level,large:level,small:level},{mime:"image/avif",w:64,h:48,bytes:blob.size,name:"photo.avif"});
+    const doc = makeDocWithImage(id);doc.sheets[0].attachments = [(await source.meta(id))!];
+    const zip = await buildRnodeZip(doc,doc.sheets[0],source,"complete");
+    expect(Object.keys(unzipSync(zip)).some((name)=>name.endsWith(".avif"))).toBe(true);
+    const fresh = new IndexedDbAssetStore(uniqueDb());
+    const imported = await importRnodeZip(zip,fresh,fakeGenerate);
+    expect(imported).not.toBeNull();
+    if (!imported) throw new Error("AVIF archive could not be imported");
+    expect(imported.sheets[0].nodes.root.style.image).toBe(id);
+    expect((await fresh.meta(id))?.mime).toBe("image/avif");
+    expect(await (await fresh.get(id,"original"))!.text()).toBe("AVIF original fixture");
+  });
+
   it("round-trips into a fresh store: export, wipe, import restores the asset under the same id", async () => {
     const source = new IndexedDbAssetStore(uniqueDb());
     const id = await putTestAsset(source);

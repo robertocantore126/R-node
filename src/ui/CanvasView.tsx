@@ -1,3 +1,4 @@
+import { topicClipboardFromHtml } from "../editor/topicClipboard";
 import { freeformOwner } from "../core/freeform";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
@@ -564,15 +565,21 @@ export function CanvasView(): JSX.Element {
   // clipboard, which does not expose file copies at all (they arrive as an
   // item with no mime type), so the picture is only reachable here, on the
   // event's DataTransfer — the same place the drag & drop path reads it from.
-  // Both paths may fire for one keystroke; the second is a no-op because the
-  // asset id is the hash of the bytes.
+  // The native event cancels the async fallback, so one gesture inserts once.
+  // Standard HTML also carries internal node/image snapshots.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent): void => {
       if (store.getSnapshot().editingId) return; // the overlay owns its own paste
-      const file = e.clipboardData ? firstImageFile(e.clipboardData.files) : null;
-      if (!file) return;
+      if ((e.target as HTMLElement | null)?.closest?.("input,textarea,[contenteditable='true']")) return;
+      if (!e.clipboardData) return;
       e.preventDefault();
-      void store.pasteImageFile(file);
+      store.cancelPendingPaste();
+      const data = e.clipboardData;
+      const payload = data.getData("text/rnode") || topicClipboardFromHtml(data.getData("text/html"));
+      const file = firstImageFile(data.files);
+      if (payload) void store.paste(undefined, payload);
+      else if (file) void store.pasteImageFile(file);
+      else void store.paste(undefined, data.getData("text/plain") || undefined);
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);

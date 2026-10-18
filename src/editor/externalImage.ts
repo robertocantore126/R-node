@@ -21,7 +21,7 @@ export function resolveFetcher(): FetchFn {
 }
 
 /** Extensions that identify a typeless file as a picture — see isImageEntry. */
-const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp)$/i;
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|avif)$/i;
 
 /**
  * An OS/browser file is an image when it SAYS so, or when its NAME says so.

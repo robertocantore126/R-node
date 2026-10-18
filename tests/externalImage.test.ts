@@ -34,6 +34,13 @@ describe("firstImageFile", () => {
   });
 });
 
+describe("AVIF drag sources", () => {
+  it("accepts typed and typeless AVIF files", () => {
+    expect(firstImageFile([new File(["avif"],"image.avif",{type:"image/avif"})])?.type).toBe("image/avif");
+    expect(firstImageFile([new File(["avif"],"IMAGE.AVIF")])?.name).toBe("IMAGE.AVIF");
+  });
+});
+
 describe("firstUriFromList", () => {
   it("skips comment lines and returns the first URL", () => {
     const list = "# dropped from https://example.com/page\nhttps://example.com/img/cat.png\nhttps://example.com/page";
