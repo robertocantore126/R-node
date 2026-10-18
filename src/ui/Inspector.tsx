@@ -119,6 +119,11 @@ export function Inspector(): JSX.Element {
 
       <div className="inspector-section">
         <div className="inspector-label">Style</div>
+        {node.style.freeform && <>
+          <p className="muted">Double-click inside to add text. Drag topics, text or images into this canvas.</p>
+          <div className="field"><span>Canvas width</span><input type="number" min={240} max={6000} value={node.style.width ?? 720} onChange={(e) => store.setNodeStyle(node.id, { width: Math.max(240, Math.min(6000, Number(e.target.value) || 720)) })} /></div>
+          <div className="field"><span>Canvas height</span><input type="number" min={160} max={6000} value={node.style.height ?? 480} onChange={(e) => store.setNodeStyle(node.id, { height: Math.max(160, Math.min(6000, Number(e.target.value) || 480)) })} /></div>
+        </>}
         {node.style.code ? (
           <p className="muted">
             Code topic — view only: colours and style come from the theme and cannot be edited.
@@ -142,14 +147,14 @@ export function Inspector(): JSX.Element {
               <input
                 type="range"
                 min={90}
-                max={640}
+                max={node.style.freeform ? 6000 : 640}
                 step={5}
                 value={node.style.width ?? 280}
                 onChange={(e) => store.setNodeStyle(node.id, { width: Number(e.target.value) })}
                 title="Fixed node width — the text re-wraps and the height follows"
               />
               <span className="muted">{node.style.width ? `${node.style.width}px` : "auto"}</span>
-              <button className="btn small" title="Fit the box to the text again" onClick={() => store.setNodeStyle(node.id, { width: undefined })}>
+              <button className="btn small" title="Fit the box to the text again" disabled={!!node.style.freeform} onClick={() => store.setNodeStyle(node.id, { width: undefined })}>
                 Auto
               </button>
             </div>

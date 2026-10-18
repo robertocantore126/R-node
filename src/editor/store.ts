@@ -1,3 +1,4 @@
+import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
 /**
  * EditorStore — the editor interaction layer.
  *
@@ -22,7 +23,7 @@ import { parseQuiz, type QuizSeed } from "../core/quiz";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
-import { applyLayout, layoutSheet } from "../layout/mindmap";
+import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, galleryExtent, measureNode, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
@@ -540,8 +541,42 @@ export class EditorStore {
   execOps(ops: Op[], opts?: { skipHistory?: boolean }): void {
     if (ops.length === 0) return;
     const t = typeof performance !== "undefined" ? performance.now() : 0;
+    ops = [...ops];
     const inverses: Op[][] = [];
-    for (const op of ops) inverses.push(applyWithInverse(this.sheet, op));
+    const canvases = new Set<string>();
+    const collect = (id: string): void => {
+      let node = this.model.node(id);
+      const seen = new Set<string>();
+      while (node && !seen.has(node.id)) {
+        seen.add(node.id);
+        if (node.style.freeform) canvases.add(node.id);
+        node = node.parentId ? this.model.node(node.parentId) : undefined;
+      }
+    };
+    for (const op of ops) {
+      const id = "id" in op ? op.id : "nodeId" in op ? op.nodeId : null;
+      if (id) collect(id);
+      inverses.push(applyWithInverse(this.sheet, op));
+      if (id) collect(id);
+    }
+    // Inner canvases grow before their enclosing canvas is measured.
+    const depth = (id: string): number => {
+      let n = this.model.node(id), count = 0;
+      const seen = new Set<string>();
+      while (n?.parentId && !seen.has(n.id)) { seen.add(n.id); count++; n = this.model.node(n.parentId); }
+      return count;
+    };
+    for (const id of [...canvases].sort((a, b) => depth(b) - depth(a))) {
+      const node = this.model.node(id);
+      if (!node?.style.freeform) continue;
+      const min = this.freeformMinimumSize(id);
+      const width = Math.max(node.style.width ?? 720, min.w);
+      const height = Math.max(node.style.height ?? 480, min.h);
+      if (width === node.style.width && height === node.style.height) continue;
+      const op = makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, width, height }, prev: node.style });
+      inverses.push(applyWithInverse(this.sheet, op));
+      ops.push(op);
+    }
     if (!opts?.skipHistory) this.history.push(ops, inverses);
     trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
     // Tracer 2.0 state row: creation vs deletion vs plain mutation, derived
@@ -1606,14 +1641,14 @@ export class EditorStore {
     // because two renderers over one title drift. The refusal still selects
     // the topic, so the double-click shows what it acted on; a mute return
     // would be indistinguishable from a defect (§4bis).
-    if (node.style.code || node.style.gallery) {
+    if (node.style.code || node.style.gallery || node.style.freeform) {
       this.state.selection = [id];
       this.state.editingId = null;
       this.state.pendingInsert = null;
       this.state.imageSel = null;
       this.state.imageSlot = null;
       this.state.gallerySel = null;
-      const why = node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
       return trace.ignored("edit:start", why, { nodeId: id });
     }
     this.state.selection = [id];
@@ -1641,8 +1676,8 @@ export class EditorStore {
     // Same refusal as startEdit: a code topic never enters the editor, not
     // even through type/paste-to-edit (T22), and neither does a gallery
     // topic, whose body is pictures (T25).
-    if (node.style.code || node.style.gallery) {
-      const why = node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+    if (node.style.code || node.style.gallery || node.style.freeform) {
+      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
       return trace.ignored("paste-to-edit:trigger", why, { nodeId: node.id });
     }
     trace.applied("paste-to-edit:trigger", {
@@ -1924,6 +1959,7 @@ export class EditorStore {
 
   private createNodePosition(parent: MindNode): { x: number; y: number; manual: boolean } {
     const base = parent.position;
+    if (parent.style.freeform || freeformOwner(this.sheet, parent.id)) return { x: base.x + 24, y: base.y + 60, manual: false };
     const st = this.sheet.structure;
     const pSize = measureNode(parent, this.measurer);
     const estimatedW = 140;
@@ -1992,6 +2028,82 @@ export class EditorStore {
     this.settleLayoutNow();
     this.startEdit(id);
     return id;
+  }
+
+  /** Create a diagram canvas as a child of the selected topic. */
+  createFreeformTopic(parentId?: string): void {
+    const parent = parentId ? this.model.node(parentId) : this.selectionNode ?? this.model.rootNode;
+    if (!parent) return;
+    const id = uid("n");
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: parent.type === "central" ? "main" : "subtopic",
+      parentId: parent.id, index: parent.childrenIds.length,
+      title: "Freeform", titleRuns: [{ text: "Freeform" }],
+      style: { freeform: true, width: 720, height: 480, shape: "rounded", fill: "#ffffff", stroke: "#94a3b8", borderWidth: 1 },
+      position: this.createNodePosition(parent),
+    })]);
+    this.settleLayoutNow();
+    this.select(id);
+  }
+
+  /** Real document nodes share editing, links, copy, undo and persistence. */
+  createFreeformItem(parentId: string, x?: number, y?: number, text = "", imageId?: string): string | null {
+    const parent = this.model.node(parentId);
+    if (!parent?.style.freeform) return null;
+    const id = uid("n"), offset = parent.childrenIds.length * 24;
+    const px = Math.max(FREEFORM_PADDING, (x ?? parent.position.x + FREEFORM_PADDING + offset) - parent.position.x);
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, (y ?? parent.position.y + FREEFORM_HEADER + FREEFORM_PADDING + offset) - parent.position.y);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
+      title: text, titleRuns: [{ text }],
+      style: { freeformPosition: { x: px, y: py }, ...(imageId ? { image: imageId, imageWidth: 180 } : { shape: "none", align: "left" }) },
+      position: { x: parent.position.x + px, y: parent.position.y + py, manual: false },
+    })]);
+    this.settleLayoutNow();
+    if (!text && !imageId) this.startEdit(id); else this.select(id);
+    return id;
+  }
+
+  async addFreeformImageFile(parentId: string, file: Blob & { name?: string }, x: number, y: number): Promise<void> {
+    const sheet = this.sheet;
+    const res = await this.importToCard(file);
+    if (!res.ok) { this.toast(res.reason); return; }
+    if (this.sheet !== sheet || !sheet.nodes[parentId]?.style.freeform) return;
+    if (!sheet.attachments.some((a) => a.id === res.card.id)) sheet.attachments.push({ ...res.card });
+    this.createFreeformItem(parentId, x, y, "", res.card.id);
+  }
+
+  /** Capture a subtree into a canvas in one reversible history entry. */
+  moveIntoFreeform(id: string, parentId: string, x: number, y: number): void {
+    const node = this.model.node(id), parent = this.model.node(parentId);
+    if (!node || !parent?.style.freeform || node.type === "central" || id === parentId || this.isDescendant(id, parentId)) return;
+    const resolve = imageResolver(this.sheet);
+    const ext = measureNode(node, this.measurer, resolve);
+    const bounds = node.style.freeform ? { minX: 0, minY: 0, maxX: ext.w, maxY: ext.h } : freeformContentBounds(this.sheet, id, (n) => measureNode(n, this.measurer, resolve));
+    const box = measureNode(parent, this.measurer);
+    const px = Math.max(FREEFORM_PADDING - bounds.minX, Math.min(x - parent.position.x, box.w - Math.max(ext.w, bounds.maxX) - FREEFORM_PADDING));
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING - bounds.minY, Math.min(y - parent.position.y, box.h - Math.max(ext.h, bounds.maxY) - FREEFORM_PADDING));
+    const internal = freeformOwner(this.sheet, id) === parentId;
+    const actualParent = internal && node.parentId ? this.model.requireNode(node.parentId) : parent;
+    const offset = { x: parent.position.x + px - actualParent.position.x, y: parent.position.y + py - actualParent.position.y };
+    const ops: Op[] = [];
+    if (!internal && node.parentId !== parentId) ops.push(makeOp<Op & { type: "moveNode" }>("moveNode", {
+      id, fromParentId: node.parentId, fromIndex: node.parentId ? this.model.requireNode(node.parentId).childrenIds.indexOf(id) : 0,
+      toParentId: parentId, toIndex: parent.childrenIds.length,
+    }));
+    const capture = (n: MindNode, offset: { x: number; y: number }): void => {
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: n.id, style: { ...n.style, freeformPosition: offset }, prev: n.style }));
+      if (internal || n.style.freeform) return;
+      n.childrenIds.forEach((childId, index) => {
+        const child = this.model.requireNode(childId);
+        const local = freeformOwner(this.sheet, n.id) ? freeformOffset(child, index) : { x: child.position.x - n.position.x, y: child.position.y - n.position.y };
+        capture(child, local);
+      });
+    };
+    capture(node, offset);
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.select(id);
   }
 
   /**
@@ -2376,6 +2488,11 @@ export class EditorStore {
       this.setDrop(null);
       return;
     }
+    if (targetId && this.model.node(targetId)?.style.freeform && mode === "child") {
+      this.moveIntoFreeform(draggedId, targetId, worldX, worldY);
+      this.setDrop(null);
+      return;
+    }
     if (targetId) {
       const target = this.model.node(targetId);
       if (!target || this.isDescendant(draggedId, targetId)) {
@@ -2508,13 +2625,13 @@ export class EditorStore {
    * emits ONE setPosition op whose `prev` is the PRE-drag position, so a
    * single undo restores the exact pre-drag state.
    */
-  private nodeDragState: { nodeId: string; origPos: Position } | null = null;
+  private nodeDragState: { nodeId: string; origPos: Position; origStyle: Style } | null = null;
 
   /** A node drag started: capture the pre-drag position for the final op. */
   beginNodeDrag(nodeId: string): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    this.nodeDragState = { nodeId, origPos: { ...node.position } };
+    this.nodeDragState = { nodeId, origPos: { ...node.position }, origStyle: { ...node.style } };
   }
 
   /**
@@ -2526,6 +2643,10 @@ export class EditorStore {
   setNodeDragDraft(nodeId: string, worldX: number, worldY: number): void {
     const node = this.model.node(nodeId);
     if (!node) return;
+    if (freeformOwner(this.sheet, nodeId) && node.parentId) {
+      const parent = this.model.requireNode(node.parentId);
+      node.style = { ...node.style, freeformPosition: { x: worldX - parent.position.x, y: worldY - parent.position.y } };
+    }
     node.position = { ...node.position, x: worldX, y: worldY, manual: true };
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
@@ -2538,6 +2659,7 @@ export class EditorStore {
     const node = this.model.node(nodeId);
     if (!node) return;
     node.position = { ...d.origPos };
+    node.style = { ...d.origStyle };
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
@@ -2558,7 +2680,7 @@ export class EditorStore {
     this.nodeDragState = null;
     if (d) {
       const node = this.model.node(d.nodeId);
-      if (node) node.position = { ...d.origPos };
+      if (node) { node.position = { ...d.origPos }; node.style = { ...d.origStyle }; }
     }
     this.dropAt(draggedId, targetId, mode, worldX, worldY);
     if (this.layoutTimer) {
@@ -2573,11 +2695,20 @@ export class EditorStore {
   // Style / tasks
   // -------------------------------------------------------------------------
 
+  /** A Fill choice turns a text-only freeform item into a visible box. */
+  private topicStyle(node: MindNode, patch: Partial<Style>): Style {
+    const style = { ...node.style, ...patch };
+    if (patch.fill && patch.fill !== "transparent" && patch.shape === undefined && style.shape === "none" && freeformOwner(this.sheet, node.id)) {
+      style.shape = "rounded";
+    }
+    return style;
+  }
+
   setNodeStyle(id: string, patch: Partial<Style>): void {
     const node = this.model.node(id);
     if (!node) return;
     if (typeof patch.fill === "string") addRecentColor(patch.fill);
-    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, ...patch }, prev: node.style })]);
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: this.topicStyle(node, patch), prev: node.style })]);
   }
 
   /**
@@ -2596,11 +2727,47 @@ export class EditorStore {
       // theme at paint time, so a colour pick — even inside a multi-selection
       // — must never write a fill onto it.
       if (!n || n.style.code) continue;
-      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, fill: color }, prev: n.style }));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: this.topicStyle(n, { fill: color }), prev: n.style }));
     }
     if (ops.length === 0) return;
     addRecentColor(color);
     this.execOps(ops);
+  }
+
+  /** Quick emphasis for ordinary selected topics, as one reversible gesture. */
+  setSelectionTopicSize(choice: "smaller" | "larger" | "normal" | "large" | "heading"): void {
+    const steps = [10, 12, 14, 18, 24, 32, 40, 48, 64, 80, 96, 120, 160, 200];
+    const presets = { normal: { fontSize: 14, padding: 10, fontWeight: 400 }, large: { fontSize: 80, padding: 16, fontWeight: 600 }, heading: { fontSize: 200, padding: 24, fontWeight: 700 } };
+    const ops: Op[] = [];
+    for (const id of this.state.selection) {
+      const node = this.model.node(id);
+      if (!node || node.style.code || node.style.gallery || node.style.freeform || node.style.shapeParts) continue;
+      const current = node.style.fontSize ?? 14;
+      const preset = choice === "smaller" || choice === "larger" ? null : presets[choice];
+      const fontSize = preset?.fontSize ?? (choice === "larger"
+        ? steps.find((size) => size > current) ?? Math.max(200, current)
+        : [...steps].reverse().find((size) => size < current) ?? Math.min(10, current));
+      const ratio = fontSize / current;
+      if (!preset && ratio === 1) continue;
+      const style = {
+        ...node.style,
+        ...(preset ?? { fontSize, padding: Math.round((node.style.padding ?? 10) * ratio * 10) / 10 }),
+        // Fixed boxes grow too, preventing an enlarged title from being clipped.
+        ...(node.style.width !== undefined ? { width: Math.round(node.style.width * ratio) } : {}),
+        ...(node.style.height !== undefined ? { height: Math.round(node.style.height * ratio) } : {}),
+      };
+      if (JSON.stringify(style) !== JSON.stringify(node.style)) ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: node.style }));
+      // Pasted headings may carry explicit inline sizes that override the base.
+      // Scale those proportionally while preserving all other inline formatting.
+      if (ratio !== 1 && node.titleRuns?.some((run) => run.fontSize !== undefined)) {
+        const runs = node.titleRuns.map((run) => run.fontSize === undefined ? { ...run } : { ...run, fontSize: Math.round(run.fontSize * ratio * 10) / 10 });
+        ops.push(makeOp<Op & { type: "setTitle" }>("setTitle", { id, title: node.title, prev: node.title, titleRuns: runs, prevRuns: node.titleRuns }));
+      }
+    }
+    if (ops.length === 0) return trace.ignored("topic:size", "no eligible topics or already at size limit");
+    this.execOps(ops);
+    this.settleLayoutNow();
+    trace.applied("topic:size", { choice, ops: ops.length });
   }
 
   /** Clear the explicit fill on the selected topics only (menu "Reset"). */
@@ -2633,7 +2800,7 @@ export class EditorStore {
       // so the block keeps the code surface instead of wearing the branch
       // colour.
       if (!n || n.style.code) continue;
-      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: sid, style: { ...n.style, fill: color }, prev: n.style }));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: sid, style: this.topicStyle(n, { fill: color }), prev: n.style }));
     }
     this.execOps(ops);
   }
@@ -2759,15 +2926,38 @@ export class EditorStore {
     this.setNodeImage(nodeId, card.id, position);
   }
 
+  moveImageIntoFreeform(fromId: string, slot: ImageSlot, canvasId: string, x: number, y: number): void {
+    const source = this.model.node(fromId), canvas = this.model.node(canvasId);
+    const imageId = source?.style[slotKey(slot)];
+    if (!source || !canvas?.style.freeform || !imageId) return;
+    const id = uid("n");
+    const offset = { x: Math.max(FREEFORM_PADDING, x - canvas.position.x), y: Math.max(FREEFORM_HEADER + FREEFORM_PADDING, y - canvas.position.y) };
+    this.execOps([
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id, nodeType: "subtopic", parentId: canvasId, index: canvas.childrenIds.length,
+        title: "", titleRuns: [], style: { image: imageId, imageWidth: source.style.imageWidth ?? 180, freeformPosition: offset },
+        position: { x, y, manual: false },
+      }),
+      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: fromId, imageId: null, prevImageId: imageId, position: slot }),
+    ]);
+    this.settleLayoutNow(); this.select(id);
+  }
+
   /**
    * Full import+attach flow (T13-2): validate, import in the worker, store
    * the three levels in the AssetStore, then reference the node. Every
    * rejection says why (rule §4bis of AGENT_GUIDE).
    */
   async attachImageFile(nodeId: string, file: Blob & { name?: string }, position: ImageSlot = "top"): Promise<{ ok: boolean; reason?: string }> {
+    const sheet = this.sheet;
     const res = await this.importToCard(file);
     if (!res.ok) return { ok: false, reason: res.reason };
-    this.attachImage(nodeId, res.card, position);
+    if (this.sheet !== sheet || !this.model.node(nodeId)) return { ok: false, reason: "Target topic is no longer open" };
+    const node = this.model.requireNode(nodeId);
+    if (node.style.freeform) {
+      if (!sheet.attachments.some((a) => a.id === res.card.id)) sheet.attachments.push({ ...res.card });
+      this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
+    } else this.attachImage(nodeId, res.card, position);
     trace.applied("drop:image", { bytes: res.card.bytes, w: res.card.w, h: res.card.h });
     return { ok: true };
   }
@@ -3120,6 +3310,12 @@ export class EditorStore {
   // Canvas resize drag (Xmind-style handle) — ephemeral draft, single commit
   // -------------------------------------------------------------------------
 
+  private freeformMinimumSize(id: string): { w: number; h: number } {
+    const resolve = imageResolver(this.sheet);
+    const bounds = freeformContentBounds(this.sheet, id, (node) => measureNode(node, this.measurer, resolve));
+    return { w: Math.max(240, Math.ceil(bounds.maxX + FREEFORM_PADDING)), h: Math.max(160, Math.ceil(bounds.maxY + FREEFORM_PADDING)) };
+  }
+
   /** A resize drag started on this node: capture the pre-drag style + position. */
   beginResize(nodeId: string): void {
     const node = this.model.node(nodeId);
@@ -3134,13 +3330,30 @@ export class EditorStore {
    * nodes and would otherwise snap the position back every 30ms. The flag
    * is restored to its original value by commitResize.
    */
-  setResizeDraft(nodeId: string, width: number, opts?: { anchorRight?: boolean; x?: number }): void {
+  setResizeDraft(nodeId: string, width: number, opts?: { anchorRight?: boolean; x?: number; height?: number }): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const w = Math.round(Math.min(640, Math.max(MIN_TOPIC_W, width)));
-    node.style = { ...node.style, width: w };
+    const min = node.style.freeform ? this.freeformMinimumSize(nodeId) : { w: MIN_TOPIC_W, h: 0 };
+    const w = Math.max(min.w, Math.round(Math.min(node.style.freeform ? 6000 : 640, width)));
+    node.style = { ...node.style, width: w, ...(node.style.freeform && opts?.height !== undefined ? { height: Math.max(min.h, Math.round(Math.min(6000, opts.height))) } : {}) };
     if (opts?.anchorRight && typeof opts.x === "number") {
-      node.position = { ...node.position, x: opts.x, manual: true };
+      const drag = this.resizeState;
+      if (drag?.nodeId === nodeId && freeformOwner(this.sheet, nodeId) && node.parentId) {
+        const parent = this.model.requireNode(node.parentId);
+        const oldWidth = measureNode({ ...node, style: drag.original }, this.measurer, imageResolver(this.sheet)).w;
+        let newWidth = measureNode(node, this.measurer, imageResolver(this.sheet)).w;
+        const original = drag.original.freeformPosition ?? freeformOffset(node, parent.childrenIds.indexOf(nodeId));
+        const canvasId = freeformOwner(this.sheet, nodeId)!;
+        const canvas = this.model.requireNode(canvasId);
+        const available = parent.position.x + original.x + oldWidth - canvas.position.x - FREEFORM_PADDING;
+        if (newWidth > available) {
+          node.style = { ...node.style, width: Math.max(MIN_TOPIC_W, Math.floor(w - (newWidth - available))) };
+          newWidth = measureNode(node, this.measurer, imageResolver(this.sheet)).w;
+        }
+        const local = { ...original, x: original.x + oldWidth - newWidth };
+        node.style = { ...node.style, freeformPosition: local };
+        node.position = { ...node.position, x: parent.position.x + local.x };
+      } else node.position = { ...node.position, x: opts.x, manual: true };
     }
     this.scheduleLayout(false);
     this.notify();
@@ -3158,9 +3371,10 @@ export class EditorStore {
     // A left-edge drag moves position.x. It persists only for floating or
     // already-manual nodes; auto-layout nodes return to the layout's slot
     // (the width is what survives there — the next applyLayout re-pins x).
-    const keepX = xChanged && (node.type === "floating" || r.origPos.manual);
+    const inFreeform = !!freeformOwner(this.sheet, node.id);
+    const keepX = !inFreeform && xChanged && (node.type === "floating" || r.origPos.manual);
     const ops: Op[] = [];
-    if (w !== undefined && w !== r.original.width) {
+    if (w !== undefined && (w !== r.original.width || node.style.height !== r.original.height || node.style.freeformPosition?.x !== r.original.freeformPosition?.x)) {
       ops.push(
         makeOp<Op & { type: "setStyle" }>("setStyle", {
           id: r.nodeId,
@@ -3179,11 +3393,12 @@ export class EditorStore {
           prev: r.origPos,
         })
       );
-    } else if (xChanged) {
+    } else if (xChanged && !inFreeform) {
       node.position = { ...r.origPos };
     }
     if (ops.length > 0) {
       this.execOps(ops);
+      if (inFreeform) this.settleLayoutNow();
     } else {
       // click without a real change — restore the pre-drag state, no op
       node.style = r.original;
@@ -3596,6 +3811,10 @@ export class EditorStore {
         // would be a second renderer over the source, which is the §3 drift
         // this feature deliberately stays out of — but pasting code into it
         // is exactly how it gets content now that it can be born empty.
+        if (target.style.freeform) {
+          this.createFreeformItem(target.id, undefined, undefined, text);
+          return;
+        }
         if (target.style.code) {
           this.setCodeSource(target.id, text);
           this.toast("Pasted code into topic");
@@ -3671,6 +3890,16 @@ export class EditorStore {
       place
         ? { x: place.origin.x + (n.position.x - place.rootPos.x), y: place.origin.y + (n.position.y - place.rootPos.y), manual: true }
         : undefined;
+    const canvasParent = parentId ? this.model.node(parentId) : undefined;
+    const inCanvas = !!canvasParent && (canvasParent.style.freeform || freeformOwner(this.sheet, canvasParent.id));
+    const localStyle = (n: MindNode, root: boolean): Style => {
+      if (!inCanvas) return n.style;
+      const oldParent = source.find((candidate) => candidate.id === n.parentId);
+      const offset = root
+        ? { x: (place?.origin.x ?? canvasParent!.position.x + 24) - canvasParent!.position.x, y: (place?.origin.y ?? canvasParent!.position.y + 60) - canvasParent!.position.y }
+        : n.style.freeformPosition ?? { x: n.position.x - (oldParent?.position.x ?? 0), y: n.position.y - (oldParent?.position.y ?? 0) };
+      return { ...n.style, freeformPosition: offset };
+    };
     const idMap = new Map<string, string>();
     this.lastRemap = idMap;
     const ops: Op[] = [];
@@ -3686,7 +3915,7 @@ export class EditorStore {
         index,
         title: srcRoot.title,
         titleRuns: srcRoot.titleRuns,
-        style: srcRoot.style,
+        style: localStyle(srcRoot, true),
         task: srcRoot.task,
         position: placed(srcRoot),
       })
@@ -3707,7 +3936,7 @@ export class EditorStore {
             index: src.childrenIds.indexOf(cid),
             title: c.title,
             titleRuns: c.titleRuns,
-            style: c.style,
+            style: localStyle(c, false),
             task: c.task,
             position: placed(c),
           })
@@ -3727,7 +3956,7 @@ export class EditorStore {
    * a single Ctrl+Z removes the whole thing, which is the only behaviour that
    * makes sense for something inserted with one gesture.
    */
-  insertShape(template: ShapeTemplate, anchorId: string): void {
+  insertShape(template: ShapeTemplate, anchorId: string, at?: { x: number; y: number }): void {
     const anchorNode = this.model.node(anchorId);
     if (!anchorNode) return trace.ignored("shape:insert", "anchor topic is gone");
     const { rootId, nodes, relationships } = template.payload;
@@ -3735,7 +3964,7 @@ export class EditorStore {
     if (!srcRoot) return trace.ignored("shape:insert", "template has no root", { shape: template.id });
 
     const type: NodeType = anchorNode.type === "central" ? "main" : "subtopic";
-    const origin = this.createNodePosition(anchorNode);
+    const origin = at ?? this.createNodePosition(anchorNode);
     // Freeze each topic's box at the size it is born with.
     //
     // `position` is a top-left corner, so a topic that grows extends right and

@@ -369,3 +369,44 @@ describe("setBranchColor", () => {
     expect(store.undo()).toBeUndefined();
   });
 });
+
+
+describe("freeform topic fill", () => {
+  it("uses transparency for ordinary contents instead of branch inheritance", () => {
+    const r = makeRenderer(), sheet = makeSheet();
+    sheet.nodes.a.style = {freeform:true, fill:"#ff8800",width:720,height:480};
+    const state = stateOf(sheet);
+    expect(r.nodeColors(state,"a1")!.fill).toBe("transparent");
+    expect(r.nodeColors(state,"a1x")!.fill).toBe("transparent");
+    expect(r.nodeColors(state,"b")!.fill).toBe(THEMES.light.branch[1]);
+    sheet.nodes.a1.style.fill = "#123456";
+    expect(r.nodeColors(state,"a1")!.fill).toBe("#123456");
+    expect(r.nodeColors(state,"a1x")!.fill).toBe("transparent");
+  });
+  it("makes a text-only item visibly filled with Inspector Fill, including undo/redo", () => {
+    const r=makeRenderer(), store=new EditorStore(memoryAdapter);
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board=store.getSnapshot().selection[0];
+    const id=store.createFreeformItem(board,undefined,undefined,"Label")!;
+    const n=store.doc.requireNode(id), state=stateOf(store.sheet);
+    expect(r.nodeColors(state,id)!.fill).toBe("transparent");
+    expect(n.style.shape).toBe("none");
+    store.setNodeStyle(id,{fill:"#22cc88"});
+    expect(r.nodeColors(state,id)!.fill).toBe("#22cc88");
+    expect(n.style.shape).toBe("rounded");
+    store.undo(); expect(r.nodeColors(state,id)!.fill).toBe("transparent");expect(n.style.shape).toBe("none");
+    store.redo();expect(n.style.fill).toBe("#22cc88");expect(n.style.shape).toBe("rounded");
+    store.select(id);store.resetSelectionColor();
+    expect(r.nodeColors(state,id)!.fill).toBe("transparent");
+  });
+  it("also reveals Fill from the context menu without changing text-only topics outside a canvas", () => {
+    const store=new EditorStore(memoryAdapter);
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const id=store.createFreeformItem(store.getSnapshot().selection[0],undefined,undefined,"Label")!;
+    store.select(id);store.setSelectionColor("#123456");
+    expect(store.doc.requireNode(id).style).toMatchObject({fill:"#123456",shape:"rounded"});
+    const outside=store.createChildOf(store.sheet.rootNodeId)!;store.commitEdit();
+    store.setNodeStyle(outside,{shape:"none"});store.setNodeStyle(outside,{fill:"#abcdef"});
+    expect(store.doc.requireNode(outside).style.shape).toBe("none");
+  });
+});

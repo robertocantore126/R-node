@@ -134,6 +134,10 @@ export interface QuizInfo {
 }
 
 export interface Style {
+  /** Topic containing freely positioned document nodes. */
+  freeform?: boolean;
+  /** Position relative to the parent inside a freeform topic. */
+  freeformPosition?: { x: number; y: number };
   fill?: string;
   stroke?: string;
   borderWidth?: number;

@@ -1,3 +1,4 @@
+import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
 /**
  * Canvas renderer — one <canvas>, no DOM/SVG nodes per topic.
  *
@@ -327,6 +328,8 @@ export class Renderer {
         Math.max(a.y + a.h, b.y + b.h) >= viewMinY &&
         Math.min(a.y, b.y) <= viewMaxY);
 
+    for (const p of placed) if (p.visible && p.node.style.freeform) this.drawFreeform(theme, p);
+
     // 1) relationships
     let rels = 0;
     let relsDrawn = 0;
@@ -346,7 +349,7 @@ export class Renderer {
     for (const p of placed) {
       if (!p.node.parentId) continue;
       const parent = byId.get(p.node.parentId);
-      if (!parent) continue;
+      if (!parent || parent.node.style.freeform) continue;
       links++;
       if (!linkVisible(parent, p)) continue;
       linksDrawn++;
@@ -362,7 +365,7 @@ export class Renderer {
     // 3) nodes
     for (const p of placed) {
       if (!p.visible) continue;
-      this.drawNode(theme, p, state);
+      this.drawNode(theme, p, state, false);
     }
 
     // 3b) in-map search highlights. Drawn from the placed list, so only VISIBLE
@@ -528,6 +531,7 @@ export class Renderer {
    */
   private resolveFill(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     if (n.style.fill) return n.style.fill;
+    if (!n.style.freeform && freeformOwner(sheet, n.id)) return "transparent";
     const depth = this.depthOf(n, sheet);
     if (depth === 0) return theme.rootFill;
     if (depth === 1) {
@@ -627,11 +631,49 @@ export class Renderer {
     ctx.strokeRect(p.x - RING_PAD, p.y - RING_PAD, p.w + RING_PAD * 2, p.h + RING_PAD * 2);
   }
 
-  private drawNode(theme: RenderTheme, p: Placed, state: RenderState): void {
+  private drawFreeform(theme: RenderTheme, p: Placed): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.fillStyle = p.node.style.fill ?? theme.background;
+    ctx.strokeStyle = p.node.style.stroke ?? theme.nodeBorder;
+    ctx.lineWidth = p.node.style.borderWidth ?? 1;
+    ctx.beginPath();
+    ctx.roundRect(p.x, p.y, p.w, p.h, 12);
+    ctx.fill(); ctx.stroke();
+    ctx.save(); ctx.clip();
+    ctx.strokeStyle = theme.textMuted;
+    ctx.globalAlpha = 0.13;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    for (let x = p.x; x < p.x + p.w; x += 20) { ctx.moveTo(x, p.y + FREEFORM_HEADER); ctx.lineTo(x, p.y + p.h); }
+    for (let y = p.y + FREEFORM_HEADER; y < p.y + p.h; y += 20) { ctx.moveTo(p.x, y); ctx.lineTo(p.x + p.w, y); }
+    ctx.stroke(); ctx.restore();
+    ctx.fillStyle = theme.text;
+    ctx.font = `600 13px ${FONT_STACK}`;
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText(p.node.title || "Freeform", p.x + 14, p.y + FREEFORM_HEADER / 2, p.w - 28);
+    if (p.node.childrenIds.length === 0) {
+      ctx.fillStyle = theme.textMuted; ctx.font = `13px ${FONT_STACK}`;
+      ctx.fillText("Double-click to add text. Drop nodes, text or images here.", p.x + 18, p.y + FREEFORM_HEADER + 28, p.w - 36);
+    }
+    ctx.restore();
+  }
+
+  private drawNode(theme: RenderTheme, p: Placed, state: RenderState, paintBackground = true): void {
     const ctx = this.ctx;
     const n = p.node;
     const editing = state.editingId === n.id;
     const selected = state.selection.has(n.id);
+    if (n.style.freeform) {
+      if (paintBackground) this.drawFreeform(theme, p);
+      if (selected || state.hoverId === n.id) {
+        ctx.save(); ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, p, selected ? RING_W_SELECTED : RING_W_HOVER);
+        if (selected) { ctx.fillStyle = theme.selection; const hs = 8 / state.camera.scale; ctx.fillRect(p.x + p.w - hs / 2, p.y + p.h - hs / 2, hs, hs); }
+        ctx.restore();
+      }
+      return;
+    }
     // A code topic paints its own block (T22): the box wears the code surface
     // unless the user picked a fill of their own, and the rich-text/image
     // path below is skipped entirely.
@@ -1864,10 +1906,14 @@ export class Renderer {
    */
   hitTest(state: RenderState, worldX: number, worldY: number, skip?: (id: string) => boolean): string | null {
     const placed = this.placedNodes(state).filter((p) => p.visible);
-    for (let i = placed.length - 1; i >= 0; i--) {
-      const p = placed[i];
-      if (skip?.(p.node.id)) continue;
-      if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
+    // Board backgrounds are painted before all ordinary topics. Use that
+    // same two-layer order here, including nested/overlapping canvases.
+    for (const background of [false, true]) {
+      for (let i = placed.length - 1; i >= 0; i--) {
+        const p = placed[i];
+        if (!!p.node.style.freeform !== background || skip?.(p.node.id)) continue;
+        if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
+      }
     }
     return null;
   }
@@ -2102,6 +2148,7 @@ export class Renderer {
   private paintFull(_ctx: CanvasRenderingContext2D, state: RenderState, theme: RenderTheme): void {
     const all = this.placedNodes({ ...state, showHidden: true });
     const byId = new Map(all.map((p) => [p.node.id, p]));
+    for (const p of all) if (p.node.style.freeform) this.drawFreeform(theme, p);
     for (const rel of state.sheet.relationships) {
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
@@ -2110,7 +2157,7 @@ export class Renderer {
     for (const p of all) {
       if (p.node.parentId) {
         const parent = byId.get(p.node.parentId);
-        if (parent)
+        if (parent && !parent.node.style.freeform)
           this.drawConnector(
             parent,
             p,
@@ -2120,7 +2167,7 @@ export class Renderer {
           );
       }
     }
-    for (const p of all) this.drawNode(theme, p, { ...state, showHidden: true });
+    for (const p of all) this.drawNode(theme, p, { ...state, showHidden: true }, false);
     // export with a fixed 1px-ish stroke scale
     this.drawGroupsAndSummaries(theme, { ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);
   }

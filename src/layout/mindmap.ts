@@ -23,6 +23,7 @@
  *    below (vertical).
  *  - freeform: nothing — manual positions only.
  */
+import { freeformOwner, freeformOffset } from "../core/freeform";
 import type { MindNode, Sheet } from "../core/types";
 import { imageResolver, measureNode, type TextMeasurer } from "./measure";
 
@@ -124,7 +125,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     const n = sheet.nodes[id];
     if (!n) return 0;
     const h = size(n).h;
-    if (n.collapsed || n.childrenIds.length === 0) {
+    if (n.style.freeform || n.collapsed || n.childrenIds.length === 0) {
       cacheH.set(id, h);
       return h;
     }
@@ -146,7 +147,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     const n = sheet.nodes[id];
     if (!n) return 0;
     const w = size(n).w;
-    if (n.collapsed || n.childrenIds.length === 0) {
+    if (n.style.freeform || n.collapsed || n.childrenIds.length === 0) {
       cacheW.set(id, w);
       return w;
     }
@@ -161,6 +162,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     for (const n of Object.values(sheet.nodes)) {
       if (force || n.position.manual) positions.set(n.id, { x: n.position.x, y: n.position.y });
     }
+    placeFreeformContents();
     return { positions, bounds: boundsOf(positions, sheet, size) };
   }
 
@@ -174,8 +176,28 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   }
 
   if (st.structureType === "mindmap") resolveIntersections(root.id);
+  placeFreeformContents();
 
   return { positions, bounds: boundsOf(positions, sheet, size) };
+
+  function placeFreeformContents(): void {
+    // Content coordinates are local to their parent, unaffected by auto layout.
+    const placeContents = (id: string): void => {
+      const parent = sheet.nodes[id];
+      if (!parent || parent.collapsed) return;
+      const origin = positions.get(id) ?? parent.position;
+      parent.childrenIds.forEach((childId, index) => {
+        const child = sheet.nodes[childId];
+        if (!child) return;
+        const offset = freeformOffset(child, index);
+        positions.set(childId, { x: origin.x + offset.x, y: origin.y + offset.y });
+        placeContents(childId);
+      });
+    };
+    for (const n of Object.values(sheet.nodes)) {
+      if (n.style.freeform && !freeformOwner(sheet, n.id)) placeContents(n.id);
+    }
+  }
 
   // -- recursive placers ---------------------------------------------------
 
@@ -185,7 +207,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     const { w, h } = size(n);
     positions.set(id, isAuto(id) ? { x: cx - w / 2, y: cy - h / 2 } : { x: n.position.x, y: n.position.y });
 
-    if (n.collapsed || n.childrenIds.length === 0) return;
+    if (n.style.freeform || n.collapsed || n.childrenIds.length === 0) return;
     const kids = n.childrenIds.map((c) => sheet.nodes[c]).filter((c): c is MindNode => !!c);
 
     if (side === 0) {
@@ -271,7 +293,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     const { w, h } = size(n);
     positions.set(id, isAuto(id) ? { x: cx - w / 2, y: cy - h / 2 } : { x: n.position.x, y: n.position.y });
 
-    if (n.collapsed || n.childrenIds.length === 0) return;
+    if (n.style.freeform || n.collapsed || n.childrenIds.length === 0) return;
     const kids = n.childrenIds.map((c) => sheet.nodes[c]).filter((c): c is MindNode => !!c);
 
     if (dir === "right") {
@@ -304,7 +326,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
         const h = size(node).h;
         minY = Math.min(minY, p.y);
         maxY = Math.max(maxY, p.y + h);
-        if (!node.collapsed) for (const childId of node.childrenIds) visit(childId);
+        if (!node.collapsed && !node.style.freeform) for (const childId of node.childrenIds) visit(childId);
       };
       visit(id);
       return { minY, maxY };
@@ -317,12 +339,12 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
         const p = positions.get(id) ?? { x: node.position.x, y: node.position.y };
         positions.set(id, { x: p.x, y: p.y + dy });
       }
-      if (!node.collapsed) for (const childId of node.childrenIds) shiftAutoSubtree(childId, dy);
+      if (!node.collapsed && !node.style.freeform) for (const childId of node.childrenIds) shiftAutoSubtree(childId, dy);
     };
 
     const resolveNode = (parentId: string): void => {
       const parent = sheet.nodes[parentId];
-      if (!parent || parent.collapsed) return;
+      if (!parent || parent.collapsed || parent.style.freeform) return;
       for (const childId of parent.childrenIds) resolveNode(childId);
       const children = parent.childrenIds.map((id) => sheet.nodes[id]).filter((n): n is MindNode => !!n && positions.has(n.id));
       if (children.length < 2) return;
@@ -397,7 +419,7 @@ export function applyLayout(sheet: Sheet, force: boolean, measurer?: TextMeasure
   for (const [id, p] of result.positions) {
     const n = sheet.nodes[id];
     if (!n) continue;
-    if (clearManual || force || !n.position.manual) {
+    if (clearManual || force || !n.position.manual || freeformOwner(sheet, id)) {
       n.position = {
         x: p.x,
         y: p.y,

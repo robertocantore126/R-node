@@ -1,3 +1,4 @@
+import { FREEFORM_HEADER } from "../core/freeform";
 /**
  * SVG export — the whole map as one vector document.
  *
@@ -437,13 +438,18 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     parts.push(`<rect x="${n3(minX)}" y="${n3(minY)}" width="${n3(width)}" height="${n3(height)}" fill="${esc(opts.background)}"/>`);
   }
 
+  for (const p of placed) {
+    if (!p.node.style.freeform) continue;
+    parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${n3(p.h)}" rx="12" fill="${esc(p.node.style.fill ?? "#ffffff")}" stroke="${esc(p.node.style.stroke ?? "#94a3b8")}"/>`);
+    parts.push(`<text x="${n3(p.x + 14)}" y="${n3(p.y + FREEFORM_HEADER / 2)}" dominant-baseline="middle" font-size="13" font-weight="600" fill="#1a1a1a">${esc(p.node.title || "Freeform")}</text>`);
+  }
   // Connectors first, then relationships, so every box paints over the line
   // that reaches it — the arrowheads sit at the borders and stay visible.
   parts.push("<g>");
   for (const p of placed) {
     if (!p.node.parentId) continue;
     const parent = byId.get(p.node.parentId);
-    if (parent) parts.push(connector(parent, p, sheet, opts.linkColorOf(p.node.id)));
+    if (parent && !parent.node.style.freeform) parts.push(connector(parent, p, sheet, opts.linkColorOf(p.node.id)));
   }
   parts.push("</g>");
 
@@ -465,6 +471,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   let imagesMissing = 0;
   for (const p of placed) {
     const n = p.node;
+    if (n.style.freeform) continue;
     const colors = opts.colorOf(n.id);
     const fill = colors?.fill ?? "#ffffff";
     const text = colors?.text ?? "#1a1a1a";
