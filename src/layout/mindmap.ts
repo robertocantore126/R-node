@@ -292,6 +292,13 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     if (!n) return;
     const { w, h } = size(n);
     positions.set(id, isAuto(id) ? { x: cx - w / 2, y: cy - h / 2 } : { x: n.position.x, y: n.position.y });
+    // A dragged (manual) topic anchors its children where it actually IS, as
+    // the mindmap layout already does: laying them out from the auto slot it
+    // was dragged away from left them behind, on short, crooked connectors.
+    if (!isAuto(id)) {
+      cx = n.position.x + w / 2;
+      cy = n.position.y + h / 2;
+    }
 
     if (n.style.freeform || n.collapsed || n.childrenIds.length === 0) return;
     const kids = n.childrenIds.map((c) => sheet.nodes[c]).filter((c): c is MindNode => !!c);

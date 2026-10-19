@@ -29,7 +29,7 @@ import { createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
-import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
+import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, readForOverwrite, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { buildRnodeFile, isSqliteFile, readRnodeFile } from "../persist/rnodeFile";
@@ -506,6 +506,20 @@ export class EditorStore {
       // save recreate an empty document at a path the user no longer has.
       if (this.adapter instanceof TauriStorageAdapter) this.adapter.setRoot(null);
     }
+    // The adapters check only that `sheets` is an array. A document with no
+    // sheet, or whose first sheet has lost its root node, passed that check
+    // and then threw in `new DocumentModel` below — outside the try, so the
+    // app never mounted. Keep only the documents that can actually open.
+    // Nothing is written back here: storage keeps the bad one until a save.
+    const openable = docs.filter((d) => {
+      const sh = d.sheets[0];
+      return !!sh && !!sh.nodes && !!sh.nodes[sh.rootNodeId];
+    });
+    if (openable.length < docs.length) {
+      trace.error("init:incompatible-schema", `${docs.length - openable.length} stored document(s) cannot be opened`);
+      initError ??= documentLoadErrorLabel("incompatible-schema");
+      docs = openable;
+    }
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
       // The restored document keeps its file for the whole session: switching
@@ -836,7 +850,12 @@ export class EditorStore {
     // Overwrite protection: "Save as…" onto a file that already holds a
     // DIFFERENT document would destroy that map. The same document (a
     // re-save) or an empty file is fine.
-    const existing = await this.adapter.readDocumentAt(file).catch(() => null);
+    const read = await readForOverwrite(this.adapter, file);
+    if (!read.ok) {
+      this.toast(`"${titleFromDocPath(file)}" cannot be read (${read.reason}) — not overwriting it`);
+      return "refused";
+    }
+    const existing = read.doc;
     if (existing && existing.documentId !== this.model.doc.documentId) {
       this.toast(`"${titleFromDocPath(file)}" contains a different document — saving here would overwrite it`);
       return "refused";
@@ -1538,6 +1557,9 @@ export class EditorStore {
     this.state.summarySel = null;
     this.state.imageSel = nodeId;
     this.state.imageSlot = slot;
+    // Exclusive means exclusive: a cell selection left behind here made the
+    // next Delete remove that old gallery cell instead of this image.
+    this.state.gallerySel = null;
     this.notify();
   }
 
@@ -2350,21 +2372,39 @@ export class EditorStore {
 
   /** Delete nodes (and descendants); central topic is protected. */
   deleteNodes(ids: string[]): void {
-    const pruned = ids.filter((id) => id !== this.sheet.rootNodeId);
-    const toDelete: string[] = [];
-    for (const id of pruned) {
-      if (toDelete.some((d) => this.isDescendant(d, id))) continue;
-      toDelete.push(id);
-    }
+    const pruned = [...new Set(ids)].filter((id) => id !== this.sheet.rootNodeId && this.model.node(id));
+    // Drop every id that has an ANCESTOR in the set, whatever order the
+    // selection lists them in. Checking only the ids kept so far let a child
+    // listed before its ancestor through: two ops, and the undo restored the
+    // child into a parent that the ancestor's restore had already brought back
+    // with it — the same id twice in childrenIds.
+    const toDelete = pruned.filter((id) => !pruned.some((other) => other !== id && this.isDescendant(other, id)));
     const ops: Op[] = [];
+    // Each op's index must be the child's position at the moment THAT op
+    // runs, i.e. after the earlier deletes of the batch. Undo replays the
+    // inverses last-first, so with batch-start indices siblings [A,B,C] came
+    // back as [A,C,B]. Simulate the parents' lists as the batch shrinks them.
+    const liveKids = new Map<string, string[]>();
+    // A relationship joining two deleted subtrees is carried by ONE op only:
+    // otherwise both restores push it and undo duplicates it.
+    const claimedRels = new Set<string>();
     for (const id of toDelete) {
-      const node = this.model.node(id);
-      if (!node) continue;
+      const node = this.model.node(id)!;
       const subtree = this.model.subtreeIds(id).map((sid) => this.model.node(sid)!).filter(Boolean);
       const subtreeSet = new Set(subtree.map((s) => s.id));
-      const removedRelationships = this.sheet.relationships.filter((r) => subtreeSet.has(r.fromId) || subtreeSet.has(r.toId));
+      const removedRelationships = this.sheet.relationships.filter(
+        (r) => !claimedRels.has(r.id) && (subtreeSet.has(r.fromId) || subtreeSet.has(r.toId))
+      );
+      for (const r of removedRelationships) claimedRels.add(r.id);
       const parentId = node.parentId;
-      const index = parentId ? this.model.requireNode(parentId).childrenIds.indexOf(id) : 0;
+      let index = 0;
+      if (parentId) {
+        let kids = liveKids.get(parentId);
+        if (!kids) liveKids.set(parentId, (kids = [...this.model.requireNode(parentId).childrenIds]));
+        index = kids.indexOf(id);
+        if (index >= 0) kids.splice(index, 1);
+        else index = 0;
+      }
       ops.push(makeOp<Op & { type: "deleteNode" }>("deleteNode", { id, parentId, index, subtree, removedRelationships }));
     }
     // Drop groups/summaries whose members are all gone (their boxes/braces
@@ -3275,7 +3315,16 @@ export class EditorStore {
    */
   async gcOrphans(assetStore?: AssetStore): Promise<void> {
     const store = assetStore ?? getAssetStore();
-    const report = await collectOrphans(this.sheet, store);
+    // Every other sheet this session knows — the other sheets of this
+    // document and every other open document — keeps its blobs alive.
+    const others = new Set<Sheet>();
+    // The active document is read from the model only: a copy of it in the
+    // docs list may be an older version that still references what is now
+    // garbage, and would keep it alive forever.
+    const activeId = this.model.doc.documentId;
+    const docs = [this.model.doc, ...this.state.docs.filter((d) => d.documentId !== activeId)];
+    for (const d of docs) for (const sh of d.sheets) if (sh !== this.sheet) others.add(sh);
+    const report = await collectOrphans(this.sheet, store, others);
     if (report.cards.length === 0 && report.blobs.length === 0) {
       this.toast("Nothing to collect — no orphaned images");
       return;
@@ -3749,8 +3798,16 @@ export class EditorStore {
   }
 
   async cutSelection(): Promise<void> {
+    // Read what is selected BEFORE the copy awaits: the cut must remove the
+    // thing that was copied. A selected gallery cell or image is copied on
+    // its own (copySelection), and its topic stays selected underneath — so
+    // deleting "the selection" here would delete the whole topic.
+    const s = this.state;
+    const what = s.gallerySel ? "cell" : s.imageSel ? "image" : "topics";
     await this.copySelection();
-    this.deleteSelection();
+    if (what === "cell") this.deleteSelectedGalleryCell();
+    else if (what === "image") this.deleteSelectedImage();
+    else this.deleteSelection();
   }
 
   /** Let the native paste event expose OS file copies; fall back when no event arrives. */

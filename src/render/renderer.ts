@@ -2177,9 +2177,23 @@ export class Renderer {
       ctx.fillStyle = theme.background;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
-    this.curScale = scale;
     ctx.setTransform(scale, 0, 0, scale, -bounds.minX * scale, -bounds.minY * scale);
-    this.paintFull(ctx, state, theme);
+    // Every draw* method paints on `this.ctx`. Without the swap the whole map
+    // went onto the LIVE canvas (repainted a frame later) and the exported PNG
+    // came out as a blank background — the same swap renderNodeImage does.
+    const liveCtx = this.ctx;
+    const liveScale = this.curScale;
+    const liveDpr = this.dpr;
+    this.ctx = ctx;
+    this.curScale = scale;
+    this.dpr = 1;
+    try {
+      this.paintFull(ctx, state, theme);
+    } finally {
+      this.ctx = liveCtx;
+      this.curScale = liveScale;
+      this.dpr = liveDpr;
+    }
     return canvas;
   }
 

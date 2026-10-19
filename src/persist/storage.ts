@@ -57,6 +57,28 @@ export function documentLoadErrorLabel(kind: DocumentLoadErrorKind): string {
 }
 
 /**
+ * What a file about to be OVERWRITTEN holds, for the "different document"
+ * guard of Save as. Only "there is nothing there" counts as empty: a missing
+ * file (null, or a `not-found` error). Any other read failure — corrupt,
+ * permission, invalid JSON, not an R-node document — means the guard cannot
+ * see what it would destroy, so it reports `unreadable` and the caller
+ * refuses. Swallowing every error as "empty" is how a damaged map, which
+ * might still be recoverable, got written over.
+ */
+export async function readForOverwrite(
+  adapter: { readDocumentAt(path: string): Promise<RnodeDocument | null> },
+  path: string,
+): Promise<{ ok: true; doc: RnodeDocument | null } | { ok: false; reason: string }> {
+  try {
+    return { ok: true, doc: await adapter.readDocumentAt(path) };
+  } catch (e) {
+    if (e instanceof DocumentLoadError && e.kind === "not-found") return { ok: true, doc: null };
+    const kind = e instanceof DocumentLoadError ? e.kind : "sqlite";
+    return { ok: false, reason: documentLoadErrorLabel(kind) };
+  }
+}
+
+/**
  * Map a rejected Tauri `read_document` call to a typed error. The kind is a
  * best-effort reading of the backend message; the message itself is always
  * preserved verbatim because it is what the developer needs.

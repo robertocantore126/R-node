@@ -135,7 +135,11 @@ export function applyOp(sheet: Sheet, op: Op): void {
         const parent = nodes[op.parentId];
         if (parent) parent.childrenIds.splice(clampIndex(op.index, parent.childrenIds.length), 0, op.id);
       }
-      for (const rel of op.removedRelationships) sheet.relationships.push(rel);
+      // Idempotent by id: a relationship must never come back twice, whatever
+      // batch produced the op (deleteNodes now gives each one to a single op).
+      for (const rel of op.removedRelationships) {
+        if (!sheet.relationships.some((r) => r.id === rel.id)) sheet.relationships.push(rel);
+      }
       break;
     }
     case "deleteNode": {

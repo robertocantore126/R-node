@@ -84,7 +84,9 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
   if (mod) parts.push("Mod");
   if (e.shiftKey && !["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) parts.push("Shift");
   if (e.altKey) parts.push("Alt");
-  parts.push(e.key === " " ? "Space" : e.key);
+  // Letters are matched lower-case: with Shift (or Caps Lock) held, e.key is
+  // "Z", and the table spells "Mod+Shift+z" — so Ctrl+Shift+Z/C/F never fired.
+  parts.push(e.key === " " ? "Space" : e.key.length === 1 ? e.key.toLowerCase() : e.key);
   const combo = parts.join("+");
   const key = e.key === " " ? "Space" : e.key;
 

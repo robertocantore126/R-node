@@ -513,7 +513,23 @@ export function wrapRunLines(runs: TextRun[], maxW: number, measurer: TextMeasur
       firstLine = false;
     };
 
-    for (const tok of tokens) {
+    for (let ti = 0; ti < tokens.length; ti++) {
+      const tok = tokens[ti];
+      // A word split across runs (bold "he" + plain "llo") is several tokens
+      // but ONE word to the browser: it moves to the next line whole. At the
+      // word's first piece, measure all its pieces together, and if the word
+      // fits a line on its own but not the rest of this one, break BEFORE it
+      // — without this the tail piece alone wrapped, mid-word. A word wider
+      // than the whole column still breaks inside, below, as break-word does.
+      if (!/^\s+$/.test(tok.text) && line.length > 0 && (ti === 0 || /^\s+$/.test(tokens[ti - 1].text))) {
+        let wordW = 0;
+        let pieces = 0;
+        for (let k = ti; k < tokens.length && !/^\s+$/.test(tokens[k].text); k++) {
+          wordW += widthOf(tokens[k].text, tokens[k].run);
+          pieces++;
+        }
+        if (pieces > 1 && lineWidth + wordW > budget && wordW <= budget) push();
+      }
       if (/^\s+$/.test(tok.text)) {
         if (line.length > 0) {
           line.push(tok);
@@ -1162,27 +1178,10 @@ function measureTopicUncached(
   const maxW = style.width ? Math.max(MIN_TOPIC_W, style.width) : MAX_TOPIC_W;
   const textW = Math.max(24, maxW - pad * 2 - TEXT_INSET - sidePadW);
   const runs = nodeRuns(n.title, n.titleRuns);
-  const lines = wrapRunLines(runs, textW, measurer, style);
+  let lines = wrapRunLines(runs, textW, measurer, style);
   // the list indent is part of the line's extent, not free space
   const maxLineW = lines.reduce((acc, l) => Math.max(acc, (l.indent ?? 0) + l.width), 0);
-
-  // An empty title still yields one strut line; "has text" means real content.
-  const hasText = lines.some((l) => l.segments.length > 0);
-  const textH = lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapPx ?? 0), 0);
-
-  // Middle column: top image, text, gallery grid, bottom image. A gap
-  // separates each present block from the next but never appears when nothing
-  // is on that side — text-only nodes keep their exact old height.
   const gallery = galleryExtent(n);
-  const galH = gallery?.h ?? 0;
-  let midH = topH + botH + galH;
-  if (topH > 0 && (hasText || galH > 0 || botH > 0)) midH += IMAGE_GAP; // top image → next block
-  if (hasText && (galH > 0 || botH > 0)) midH += IMAGE_GAP; // text → grid or bottom image
-  if (galH > 0 && botH > 0) midH += IMAGE_GAP; // grid → bottom image
-  if (hasText) midH += textH;
-  // Side images sit beside the middle column; the box fits the taller one.
-  const sideH = Math.max(leftH, rightH);
-  const contentH = Math.max(midH, sideH);
 
   // The width clamp caps the TEXT column only — side images legitimately
   // push the box wider than MAX_TOPIC_W, exactly like the top image already
@@ -1198,6 +1197,32 @@ function measureTopicUncached(
   if (maxTopBotW > 0) w = Math.max(w, maxTopBotW + pad * 2 + sidePadW);
   // ... and it can never collapse below the minimum text width.
   w = Math.max(w, sidePadW + (24 + TEXT_INSET) + pad * 2);
+  // A grid or a top/bottom image wider than the text clamp widened the box
+  // AFTER the text was wrapped. The canvas and the editing overlay wrap at the
+  // box they are given (renderer: `p.w - pad*2 - TEXT_INSET - sidePadW`), so
+  // the title must be re-wrapped at that same width here — otherwise a long
+  // title over a gallery was measured on more lines than are ever drawn and
+  // the box kept their height as empty space (§3: one wrap width, both sides).
+  const finalTextW = Math.max(24, w - pad * 2 - TEXT_INSET - sidePadW);
+  if (finalTextW > textW) lines = wrapRunLines(runs, finalTextW, measurer, style);
+
+  // An empty title still yields one strut line; "has text" means real content.
+  const hasText = lines.some((l) => l.segments.length > 0);
+  const textH = lines.reduce((acc, l) => acc + (l.height ?? fontSize * LINE_HEIGHT_FACTOR) + (l.gapPx ?? 0), 0);
+
+  // Middle column: top image, text, gallery grid, bottom image. A gap
+  // separates each present block from the next but never appears when nothing
+  // is on that side — text-only nodes keep their exact old height.
+  const galH = gallery?.h ?? 0;
+  let midH = topH + botH + galH;
+  if (topH > 0 && (hasText || galH > 0 || botH > 0)) midH += IMAGE_GAP; // top image → next block
+  if (hasText && (galH > 0 || botH > 0)) midH += IMAGE_GAP; // text → grid or bottom image
+  if (galH > 0 && botH > 0) midH += IMAGE_GAP; // grid → bottom image
+  if (hasText) midH += textH;
+  // Side images sit beside the middle column; the box fits the taller one.
+  const sideH = Math.max(leftH, rightH);
+  const contentH = Math.max(midH, sideH);
+
   // With an image the box is content + padding; without one, the previous
   // formula is untouched (the strut line included).
   let h = style.height ?? Math.max(28, contentH > 0 ? contentH + pad * 2 + 4 : textH + pad * 2 + 4);

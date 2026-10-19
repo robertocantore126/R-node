@@ -443,10 +443,16 @@ export interface OrphanReport {
  * deleting anything: garbage collection must be an explicit user action (a
  * command), never a side-effect of undo or save.
  */
-export async function collectOrphans(sheet: Sheet, store: AssetStore): Promise<OrphanReport> {
+export async function collectOrphans(sheet: Sheet, store: AssetStore, otherSheets: Iterable<Sheet> = []): Promise<OrphanReport> {
   const referenced = referencedAssetIds(sheet);
   const cards = sheet.attachments.map((a) => a.id).filter((id) => !referenced.has(id));
+  // The BLOB store can be shared beyond this sheet: on the web every document
+  // (and every sheet of a document) writes into one IndexedDB. A blob is
+  // garbage only when NO sheet that can reach the store references it —
+  // judging by this sheet alone deleted the pictures of every other map.
+  const live = new Set(referenced);
+  for (const other of otherSheets) for (const id of referencedAssetIds(other)) live.add(id);
   const ids = await store.list();
-  const blobs = ids.filter((id) => !referenced.has(id));
+  const blobs = ids.filter((id) => !live.has(id));
   return { cards, blobs };
 }

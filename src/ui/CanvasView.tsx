@@ -123,12 +123,20 @@ function shapeWidthAllowance(n: MindNode): number {
 
 const overlayMeasurer = createCanvasTextMeasurer();
 
-/** `imageResolver` memoized on the sheet it was built from. */
-let lastResolverSheet: Sheet | null = null;
+/**
+ * `imageResolver` memoized on the sheet's attachments. Keyed on the array AND
+ * its length, not on the sheet: an imported picture's card is
+ * `attachments.push`ed in place, so neither the sheet nor the array changes
+ * identity — the old key kept a resolver that had never heard of the new
+ * image, and the editing overlay measured that topic as if it had none.
+ */
+let lastResolverList: Sheet["attachments"] | null = null;
+let lastResolverLen = -1;
 let lastResolver: ReturnType<typeof imageResolver> | null = null;
 function overlayImageResolver(sheet: Sheet): ReturnType<typeof imageResolver> {
-  if (lastResolverSheet !== sheet || !lastResolver) {
-    lastResolverSheet = sheet;
+  if (lastResolverList !== sheet.attachments || lastResolverLen !== sheet.attachments.length || !lastResolver) {
+    lastResolverList = sheet.attachments;
+    lastResolverLen = sheet.attachments.length;
     lastResolver = imageResolver(sheet);
   }
   return lastResolver;
@@ -639,7 +647,13 @@ export function CanvasView(): JSX.Element {
     const imgResizeHit = s.relFrom ? null : renderer.hitTestImageResize(rs, world.x, world.y);
     if (imgResizeHit) {
       const n = store.doc.node(imgResizeHit)!;
-      const att = n.style.image ? store.sheet.attachments.find((a) => a.id === n.style.image) : undefined;
+      // The picture whose handle was grabbed — the same pick as the renderer's
+      // selectedImageRect: the selected slot, else the first present one. Not
+      // always the TOP image: with only a side image and no imageWidth yet,
+      // reading the top slot started the drag from width 0 and it jumped.
+      const slotIds = [n.style[slotKey(s.imageSlot ?? "top")], n.style.image, n.style.imageBottom, n.style.imageLeft, n.style.imageRight];
+      const grabbedId = slotIds.find((x): x is string => !!x);
+      const att = grabbedId ? store.sheet.attachments.find((a) => a.id === grabbedId) : undefined;
       drag.imgResizing = imgResizeHit;
       drag.imgResizeStartWorldX = world.x;
       // imageWidth may be unset — resolve the natural width like the renderer.
@@ -1435,8 +1449,12 @@ export function CanvasView(): JSX.Element {
               if (sr) {
                 const p1 = worldToScreen(s.camera, sizeRef.current.w, sizeRef.current.h, sr.x, sr.y);
                 const p2 = worldToScreen(s.camera, sizeRef.current.w, sizeRef.current.h, sr.x + sr.w, sr.y + sr.h);
-                el.style.left = `${rect.left + p1.x}px`;
-                el.style.top = `${rect.top + p1.y}px`;
+                // Canvas-local, like the cursor-following branch below: the
+                // ghost is absolutely positioned inside .canvas-wrap, so adding
+                // the canvas's viewport offset (rect.left/top) placed it twice
+                // as far from the corner as the slot it previews.
+                el.style.left = `${p1.x}px`;
+                el.style.top = `${p1.y}px`;
                 el.style.width = `${p2.x - p1.x}px`;
                 el.style.height = `${p2.y - p1.y}px`;
                 return;
