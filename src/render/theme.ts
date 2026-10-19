@@ -1,11 +1,20 @@
 /**
  * Design tokens for the canvas renderer.
- * The same palette drives the CSS chrome (see styles.css) so the light
- * theme stays coherent everywhere. (Dark theme was intentionally removed.)
+ * The same palette drives the CSS chrome (see styles.css) so every theme
+ * stays coherent everywhere. `light` is the default; `dark` and `vanilla`
+ * (warm paper) are alternatives the user picks from the TopBar.
  */
 import type { CodePalette } from "../core/codeHighlight";
 
-export type ThemeName = "light";
+export type ThemeName = "light" | "dark" | "vanilla";
+
+/** Cycle order of the theme button. Light first: it is the default. */
+export const THEME_ORDER: ThemeName[] = ["light", "dark", "vanilla"];
+
+/** Coerce an arbitrary stored value to a known theme (unknown -> light). */
+export function asThemeName(value: unknown): ThemeName {
+  return value === "dark" || value === "vanilla" ? value : "light";
+}
 
 export interface RenderTheme {
   name: ThemeName;
@@ -26,8 +35,7 @@ export interface RenderTheme {
   deepFill: string; // depth 3+: everything below a branch's children (white in light)
   /** Colours the tokenizer lends to code (T22). The palette id must differ
    *  between themes: the tokenizer's cache is keyed on it, and two themes
-   *  sharing an id would serve one theme's colours to the other. Only the
-   *  light theme exists today; if dark returns, it needs its own id. */
+   *  sharing an id would serve one theme's colours to the other. */
   code: CodePalette;
   /** The surface a code block is painted on, and its title strip (T22). */
   codeBg: string;
@@ -91,5 +99,76 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     nodeBorder: "rgba(0,0,0,0.06)",
     shadow: "rgba(28,35,51,0.14)",
   },
+  dark: {
+    name: "dark",
+    background: "#0f1319",
+    grid: "#1a1f29",
+    text: "#e6e8ee",
+    textMuted: "#9aa3b2",
+    selection: "#6366f1",
+    selectionFill: "rgba(99, 102, 241, 0.18)",
+    dropIndicator: "#6366f1",
+    searchMatch: "#fbbf24",
+    searchMatchActive: "#f59e0b",
+    rootFill: "#1b2029",
+    rootText: "#f5f6fa",
+    // The vivid branch palette is shared with the light theme on purpose:
+    // stored colours and the user's mental model of a branch stay the same
+    // when the theme changes. Only the soft step differs, so the children
+    // keep their hue without turning into unreadable pale slabs.
+    branch: ["#ff646b", "#ff9a66", "#4eb5e8", "#55c9bd", "#a7d9bb", "#d979e5", "#70b9e8", "#f0bd62"],
+    branchSoft: ["#4a2a2d", "#463226", "#1e3a4d", "#1f3f3d", "#25352b", "#3f2a45", "#233a4a", "#4a3d20"],
+    deepFill: "#171b22",
+    code: {
+      id: "dark",
+      plain: "#e6edf3",
+      keyword: "#ff7b72",
+      string: "#a5d6ff",
+      number: "#79c0ff",
+      comment: "#8b949e",
+      fn: "#d2a8ff",
+      punct: "#8b949e",
+    },
+    codeBg: "#161b22",
+    codeBar: "#21262d",
+    connector: "#5b6472",
+    collapsedBadge: "#2a303a",
+    collapsedBadgeText: "#c9d1d9",
+    nodeBorder: "rgba(255,255,255,0.10)",
+    shadow: "rgba(0,0,0,0.55)",
+  },
+  vanilla: {
+    name: "vanilla",
+    background: "#f7f1e3",
+    grid: "#efe4cf",
+    text: "#3b2f24",
+    textMuted: "#8a7358",
+    selection: "#b45309",
+    selectionFill: "rgba(180, 83, 9, 0.12)",
+    dropIndicator: "#b45309",
+    searchMatch: "#d97706",
+    searchMatchActive: "#b45309",
+    rootFill: "#fffaf0",
+    rootText: "#3b2f24",
+    branch: ["#ff646b", "#ff9a66", "#4eb5e8", "#55c9bd", "#a7d9bb", "#d979e5", "#70b9e8", "#f0bd62"],
+    branchSoft: ["#ffdfe1", "#ffe8dc", "#dff4ff", "#dff8f5", "#e5f6ec", "#f6e1f9", "#deeffb", "#fff0d3"],
+    deepFill: "#fffaf0",
+    code: {
+      id: "vanilla",
+      plain: "#3b2f24",
+      keyword: "#9a3412",
+      string: "#166534",
+      number: "#92400e",
+      comment: "#8a7358",
+      fn: "#7c2d12",
+      punct: "#6b5842",
+    },
+    codeBg: "#efe4cf",
+    codeBar: "#e6d8bd",
+    connector: "#b8a68c",
+    collapsedBadge: "#e6d8bd",
+    collapsedBadgeText: "#5b4a37",
+    nodeBorder: "rgba(91,74,55,0.14)",
+    shadow: "rgba(91,74,55,0.22)",
+  },
 };
-// Dark theme intentionally removed — the app is light-only.

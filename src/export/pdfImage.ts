@@ -47,7 +47,7 @@ const JPEG_QUALITY = 0.92;
 
 /** Decode an asset for PDF. Vector printing requests originals and lossless
  *  RGB; the legacy defaults remain available to size-sensitive callers. */
-export async function pdfImageSource(store: AssetStore, assetId: string, options: { lossless?: boolean; original?: boolean } = {}): Promise<PdfImageSource | null> {
+export async function pdfImageSource(store: AssetStore, assetId: string, options: { lossless?: boolean; original?: boolean; maxLongSide?: number } = {}): Promise<PdfImageSource | null> {
   const meta = await store.meta(assetId);
   if (!meta) return null;
   let blob: Blob | null = null;
@@ -56,18 +56,21 @@ export async function pdfImageSource(store: AssetStore, assetId: string, options
     if (blob) break;
   }
   if (!blob) return null;
-  return decodeForPdf(blob, meta.mime, options.lossless);
+  return decodeForPdf(blob, meta.mime, options.lossless, options.maxLongSide);
 }
 
 /** The decode itself, separated so it can be driven from a blob directly. */
-export async function decodeForPdf(blob: Blob, mime: string, lossless = false): Promise<PdfImageSource | null> {
+export async function decodeForPdf(blob: Blob, _mime: string, lossless = false, maxLongSide = Infinity): Promise<PdfImageSource | null> {
   // A JPEG still needs decoding, but only to learn its pixel size: the bytes
   // that go into the file are the file's own.
+  if (!(maxLongSide > 0)) throw new Error("Invalid PDF image limit");
   const bitmap = await createImageBitmap(blob);
-  const w = bitmap.width;
-  const h = bitmap.height;
+  const factor=Math.min(1,maxLongSide/Math.max(bitmap.width,bitmap.height));
+  const w=Math.max(1,Math.round(bitmap.width*factor)),h=Math.max(1,Math.round(bitmap.height*factor));
   try {
-    if (mime === "image/jpeg") {
+    // Display levels can be PNG even when the original metadata says JPEG.
+    const signature=new Uint8Array(await blob.slice(0,3).arrayBuffer());
+    if (factor === 1 && signature[0]===255 && signature[1]===216 && signature[2]===255) {
       return { w, h, jpeg: new Uint8Array(await blob.arrayBuffer()) };
     }
     const canvas = document.createElement("canvas");
@@ -75,7 +78,7 @@ export async function decodeForPdf(blob: Blob, mime: string, lossless = false): 
     canvas.height = h;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
-    ctx.drawImage(bitmap, 0, 0);
+    ctx.drawImage(bitmap, 0, 0, w, h);
     const { data } = ctx.getImageData(0, 0, w, h);
 
     // getImageData is UN-premultiplied by spec, so these RGB values are the

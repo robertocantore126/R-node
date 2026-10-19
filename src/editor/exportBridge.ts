@@ -90,14 +90,14 @@ export function runExportHtml(): void {
 // PDF — an experiment, not a feature yet (src/dev/pdfProbe.ts). It is wired
 // into the menu only so the question "does a PDF of a real map scroll?" can be
 // answered on a real map instead of a synthetic one.
-let pdfHandler: (() => Promise<void>) | null = null;
+let pdfHandler: ((mode?: "print" | "phone") => Promise<void>) | null = null;
 
-export function setExportPdfHandler(fn: (() => Promise<void>) | null): void {
+export function setExportPdfHandler(fn: ((mode?: "print" | "phone") => Promise<void>) | null): void {
   pdfHandler = fn;
 }
 
-export function runExportPdf(): void {
-  void pdfHandler?.();
+export function runExportPdf(mode: "print" | "phone" = "print"): void {
+  void pdfHandler?.(mode);
 }
 
 /** Per-entry zip overhead (local header + central-directory entry + slack). */

@@ -1,3 +1,4 @@
+import { phoneMapPages } from "./pdfPhone";
 import { FREEFORM_HEADER } from "../core/freeform";
 import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
 import { THEMES, type RenderTheme } from "../render/theme";
@@ -158,6 +159,10 @@ interface Page {
   /** World Y the band starts at; it runs to `top + height`. */
   top: number;
   height: number;
+  left: number;
+  width: number;
+  col: number;
+  row: number;
   /** Topics whose box INTERSECTS the band — a straddling topic is on both. */
   nodes: Placed[];
 }
@@ -221,6 +226,8 @@ export interface PdfExportOptions {
   /** Editor surfaces and grid, while keeping text and geometry vector. */
   theme?: RenderTheme;
   grid?: boolean;
+  /** Phone reading: true-size two-dimensional windows, with a linked overview. */
+  layout?: "print" | "phone";
 }
 
 export interface PdfExportResult {
@@ -512,9 +519,10 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     }
     return (sum / WIDTH_EM) * size;
   };
-  const paper = typeof opts.page === "string" ? PAGE_SIZES[opts.page] : opts.page ?? PAGE_SIZES.A1;
-  const margin = opts.margin ?? DEFAULT_MARGIN;
-  const withIndex = opts.index === true;
+  const phone = opts.layout === "phone";
+  const paper = typeof opts.page === "string" ? PAGE_SIZES[opts.page] : opts.page ?? (phone ? { w:595.28,h:841.89 } : PAGE_SIZES.A1);
+  const margin = opts.margin ?? (phone ? 20 : DEFAULT_MARGIN);
+  const withIndex = phone || opts.index === true;
   const placed = placeAll(sheet, opts.measurer);
   const resolveImage = imageResolver(sheet);
 
@@ -548,7 +556,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   // so a narrow map keeps its printed dimensions instead of being blown up.
   const usableWpt = paper.w - margin * 2;
   const usableHpt = paper.h - margin * 2;
-  const s = Math.min(opts.maxPtPerUnit ?? PT_PER_UNIT, usableWpt / worldW);
+  const s = phone ? PT_PER_UNIT : Math.min(opts.maxPtPerUnit ?? PT_PER_UNIT, usableWpt / worldW);
 
   // The band each sheet shows, in world units. Full width, always.
   const bandH = usableHpt / s;
@@ -561,10 +569,14 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   // away, which left a hole on the neighbouring sheet.
   const pages: Page[] = [];
   let split = 0;
-  for (let band = 0; band < bandCount; band++) {
+  if(phone) {
+    const windows=phoneMapPages({x:minX,y:minY,w:worldW,h:worldH},placed,usableWpt/s,bandH);
+    for(const window of windows) pages.push({...window,band:window.row,number:pages.length+2,nodes:placed.filter(p=>p.x<window.left+window.width && p.x+p.w>window.left && p.y<window.top+window.height && p.y+p.h>window.top)});
+  }
+  for (let band = 0; !phone && band < bandCount; band++) {
     const top = minY + band * bandH;
     const nodes = placed.filter((p) => p.y < top + bandH && p.y + p.h > top);
-    pages.push({ band, top, height: bandH, number: pages.length + (withIndex ? 2 : 1), nodes });
+    pages.push({ band, top, height: bandH, left:minX,width:worldW,col:0,row:band, number: pages.length + (withIndex ? 2 : 1), nodes });
   }
   for (const p of placed) {
     const first = Math.floor((p.y - minY) / bandH);
@@ -575,7 +587,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   // The world-to-paper transform is GLOBAL in x: the same world x lands on the
   // same paper x on every sheet, which is what "elements keep their canvas
   // position" means. A map narrower than the sheet is centred, not stretched.
-  const offX = margin + (usableWpt - worldW * s) / 2;
+  const offX = phone ? margin : margin + (usableWpt - worldW * s) / 2;
 
   // --- images ---------------------------------------------------------------
   // Declared once as XObjects and referenced by name from every page that
@@ -628,6 +640,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   let ops = 0;
   let images = 0;
   const fontSizes: number[] = [];
+  let activePage: Page | null = null;
+  const intersectsPage = (r: {x:number;y:number;w:number;h:number}): boolean => !phone || !activePage || (r.x<activePage.left+activePage.width && r.x+r.w>activePage.left && r.y<activePage.top+activePage.height && r.y+r.h>activePage.top);
 
   // -------------------------------------------------------------------------
   // Drawing
@@ -686,8 +700,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     const foreground=rgb(theme.textMuted).split(" ").map(Number),background=rgb(fill).split(" ").map(Number);
     const grid=foreground.map((v,i)=>(v*.13+background[i]*.87).toFixed(4)).join(" ");
     cmds.push(`${grid} RG`,`${f(.5*fr.s)} w`);
-    for(let x=p.x;x<p.x+p.w;x+=20) cmds.push(`${f(fr.X(x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} m ${f(fr.X(x))} ${f(fr.Y(p.y+p.h))} l`);
-    for(let y=p.y+FREEFORM_HEADER;y<p.y+p.h;y+=20) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(y))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(y))} l`);
+    for(let x=p.x+Math.max(0,Math.floor(((activePage?.left??p.x)-p.x)/20))*20;x<Math.min(p.x+p.w,activePage ? activePage.left+activePage.width : Infinity);x+=20) cmds.push(`${f(fr.X(x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} m ${f(fr.X(x))} ${f(fr.Y(p.y+p.h))} l`);
+    for(let y=p.y+FREEFORM_HEADER+Math.max(0,Math.floor(((activePage?.top??p.y)-p.y-FREEFORM_HEADER)/20))*20;y<Math.min(p.y+p.h,activePage ? activePage.top+activePage.height : Infinity);y+=20) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(y))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(y))} l`);
     cmds.push("S","Q");
     plainText(cmds,p.node.title||"Freeform",p.x+14,p.y+FREEFORM_HEADER/2+4.5,13,theme.text,fr,true,p.w-28);
     if(!p.node.childrenIds.length) plainText(cmds,"Double-click to add text. Drop nodes, text or images here.",p.x+18,p.y+FREEFORM_HEADER+32.5,13,theme.textMuted,fr,false,p.w-36);
@@ -894,6 +908,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     // numbers directly — the full width is the cell divided by the fraction of
     // the source on show, and the picture's edge sits that fraction back.
     for (const c of pos.cells) {
+      if(!intersectsPage(c)) continue;
       const name = xobjByAsset.get(c.id);
       if (!name || !c.crop) continue;
       const fullW = c.w / c.crop.sw;
@@ -912,6 +927,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     }
 
     for (const it of pos.items) {
+      if(!intersectsPage({x:it.x,y:it.y,w:it.size.w,h:it.size.h})) continue;
       const name = xobjByAsset.get(it.id);
       if (!name) continue;
       // cm places the unit square: width 0 0 height x y_bottom.
@@ -995,17 +1011,22 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   // -------------------------------------------------------------------------
 
   const streams: Uint8Array[] = [];
+  const pageImages: Set<string>[] = [];
+  const navigation: {rect:number[];target:number}[][] = [];
+  const overviewLinks: {rect:number[];target:number}[] = [];
 
   if (withIndex) {
     streams.push(zlibSync(latin1(buildIndexPage())));
+    pageImages.push(new Set()); navigation.push(overviewLinks);
   }
 
   for (const pg of pages) {
+    activePage=pg;
     // The x mapping does not mention the page: the same world x lands on the
     // same paper x on every sheet. Only y is banded.
     const fr: Frame = {
       s,
-      X: (x) => offX + (x - minX) * s,
+      X: (x) => offX + (x - pg.left) * s,
       Y: (y) => paper.h - margin - (y - pg.top) * s,
     };
     const cmds: string[] = [];
@@ -1019,8 +1040,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
 
     if (opts.grid) {
       cmds.push("q",`${rgb(theme.grid)} RG`,`${f(PT_PER_UNIT)} w`);
-      for(let x=Math.floor(minX/40)*40;x<=maxX;x+=40) cmds.push(`${f(fr.X(x))} ${f(fr.Y(pg.top))} m ${f(fr.X(x))} ${f(fr.Y(pg.top+pg.height))} l`);
-      for(let y=Math.floor(pg.top/40)*40;y<=pg.top+pg.height;y+=40) cmds.push(`${f(fr.X(minX))} ${f(fr.Y(y))} m ${f(fr.X(maxX))} ${f(fr.Y(y))} l`);
+      for(let x=Math.floor(pg.left/40)*40;x<=pg.left+pg.width;x+=40) cmds.push(`${f(fr.X(x))} ${f(fr.Y(pg.top))} m ${f(fr.X(x))} ${f(fr.Y(pg.top+pg.height))} l`);
+      for(let y=Math.floor(pg.top/40)*40;y<=pg.top+pg.height;y+=40) cmds.push(`${f(fr.X(pg.left))} ${f(fr.Y(y))} m ${f(fr.X(pg.left+pg.width))} ${f(fr.Y(y))} l`);
       cmds.push("S","Q");
     }
     for(const p of pg.nodes) if(p.node.style.freeform) drawFreeform(cmds,p,fr);
@@ -1032,7 +1053,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       const parent = byId.get(p.node.parentId);
       if (!parent || parent.node.style.freeform) continue;
       const curve = connectorCurve(parent, p, sheet);
-      if (!curveTouches(curve, pg.top, pg.height)) continue;
+      if (!curveTouches(curve, pg.top, pg.height) || (phone && (Math.max(curve.p0.x,curve.p1.x,curve.p2.x,curve.p3.x)<pg.left || Math.min(curve.p0.x,curve.p1.x,curve.p2.x,curve.p3.x)>pg.left+pg.width))) continue;
       cmds.push(`${rgb(opts.linkColorOf(p.node.id))} RG`, curveCmd(curve, fr));
       ops += 2;
     }
@@ -1075,7 +1096,14 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       `(${pg.number} / ${pages.length + (withIndex ? 1 : 0)}) Tj`, "ET",
     );
     ops += 3;
-    streams.push(zlibSync(latin1(cmds.join("\n"))));
+    const links: {rect:number[];target:number}[]=[];
+    if(phone) {
+      cmds.push("BT","/F1 9 Tf","0.2 0.2 0.3 rg",`1 0 0 1 ${f(margin)} ${f(margin/2)} Tm`,`(Overview | R${pg.row+1} C${pg.col+1}) Tj`,"ET");
+      links.push({rect:[margin,0,margin+100,margin],target:0});
+    }
+    const body=cmds.join("\n");
+    pageImages.push(new Set(Array.from(body.matchAll(/\/(Im\d+) Do/g),m=>m[1])));navigation.push(links);
+    streams.push(zlibSync(latin1(body)));
   }
 
   /**
@@ -1106,23 +1134,27 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       );
     }
 
-    // Only horizontal rules: the map is never cut vertically.
     cmds.push("0.55 0.55 0.6 RG", "0.4 w", "[2 2] 0 d");
-    for (let band = 1; band < pages.length; band++) {
-      const wy = minY + band * bandH;
-      cmds.push(`${f(X(minX))} ${f(Y(wy))} m ${f(X(maxX))} ${f(Y(wy))} l S`);
+    if(phone) {
+      for(const pg of pages) {
+        const x=X(pg.left),y=Y(pg.top+pg.height),w=pg.width*fit,h=pg.height*fit;
+        cmds.push(`${f(x)} ${f(y)} ${f(w)} ${f(h)} re S`,"BT","/F1 5 Tf","0.15 0.15 0.2 rg",`1 0 0 1 ${f(x+1)} ${f(y+h-5)} Tm`,`(${pg.number}) Tj`,"ET");
+        overviewLinks.push({rect:[x,y,x+w,y+h],target:pg.number-1});
+      }
+    } else {
+      for(let band=1;band<pages.length;band++) {
+        const wy=minY+band*bandH;
+        cmds.push(`${f(X(minX))} ${f(Y(wy))} m ${f(X(maxX))} ${f(Y(wy))} l S`);
+      }
+      cmds.push("BT", "0.25 0.25 0.3 rg", "/F1 9 Tf");
+      for(const pg of pages) cmds.push(`1 0 0 1 ${f(X(minX)-18)} ${f(Y(pg.top+pg.height/2))} Tm`,`(${pg.number}) Tj`);
+      cmds.push("ET");
     }
     cmds.push("[] 0 d");
-
-    cmds.push("BT", "0.25 0.25 0.3 rg", "/F1 9 Tf");
-    for (const pg of pages) {
-      cmds.push(`1 0 0 1 ${f(X(minX) - 18)} ${f(Y(pg.top + pg.height / 2))} Tm`, `(${pg.number}) Tj`);
-    }
-    cmds.push("ET");
     cmds.push(
       "BT", "0.35 0.35 0.4 rg", "/F1 10 Tf",
       `1 0 0 1 ${f(margin)} ${f(paper.h - margin + 4)} Tm`,
-      `(${pdfStr(`${placed.length} topics on ${pages.length} sheets, read top to bottom`)}) Tj`,
+      `(${pdfStr(phone ? `Map overview - tap a numbered area (${pages.length} detail pages)` : `${placed.length} topics on ${pages.length} sheets, read top to bottom`)}) Tj`,
       "ET",
     );
     return cmds.join("\n");
@@ -1163,7 +1195,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
 
   const fontDict = BASE_FONTS.map((ft, i) => `/${ft.name} ${ID_FIRST_FONT + i} 0 R`).join(" ");
   const alphaDict = alphaIds.map(a=>`/${a.name} ${a.id} 0 R`).join(" ");
-  const xobjDict = xobjects.map((x, i) => `/${x.name} ${imgIds[i]} 0 R`).join(" ");
+  const xobjDict = (page:number) => xobjects.flatMap((x,i)=>pageImages[page].has(x.name) ? [`/${x.name} ${imgIds[i]} 0 R`] : []).join(" ");
 
   putStr("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
   obj(ID_CATALOG, `<< /Type /Catalog /Pages ${ID_PAGES} 0 R >>`);
@@ -1204,8 +1236,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     obj(
       sheetIds[i].page,
       `<< /Type /Page /Parent ${ID_PAGES} 0 R /MediaBox [0 0 ${f(paper.w)} ${f(paper.h)}] ` +
-        `/Resources << /ExtGState << ${alphaDict} >> /Font << ${fontDict} >> /XObject << ${xobjDict} >> >> ` +
-        `/Contents ${sheetIds[i].content} 0 R >>`,
+        `/Resources << /ExtGState << ${alphaDict} >> /Font << ${fontDict} >> /XObject << ${xobjDict(i)} >> >> ` +
+        `/Contents ${sheetIds[i].content} 0 R /Annots [${navigation[i].map(link=>`<< /Type /Annot /Subtype /Link /Rect [${link.rect.map(f).join(" ")}] /Border [0 0 0] /Dest [${sheetIds[link.target].page} 0 R /Fit] >>`).join(" ")}] >>`,
     );
     obj(sheetIds[i].content, `<< /Length ${stream.length} /Filter /FlateDecode >>`, stream);
   });
@@ -1266,6 +1298,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     ],
     units: {
       operators: ops,
+      phoneLayout: phone ? 1 : 0,
       codeTopicsUnsupported: placed.filter(p=>!!p.node.style.code).length,
       customArtworkUnsupported: placed.filter(p=>p.node.style.shape==="custom").length,
       streamBytes,

@@ -197,8 +197,9 @@ check, known limitations.
   not rewrites.
 - Sync conflict model (CRDT vs OT) — open, will be chosen in Phase 5.
 - Layout animations — deferred to Phase 3 (stable positions already).
-- Light theme only (`ThemeName = "light"`). The renderer already takes the
-  theme as data, so adding a dark one is a palette, not a refactor.
+- Three themes (`ThemeName = "light" | "dark" | "vanilla"`), selected per
+  document and stored in `doc.settings.theme`. The renderer takes the theme as
+  data, so a theme is a palette, not a refactor.
 - Fonts: system stack (no bundling).
 
 ## Tech-stack mapping (per owner)

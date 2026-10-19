@@ -735,7 +735,7 @@ export class Renderer {
       ctx.setLineDash(n.style.borderStyle === "dashed" ? [6, 4] : n.style.borderStyle === "dotted" ? [2, 3] : []);
       ctx.stroke();
       ctx.setLineDash([]);
-    } else if (theme.name === "light") {
+    } else if (theme.nodeBorder !== "transparent") {
       ctx.strokeStyle = theme.nodeBorder;
       ctx.lineWidth = 1;
       ctx.stroke();
@@ -985,6 +985,17 @@ export class Renderer {
     return "Subtopic";
   }
 
+  /**
+   * A topic carrying pictures is not an empty text box: the "Subtopic" hint
+   * would be painted straight over the image (the layout reserves the picture's
+   * rect but still centres the text block in what is left). The hint belongs to
+   * a topic with nothing to show, so pictures — in any slot or a gallery —
+   * suppress it.
+   */
+  private hasPictures(n: MindNode): boolean {
+    return !!(n.style.image || n.style.imageBottom || n.style.imageLeft || n.style.imageRight || n.style.gallery?.items.length);
+  }
+
   /** The hint, drawn faint and centred. Not cached: an empty topic is rare and
    *  becomes non-empty the moment anyone types. */
   private drawPlaceholder(p: Placed, color: string): void {
@@ -1005,8 +1016,10 @@ export class Renderer {
     const n = p.node;
     // The caller already skips this node entirely while it is being edited,
     // so an empty title here means an empty topic nobody is typing into.
+    // Pictures are content too: an empty title on a topic that owns an image
+    // must not grow a hint on top of it.
     if (n.title.trim() === "") {
-      this.drawPlaceholder(p, color);
+      if (!this.hasPictures(n)) this.drawPlaceholder(p, color);
       return;
     }
     const pad = n.style.padding ?? 10;

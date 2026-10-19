@@ -27,7 +27,7 @@ import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPla
 import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
 import { createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
-import { THEMES } from "../render/theme";
+import { asThemeName, THEME_ORDER, THEMES, type ThemeName } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../persist/assets";
@@ -198,7 +198,7 @@ export interface EditorState {
   canUndo: boolean;
   canRedo: boolean;
   docTitle: string;
-  theme: "light";
+  theme: ThemeName;
   structureType: string;
   mode: "select" | "pan";
   relFrom: string | null;
@@ -367,7 +367,7 @@ export class EditorStore {
       canUndo: false,
       canRedo: false,
       docTitle: d.title,
-      theme: "light",
+      theme: asThemeName(d.settings?.theme),
       structureType: d.sheets[0].structure.structureType,
       mode: "select",
       relFrom: null,
@@ -408,7 +408,7 @@ export class EditorStore {
       canUndo: this.history.canUndo,
       canRedo: this.history.canRedo,
       docTitle: d.title,
-      theme: "light",
+      theme: asThemeName(d.settings?.theme),
       structureType: d.sheets[0].structure.structureType,
     };
     this.snap = { ...this.state, selection: [...this.state.selection], searchResults: [...this.state.searchResults] };
@@ -1429,11 +1429,11 @@ export class EditorStore {
       archived: !!d.archived,
       pinned: !!d.pinned,
       settings: {
-        theme: "light",
+        theme: asThemeName(d.settings?.theme),
         showOutliner: !!d.settings?.showOutliner,
         showInspector: d.settings?.showInspector ?? true,
       },
-      themeId: typeof d.themeId === "string" ? d.themeId : "r-node-light",
+      themeId: typeof d.themeId === "string" ? d.themeId : `r-node-${asThemeName(d.settings?.theme)}`,
       sheets: [sheet],
     };
   }
@@ -1935,6 +1935,11 @@ export class EditorStore {
       const index = prev ? root.childrenIds.indexOf(prev) : -1;
       return (index >= 0 ? index : 0) % THEMES.light.branch.length;
     };
+    // Every theme's palette counts as a stamp: a document saved under one
+    // theme must normalize identically under another. The vivid `branch`
+    // colours are shared, but `branchSoft` differs per theme (dark tints the
+    // children), so a single theme's list would miss half the stamps.
+    const palettes = Object.values(THEMES);
     for (const id of Object.keys(sheet.nodes)) {
       const n = sheet.nodes[id];
       if (!n || id === root.id || !n.style.fill) continue;
@@ -1942,8 +1947,19 @@ export class EditorStore {
       // depth 1 or 2 implies the walk reached the root, so branchIndex is safe.
       if (depth !== 1 && depth !== 2) continue;
       const bi = branchIndex(id);
-      const stamp = depth === 1 ? THEMES.light.branch[bi] : THEMES.light.branchSoft[bi];
-      if (n.style.fill === stamp) delete n.style.fill;
+      const stamp = depth === 1
+        ? palettes.some((t) => t.branch[bi] === n.style.fill)
+        : palettes.some((t) => t.branchSoft[bi] === n.style.fill);
+      if (stamp) delete n.style.fill;
+    }
+    // Freeform boards were born with fill "#ffffff" stamped into the style.
+    // That stamp beat the theme, so a board stayed a white slab on a dark map.
+    // Strip it only while the node still wears the rest of the old system
+    // default, so a fill the user actually chose survives.
+    for (const n of Object.values(sheet.nodes)) {
+      if (!n.style.freeform || n.style.fill !== "#ffffff") continue;
+      if (n.style.stroke !== "#94a3b8" || (n.style.borderWidth ?? 1) !== 1) continue;
+      delete n.style.fill;
     }
   }
 
@@ -2044,7 +2060,10 @@ export class EditorStore {
       id, nodeType: parent.type === "central" ? "main" : "subtopic",
       parentId: parent.id, index: parent.childrenIds.length,
       title: "Freeform", titleRuns: [{ text: "Freeform" }],
-      style: { freeform: true, width: 720, height: 480, shape: "rounded", fill: "#ffffff", stroke: "#94a3b8", borderWidth: 1 },
+      // No fill: a freeform board is a surface, and its surface is the theme's
+      // background (white on light, near-black on dark, paper on vanilla). An
+      // explicit white here would stay white when the theme changes.
+      style: { freeform: true, width: 720, height: 480, shape: "rounded", stroke: "#94a3b8", borderWidth: 1 },
       position: this.createNodePosition(parent),
     })]);
     this.settleLayoutNow();
@@ -4586,6 +4605,28 @@ export class EditorStore {
   // Theme & UI toggles
   // -------------------------------------------------------------------------
 
+  /**
+   * The theme is a document setting, not app chrome: it lives in
+   * `doc.settings.theme`, so a map opens looking the way it was saved and the
+   * PDF/HTML exports can use the same palette. Not an op: the eye is not
+   * content, and undo must keep meaning "undo my edit".
+   */
+  setTheme(theme: ThemeName): void {
+    const doc = this.model.doc;
+    if (asThemeName(doc.settings?.theme) === theme) return;
+    doc.settings.theme = theme;
+    doc.themeId = `r-node-${theme}`;
+    doc.updatedAt = nowIso();
+    this.state.sync = "dirty";
+    this.notify();
+  }
+
+  /** TopBar button: light -> dark -> vanilla -> light. */
+  cycleTheme(): void {
+    const index = THEME_ORDER.indexOf(this.state.theme);
+    this.setTheme(THEME_ORDER[(index + 1) % THEME_ORDER.length]);
+  }
+
   togglePalette(): void {
     this.state.showPalette = !this.state.showPalette;
     trace.mark("ui", "ui:modal", { open: this.state.showPalette });
@@ -4753,6 +4794,10 @@ export class EditorStore {
     const doc = this.state.docs.find((d) => d.documentId === id);
     if (!doc) return;
     this.model = new DocumentModel(doc);
+    // Documents loaded at startup are normalized by init(); a document opened
+    // later has to get the same pass, or its legacy colour stamps would only
+    // disappear after a restart.
+    this.normalizeBranchColors(this.model.sheet);
     this.history.clear();
     // Each document keeps its own file: switching moves the single-file
     // adapter (and the asset store with it) to this document's file, or

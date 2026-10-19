@@ -4,6 +4,13 @@ import { useStore } from "../editor/context";
 import { runExportHtml, runExportPdf } from "../editor/exportBridge";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
+import type { ThemeName } from "../render/theme";
+
+const THEME_LABELS: Record<ThemeName, string> = {
+  light: "Light",
+  dark: "Dark",
+  vanilla: "Vanilla",
+};
 
 export function TopBar(): JSX.Element {
   const store = useStore();
@@ -106,6 +113,18 @@ export function TopBar(): JSX.Element {
       </div>
 
       <div className="topbar-group">
+        <button
+          className="btn theme-btn"
+          data-help="Theme"
+          data-help-more="Switches between Light (white), Dark and Vanilla (warm paper). The choice is saved with the document."
+          title={`Theme: ${THEME_LABELS[state.theme]} — click for the next one`}
+          onClick={() => store.cycleTheme()}
+        >
+          ◐ {THEME_LABELS[state.theme]}
+        </button>
+      </div>
+
+      <div className="topbar-group">
         <button className={`btn icon${state.showOutliner ? " on" : ""}`} data-help="Outline panel" data-help-more="Toggles the document outline — the same tree as the canvas, as a list." title="Outline panel" onClick={() => store.toggleOutliner()}>
           ▤
         </button>
@@ -143,6 +162,7 @@ export function TopBar(): JSX.Element {
               <button data-help="Export Markdown" data-help-more="The map as a bulleted Markdown outline. Text only." onClick={() => { store.exportMarkdown(); setExportOpen(false); }}>Markdown (.md)</button>
               <button data-help="Interactive viewer" data-help-more="A self-contained HTML file with the renderer built in — open it anywhere, no R-node needed." onClick={() => { runExportHtml(); setExportOpen(false); }}>Interactive viewer (.html) — read on screen</button>
               <button data-help="Export PDF" data-help-more="The whole map with a grid and freeform canvases. Vector text and shapes stay sharp at any zoom; original pictures are preserved without additional JPEG compression." onClick={() => { runExportPdf(); setExportOpen(false); }}>Pages (.pdf) — print or read on paper</button>
+              <button data-help="PDF for phones" data-help-more="The same map at readable size across smaller pages, with a clickable overview. Vector text, grid and freeform positions are preserved; pictures are limited to 1280 pixels for lighter viewing." onClick={() => { runExportPdf("phone"); setExportOpen(false); }}>Phone map (.pdf) - same layout, smaller pages</button>
               {/* JSON, ZIP and image-carrying exports existed here but were
                   removed from the GUI: this menu ships Markdown, the HTML
                   viewer and the paginated PDF. SVG and PNG exist in the code
