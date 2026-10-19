@@ -2,12 +2,12 @@
 import { Renderer, type RenderState } from "../render/renderer";
 import { getAssetStore, type AssetStore } from "../persist/assets";
 import { canvasMapToPdf, type CanvasPdfOptions } from "./canvasPdf";
-import { sheetToPdf } from "./pdf";
+import { sheetToPdf, type PdfExportOptions } from "./pdf";
 import { pdfImageSource } from "./pdfImage";
 import { createCanvasTextMeasurer } from "../layout/measure";
 import { THEMES } from "../render/theme";
 
-type EditorPdfOptions = Pick<CanvasPdfOptions, "page" | "margin"> & { assetStore?: AssetStore };
+type EditorPdfOptions = Pick<CanvasPdfOptions, "page" | "margin"> & Pick<PdfExportOptions,"layout"> & { assetStore?: AssetStore };
 
 /** Vector map printing: only attached pictures are raster images. */
 export async function editorMapToPdf(state: RenderState, options: EditorPdfOptions = {}) {
@@ -18,12 +18,12 @@ export async function editorMapToPdf(state: RenderState, options: EditorPdfOptio
     if(document.fonts?.ready) await document.fonts.ready;
     const theme=THEMES[snapshot.themeName];
     return await sheetToPdf(snapshot.sheet,{
-      page:options.page,margin:options.margin,measurer:createCanvasTextMeasurer(),theme,grid:true,background:theme.background,
+      page:options.page,margin:options.margin,layout:options.layout,measurer:createCanvasTextMeasurer(),theme,grid:true,background:theme.background,
       colorOf:id=>renderer.nodeColors(snapshot,id),
       linkColorOf:id=>renderer.branchColorOf(snapshot,id),
       relColorOf:id=>snapshot.sheet.relationships.find(rel=>rel.id===id)?.color??theme.selection,
       imageBytes:async id=>{
-        const image=await pdfImageSource(assetStore,id,{lossless:true,original:true});
+        const image=await pdfImageSource(assetStore,id,{lossless:true,original:true,maxLongSide:options.layout==="phone" ? 1280 : Infinity});
         if(!image) throw new Error(`Cannot print image ${id}`);
         return image;
       },

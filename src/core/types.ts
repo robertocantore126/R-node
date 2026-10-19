@@ -503,7 +503,7 @@ export interface RnodeDocument {
   archived: boolean;
   pinned: boolean;
   settings: {
-    theme: "light" | "dark";
+    theme: "light" | "dark" | "vanilla";
     showOutliner: boolean;
     showInspector: boolean;
   };

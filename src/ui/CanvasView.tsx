@@ -467,7 +467,7 @@ export function CanvasView(): JSX.Element {
       }
     });
 
-    setExportPdfHandler(async () => {
+    setExportPdfHandler(async (mode = "print") => {
       store.commitEdit();
       const s = store.getSnapshot();
       const rs: RenderState = {
@@ -485,12 +485,13 @@ export function CanvasView(): JSX.Element {
       store.beginExport("Building PDF…");
       try {
         const out = await editorMapToPdf(rs, {
+          layout:mode,
           assetStore: getAssetStore(),
         });
         const url = URL.createObjectURL(out.blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${store.doc.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "map"}.pdf`;
+        a.download = `${store.doc.doc.title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "map"}${mode === "phone" ? "-phone" : ""}.pdf`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
         store.toast(`PDF: ${out.pages} pages, vector text and shapes, ${(out.bytes/1048576).toFixed(1)} MB`);

@@ -22,6 +22,38 @@
   --accent-soft: rgba(79, 70, 229, 0.1);
   --danger: #dc2626;
   --shadow: 0 10px 30px rgba(28, 35, 51, 0.16);
+  --hover: rgba(28, 35, 51, 0.06);
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0f1319;
+  --surface: #171b22;
+  --surface-2: #1e232c;
+  --border: #2a303a;
+  --text: #e6e8ee;
+  --text-muted: #9aa3b2;
+  --accent: #6366f1;
+  --accent-soft: rgba(99, 102, 241, 0.16);
+  --danger: #f87171;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  --hover: rgba(255, 255, 255, 0.08);
+  color-scheme: dark;
+}
+
+:root[data-theme="vanilla"] {
+  --bg: #f7f1e3;
+  --surface: #fffaf0;
+  --surface-2: #f0e6d2;
+  --border: #ded0b4;
+  --text: #3b2f24;
+  --text-muted: #8a7358;
+  --accent: #b45309;
+  --accent-soft: rgba(180, 83, 9, 0.12);
+  --danger: #b91c1c;
+  --shadow: 0 10px 30px rgba(91, 74, 55, 0.2);
+  --hover: rgba(91, 74, 55, 0.08);
+  color-scheme: light;
 }
 
 * {
@@ -313,6 +345,11 @@ textarea:focus {
 .btn:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+.theme-btn {
+  min-width: 92px;
+  white-space: nowrap;
 }
 
 .btn.primary {
