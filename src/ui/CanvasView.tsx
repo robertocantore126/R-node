@@ -12,7 +12,7 @@ import { editorMapToPdf } from "../export/editorPdf";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
+import { createCanvasTextMeasurer, chartSlotIndex, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
@@ -655,6 +655,15 @@ export function CanvasView(): JSX.Element {
     // Xmind-style width resize: grab the handle on the selected node's edge.
     // Checked BEFORE the body hit test so the handle wins on the edge line
     // (skipped while a relationship target is being picked).
+    // A selected chart's "+" pills grow it by a column (right) or a row
+    // (below). They sit OUTSIDE the box, so nothing else claims the point.
+    const growHit = s.relFrom ? null : renderer.hitTestChartGrow(rs, world.x, world.y);
+    if (growHit) {
+      store.resizeChart(growHit.id, growHit.grow === "row" ? 1 : 0, growHit.grow === "col" ? 1 : 0);
+      trace.applied("pointerdown:chart-grow", { id: growHit.id, grow: growHit.grow, wasEditing });
+      return;
+    }
+
     const resizeHit = s.relFrom ? null : renderer.hitTestResize(rs, world.x, world.y);
     if (resizeHit) {
       const rect = renderer.nodeWorldRect(rs, resizeHit.id)!;
@@ -898,7 +907,7 @@ export function CanvasView(): JSX.Element {
       const hit = rendererRef.current!.hitTest(rs, world.x, world.y);
       if (hit) {
         const rects = rendererRef.current!.galleryCellRects(rs, hit);
-        drag.cellDropTo = { nodeId: hit, index: galleryInsertIndex(rects, world.x, world.y) };
+        drag.cellDropTo = { nodeId: hit, index: galleryDropIndex(hit, rects, world.x, world.y) };
         galleryDropRef.current = drag.cellDropTo;
       } else {
         drag.cellDropTo = null;
@@ -1238,6 +1247,11 @@ export function CanvasView(): JSX.Element {
     }
   };
 
+  /** Where a drop over a gallery lands: a gap between cells, or — on a chart,
+   *  whose slots are fixed — the slot itself. */
+  const galleryDropIndex = (nodeId: string, rects: { x: number; y: number; w: number; h: number }[], wx: number, wy: number): number =>
+    store.doc.node(nodeId)?.style.gallery?.chart ? chartSlotIndex(rects, wx, wy) : galleryInsertIndex(rects, wx, wy);
+
   const currentRenderState = (): RenderState => {
     const s = store.getSnapshot();
     return {
@@ -1411,7 +1425,7 @@ export function CanvasView(): JSX.Element {
           const isGallery = !!hit && !!store.doc.node(hit)?.style.gallery;
           if (isGallery) {
             const rects = rendererRef.current?.galleryCellRects(rs, hit!) ?? [];
-            galleryDropRef.current = { nodeId: hit!, index: galleryInsertIndex(rects, world.x, world.y) };
+            galleryDropRef.current = { nodeId: hit!, index: galleryDropIndex(hit!, rects, world.x, world.y) };
             // hover may not change between dragover events, so the repaint
             // that draws the caret cannot ride on setHover's notify alone.
             schedule();
@@ -1530,7 +1544,7 @@ export function CanvasView(): JSX.Element {
               files = [file];
             }
             const rects = rendererRef.current?.galleryCellRects(currentRenderState(), target) ?? [];
-            const at = galleryInsertIndex(rects, world.x, world.y);
+            const at = galleryDropIndex(target, rects, world.x, world.y);
             const res = await store.addGalleryImageFilesAt(target, files, at);
             if (res.added === 0) store.toast(res.reason ?? "Could not import image");
             return;

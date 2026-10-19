@@ -29,6 +29,7 @@ import { buildReport, publishReport, type ExportReport } from "./report";
 import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
+  CHART_SLOT_ALPHA,
   FONT_STACK,
   GALLERY_CAPTION_LINE_H,
   GALLERY_CAPTION_SIZE,
@@ -418,7 +419,11 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   if (opts.imageDataUri) {
     const ids = new Set<string>();
     for (const p of placed) {
-      for (const it of positionedImageSlots(p, p.node, resolveImage).items) ids.add(it.id);
+      const pos = positionedImageSlots(p, p.node, resolveImage);
+      for (const it of pos.items) ids.add(it.id);
+      // Gallery and chart cells too — without them every cell exported as a
+      // "missing" placeholder. An empty chart slot has no asset to fetch.
+      for (const c of pos.cells) if (c.id) ids.add(c.id);
     }
     for (const id of ids) {
       const uri = await opts.imageDataUri(id);
@@ -498,8 +503,20 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     // by the renderer that has it built in, instead of arithmetic that could
     // drift from the canvas's.
     for (const c of pos.cells) {
-      const uri = uris.get(c.id) ?? null;
-      if (uri) {
+      const uri = c.id ? uris.get(c.id) ?? null : null;
+      if (pos.gallery?.chart) {
+        // Chart slot: the frame always, the picture whole inside it (`pic`
+        // is already the letterboxed rect, so "none" is exact).
+        parts.push(
+          `<rect x="${n3(c.x)}" y="${n3(c.y)}" width="${n3(c.w)}" height="${n3(c.h)}" fill="${esc(text)}" fill-opacity="${CHART_SLOT_ALPHA}"/>`
+        );
+        if (uri) {
+          parts.push(
+            `<image x="${n3(c.pic.x)}" y="${n3(c.pic.y)}" width="${n3(c.pic.w)}" height="${n3(c.pic.h)}" href="${uri}" preserveAspectRatio="none"/>`
+          );
+          images++;
+        } else if (c.id) imagesMissing++;
+      } else if (uri) {
         parts.push(
           `<image x="${n3(c.x)}" y="${n3(c.y)}" width="${n3(c.w)}" height="${n3(c.h)}" href="${uri}" preserveAspectRatio="xMidYMid slice"/>`
         );
