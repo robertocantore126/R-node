@@ -2141,6 +2141,21 @@ export class Renderer {
     return positionedImageSlots(p, p.node, this.resolveImage).cells.map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }));
   }
 
+  /**
+   * World rect of one cell's title band — where the inline caption field sits.
+   * A gallery with no caption yet has no band, so the field takes the last
+   * line's worth of the picture instead: there must be somewhere to type the
+   * first one. Null when the cell is gone (undo, another delete).
+   */
+  galleryCaptionRect(state: RenderState, nodeId: string, index: number): { x: number; y: number; w: number; h: number } | null {
+    const p = this.placedNodes(state).find((q) => q.node.id === nodeId);
+    if (!p) return null;
+    const c = positionedImageSlots(p, p.node, this.resolveImage).cells[index];
+    if (!c) return null;
+    if (c.captionH > 0) return { x: c.x, y: c.captionY, w: c.w, h: c.captionH };
+    return { x: c.x, y: c.y + c.h - GALLERY_CAPTION_LINE_H, w: c.w, h: GALLERY_CAPTION_LINE_H };
+  }
+
   /** The "+ column" / "+ row" pill of a selected chart under the point, or null. */
   hitTestChartGrow(state: RenderState, worldX: number, worldY: number): { id: string; grow: "row" | "col" } | null {
     if (state.selection.size !== 1) return null;
