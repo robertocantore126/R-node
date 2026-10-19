@@ -179,6 +179,23 @@ export const GALLERY_CAPTION_LINE_H = Math.round(GALLERY_CAPTION_SIZE * LINE_HEI
 export const GALLERY_COLS = 5;
 
 /**
+ * Chart topics (`Style.gallery.chart`): the board a new chart starts as —
+ * CHART_COLS × CHART_ROWS empty slots — and its spacing. Larger cells and a
+ * wider gap than a gallery: a chart is a poster of covers, read from across
+ * the map, not a strip of thumbnails.
+ */
+export const CHART_CELL_W = 120;
+export const CHART_COLS = 3;
+export const CHART_ROWS = 2;
+export const CHART_GAP = 10;
+/** Opacity of a chart slot's frame, painted in the theme's muted text colour
+ *  so it reads as a dark square on a dark map and a grey one on a light map.
+ *  Shared by the canvas, the SVG and the PDF (I9). */
+export const CHART_SLOT_ALPHA = 0.22;
+/** Most rows or columns a chart may grow to — a guard, not a design size. */
+export const CHART_MAX_SIDE = 30;
+
+/**
  * Width of the bullet column, in em of the list item's font size. Shared with
  * the overlay as `--rnode-bullet-w`: the canvas indents the text by exactly
  * this and the CSS hangs the item by exactly this, so a wrapped list item
@@ -683,18 +700,30 @@ export interface GalleryExtent {
   /** Band reserved under every picture for its caption; 0 when none has one. */
   captionH: number;
   count: number;
+  /** Chart mode (`Style.gallery.chart`): framed slots, pictures contained. */
+  chart: boolean;
+  /** Gap between cells — GALLERY_GAP, or CHART_GAP for a chart. */
+  gap: number;
 }
 
 /** One placed cell: where its picture goes and which part of it is shown. */
 export interface GalleryCell {
+  /** Asset id; "" for an empty chart slot. */
   id: string;
   /** Trimmed caption; "" when this cell has none. */
   caption: string;
-  /** The picture's rect — square, `cellW` on a side. */
+  /** The cell's rect — what hit-tests, rings and frames use. In a plain
+   *  gallery it is also exactly where the picture is painted. */
   x: number;
   y: number;
   w: number;
   h: number;
+  /**
+   * Where the picture itself is painted, with `crop` applied. Equal to the
+   * cell rect in a gallery (cover); inside it, letterboxed, in a chart
+   * (contain). The painters read THIS, so the two fits are one code path.
+   */
+  pic: { x: number; y: number; w: number; h: number };
   /**
    * The centred part of the source that fills the cell ("cover"), in
    * NORMALISED 0..1 units of the original. Normalised rather than in pixels
@@ -859,6 +888,65 @@ export function galleryInsertIndex(
   return wx > c.x + c.w / 2 ? best + 1 : best;
 }
 
+/** Side of a chart's "+" grow pill and its distance outside the box, in
+ *  SCREEN px at zooms below 100% (see `chartGrowHandles`). */
+export const CHART_GROW_SIZE = 20;
+export const CHART_GROW_GAP = 8;
+
+/**
+ * The two "+" pills a selected chart shows: one past the right edge, level
+ * with the middle of the board (a column grows there), one under the bottom
+ * edge, centred on the board (a row grows there). Empty for any other topic.
+ * One function for the painter and the hit test, so the pill a user sees is
+ * the pill a click finds.
+ */
+export function chartGrowHandles(
+  box: { x: number; y: number; w: number; h: number; node: MindNode },
+  scale = 1,
+): { grow: "row" | "col"; x: number; y: number; w: number; h: number }[] {
+  if (!box.node.style.gallery?.chart) return [];
+  const { cells } = positionedImageSlots(box, box.node);
+  if (cells.length === 0) return [];
+  const top = cells[0].y;
+  const last = cells[cells.length - 1];
+  const bottom = last.y + last.h;
+  const left = cells[0].x;
+  const right = Math.max(...cells.map((c) => c.x + c.w));
+  // Sized in screen px: zoomed out, the pill grows in world units so it stays
+  // clickable; zoomed in, it keeps its 100% size rather than ballooning.
+  const k = 1 / Math.min(1, Math.max(0.05, scale));
+  const s = CHART_GROW_SIZE * k;
+  const gap = CHART_GROW_GAP * k;
+  return [
+    { grow: "col", x: box.x + box.w + gap, y: (top + bottom) / 2 - s / 2, w: s, h: s },
+    { grow: "row", x: (left + right) / 2 - s / 2, y: box.y + box.h + gap, w: s, h: s },
+  ];
+}
+
+/**
+ * The chart SLOT a drop at (wx, wy) lands in — the cell itself, not a gap: a
+ * chart's slots are fixed, so a picture goes into one rather than between two.
+ * Nearest centre with rows weighted as in `galleryInsertIndex`, so a drop in
+ * the gap between two rows still picks the row the pointer is closer to.
+ */
+export function chartSlotIndex(
+  cells: { x: number; y: number; w: number; h: number }[],
+  wx: number,
+  wy: number,
+): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i];
+    const d = Math.abs(wy - (c.y + c.h / 2)) * 4 + Math.abs(wx - (c.x + c.w / 2));
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
 /**
  * Lay `count` cells into a wrapping grid of `cols` columns, in reading order.
  *
@@ -906,6 +994,7 @@ export function gridCells(
 export function galleryExtent(n: MindNode): GalleryExtent | null {
   const g = n.style.gallery;
   if (!g || g.items.length === 0) return null;
+  if (g.chart) return chartExtent(g);
   const count = g.items.length;
   const cellW = Math.max(16, g.cellW ?? GALLERY_CELL_W);
   const aspect = g.aspect && g.aspect > 0 ? g.aspect : GALLERY_ASPECT;
@@ -932,7 +1021,59 @@ export function galleryExtent(n: MindNode): GalleryExtent | null {
     rows,
     captionH,
     count,
+    chart: false,
+    gap: GALLERY_GAP,
   };
+}
+
+/**
+ * The board of a chart topic (`Style.gallery.chart`). Unlike a gallery it
+ * never shrinks to its content: the column count is the board's own width,
+ * empty slots keep their place, and the title band is reserved on every slot
+ * from the start — a chart is a frame waiting for pictures, and a frame that
+ * jumped taller at the first title would move everything under it.
+ */
+function chartExtent(g: NonNullable<MindNode["style"]["gallery"]>): GalleryExtent {
+  const count = g.items.length;
+  const cellW = Math.max(16, g.cellW ?? CHART_CELL_W);
+  const aspect = g.aspect && g.aspect > 0 ? g.aspect : GALLERY_ASPECT;
+  const cellPicH = Math.max(8, Math.round(cellW / aspect));
+  const captionH = GALLERY_CAPTION_GAP + GALLERY_CAPTION_LINES * GALLERY_CAPTION_LINE_H;
+  const cellH = cellPicH + captionH;
+  const cols = Math.max(1, Math.floor(g.cols ?? CHART_COLS));
+  const rows = Math.max(1, Math.ceil(count / cols));
+  return {
+    w: cols * cellW + (cols - 1) * CHART_GAP,
+    h: rows * cellH + (rows - 1) * CHART_GAP,
+    cellW,
+    cellPicH,
+    cellH,
+    cols,
+    rows,
+    captionH,
+    count,
+    chart: true,
+    gap: CHART_GAP,
+  };
+}
+
+/**
+ * Where a picture of natural size `nat` sits inside a `w`×`h` frame when it is
+ * shown WHOLE ("contain") — centred, scaled down or up to touch two edges.
+ * Shared by the canvas, the SVG and the PDF through `GalleryCell.pic` (I9).
+ */
+export function containRect(
+  nat: { w: number; h: number },
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): { x: number; y: number; w: number; h: number } {
+  if (nat.w <= 0 || nat.h <= 0) return { x, y, w, h };
+  const s = Math.min(w / nat.w, h / nat.h);
+  const pw = nat.w * s;
+  const ph = nat.h * s;
+  return { x: x + (w - pw) / 2, y: y + (h - ph) / 2, w: pw, h: ph };
 }
 
 export interface TextInsets {
@@ -1019,11 +1160,16 @@ export function positionedImageSlots(
     // gridCells owns the "cards in a wrapping grid" arithmetic; these cells
     // only add the caption band under each picture (which gridCells must not
     // know about — the caption is gallery chrome, not grid geometry).
-    const rects = gridCells(g.items.length, gallery.cols, gallery.cellW, gallery.cellH, GALLERY_GAP, gridLeft, gridTop);
+    const rects = gridCells(g.items.length, gallery.cols, gallery.cellW, gallery.cellH, gallery.gap, gridLeft, gridTop);
     for (let i = 0; i < g.items.length; i++) {
       const item = g.items[i];
       const r = rects[i];
-      const nat = resolveImage?.(item.id) ?? null;
+      const nat = item.id ? resolveImage?.(item.id) ?? null : null;
+      // A chart shows the whole picture inside its frame; a gallery crops it
+      // to fill the cell. Same `crop` + `pic` pair either way, so the
+      // painters have one path: the full source into a letterboxed rect, or
+      // a centred part of it into the cell itself.
+      const pic = gallery.chart && nat ? containRect(nat, r.x, r.y, r.w, gallery.cellPicH) : { x: r.x, y: r.y, w: r.w, h: gallery.cellPicH };
       cells.push({
         id: item.id,
         caption: (item.caption ?? "").trim(),
@@ -1031,7 +1177,8 @@ export function positionedImageSlots(
         y: r.y,
         w: r.w,
         h: gallery.cellPicH,
-        crop: coverCrop(nat, gallery.cellW / gallery.cellPicH),
+        pic,
+        crop: gallery.chart ? (nat ? { sx: 0, sy: 0, sw: 1, sh: 1 } : null) : coverCrop(nat, gallery.cellW / gallery.cellPicH),
         captionY: r.y + gallery.cellPicH + GALLERY_CAPTION_GAP,
         captionH: gallery.captionH > 0 ? gallery.captionH - GALLERY_CAPTION_GAP : 0,
       });
@@ -1087,7 +1234,7 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
   // edge and painting over the title.
   const g = s.gallery;
   const gal = g
-    ? `${g.items.length}:${g.cellW ?? ""}:${g.aspect ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}`
+    ? `${g.items.length}:${g.cellW ?? ""}:${g.aspect ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}:${g.chart ? "chart" : ""}`
     : "";
   return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
 }

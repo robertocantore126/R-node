@@ -76,6 +76,7 @@ import {
   FONT_STACK,
   GALLERY_CAPTION_LINE_H,
   GALLERY_CAPTION_SIZE,
+  CHART_SLOT_ALPHA,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
   bezierEnterRect,
@@ -600,7 +601,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     for (const p of placed) {
       const pos = positionedImageSlots(p, p.node, resolveImage);
       for (const it of pos.items) ids.add(it.id);
-      for (const c of pos.cells) ids.add(c.id);
+      for (const c of pos.cells) if (c.id) ids.add(c.id);
     }
     for (const id of ids) {
       const src = await opts.imageBytes(id);
@@ -894,15 +895,30 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     // numbers directly — the full width is the cell divided by the fraction of
     // the source on show, and the picture's edge sits that fraction back.
     for (const c of pos.cells) {
-      const name = xobjByAsset.get(c.id);
+      if (pos.gallery?.chart) {
+        // Chart slot frame, behind the picture — the same muted square the
+        // canvas paints, at the same opacity (CHART_SLOT_ALPHA).
+        cmds.push(
+          "q",
+          opacityCommand(theme.textMuted, CHART_SLOT_ALPHA),
+          `${rgb(theme.textMuted)} rg`,
+          `${f(fr.X(c.x))} ${f(fr.Y(c.y + c.h))} ${f(c.w * fr.s)} ${f(c.h * fr.s)} re f`,
+          "Q",
+        );
+        ops += 5;
+      }
+      const name = c.id ? xobjByAsset.get(c.id) : undefined;
       if (!name || !c.crop) continue;
-      const fullW = c.w / c.crop.sw;
-      const fullH = c.h / c.crop.sh;
-      const imgX = c.x - c.crop.sx * fullW;
-      const imgTop = c.y - c.crop.sy * fullH;
+      // `pic` is the painted rect: the cell itself for a gallery (cover), the
+      // letterboxed rect inside it for a chart (contain, crop = whole source).
+      const r = c.pic;
+      const fullW = r.w / c.crop.sw;
+      const fullH = r.h / c.crop.sh;
+      const imgX = r.x - c.crop.sx * fullW;
+      const imgTop = r.y - c.crop.sy * fullH;
       cmds.push(
         "q",
-        `${f(fr.X(c.x))} ${f(fr.Y(c.y + c.h))} ${f(c.w * fr.s)} ${f(c.h * fr.s)} re W n`,
+        `${f(fr.X(r.x))} ${f(fr.Y(r.y + r.h))} ${f(r.w * fr.s)} ${f(r.h * fr.s)} re W n`,
         `${f(fullW * fr.s)} 0 0 ${f(fullH * fr.s)} ${f(fr.X(imgX))} ${f(fr.Y(imgTop + fullH))} cm`,
         `/${name} Do`,
         "Q",

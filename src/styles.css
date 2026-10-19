@@ -1703,3 +1703,22 @@ textarea:focus {
   box-shadow: 0 0 0 1px #d52629;
 }
 .ctx-menu .quiz-mistakes-toggle:disabled { opacity: .35; cursor: default; }
+
+/* Inline title field of a gallery / chart cell (CaptionField.tsx). Opaque
+   so the caption the canvas painted underneath never shows twice. */
+.caption-field {
+  position: absolute;
+  z-index: 40;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 4px;
+  font-family: var(--font);
+  text-align: center;
+  color: var(--text);
+  background: var(--surface);
+  border: 1.5px solid var(--accent);
+  border-radius: 4px;
+  outline: none;
+  box-shadow: var(--shadow);
+  user-select: text;
+}

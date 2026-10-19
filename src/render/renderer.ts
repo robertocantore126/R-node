@@ -15,7 +15,7 @@ import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_SLOT_ALPHA, chartGrowHandles, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -763,6 +763,28 @@ export class Renderer {
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
+      // A selected chart grows from its edges: "+" pills just outside the box,
+      // to the right (a column) and underneath (a row). Same outline style as
+      // the width handles; the rects come from chartGrowHandles, which the hit
+      // test reads too.
+      for (const hnd of chartGrowHandles(p, this.curScale)) {
+        this.roundRect(ctx, hnd.x, hnd.y, hnd.w, hnd.h, hnd.w / 4);
+        ctx.fillStyle = theme.background;
+        ctx.fill();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = hnd.w / 12;
+        ctx.stroke();
+        const cx = hnd.x + hnd.w / 2;
+        const cy = hnd.y + hnd.h / 2;
+        const arm = hnd.w / 4;
+        ctx.beginPath();
+        ctx.moveTo(cx - arm, cy);
+        ctx.lineTo(cx + arm, cy);
+        ctx.moveTo(cx, cy - arm);
+        ctx.lineTo(cx, cy + arm);
+        ctx.lineWidth = hnd.w / 10;
+        ctx.stroke();
+      }
     }
     // Image resize handle (T14): bottom-right corner of the image, same
     // outline style as the width handles. Same rect as imageWorldRect. Drawn
@@ -1088,8 +1110,19 @@ export class Renderer {
     if (!gallery) return;
     const ctx = this.ctx;
     for (const c of cells) {
+      if (gallery.chart) {
+        // A chart slot is a frame first: filled or empty, it is there, and
+        // the empty ones are what invite the next picture.
+        ctx.save();
+        ctx.fillStyle = theme.textMuted;
+        ctx.globalAlpha = CHART_SLOT_ALPHA;
+        ctx.fillRect(c.x, c.y, c.w, c.h);
+        ctx.restore();
+        if (c.crop) this.paintSlot(p, c.id, c.pic.w, c.pic.h, c.pic.x, c.pic.y, null);
+        continue;
+      }
       if (c.crop) {
-        this.paintSlot(p, c.id, c.w, c.h, c.x, c.y, c.crop);
+        this.paintSlot(p, c.id, c.pic.w, c.pic.h, c.pic.x, c.pic.y, c.crop);
       } else {
         // The card is missing (a document opened without its assets). The cell
         // keeps its space — the layout already paid for it — and says so,
@@ -1894,6 +1927,13 @@ export class Renderer {
       ctx.restore();
       return;
     }
+    if (gallery.chart) {
+      // A chart drop lands IN a slot, not between two: ring that slot.
+      const c = cells[Math.max(0, Math.min(cells.length - 1, target.index))];
+      ctx.strokeRect(c.x - 2, c.y - 2, c.w + 4, c.h + gallery.captionH + 4);
+      ctx.restore();
+      return;
+    }
     const i = Math.max(0, Math.min(cells.length, target.index));
     const at = i < cells.length ? cells[i] : cells[cells.length - 1];
     const x = i < cells.length ? at.x - GALLERY_GAP / 2 : at.x + at.w + GALLERY_GAP / 2;
@@ -2099,6 +2139,36 @@ export class Renderer {
     const p = this.placedNodes(state).find((q) => q.node.id === nodeId);
     if (!p) return [];
     return positionedImageSlots(p, p.node, this.resolveImage).cells.map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }));
+  }
+
+  /**
+   * World rect of one cell's title band — where the inline caption field sits.
+   * A gallery with no caption yet has no band, so the field takes the last
+   * line's worth of the picture instead: there must be somewhere to type the
+   * first one. Null when the cell is gone (undo, another delete).
+   */
+  galleryCaptionRect(state: RenderState, nodeId: string, index: number): { x: number; y: number; w: number; h: number } | null {
+    const p = this.placedNodes(state).find((q) => q.node.id === nodeId);
+    if (!p) return null;
+    const c = positionedImageSlots(p, p.node, this.resolveImage).cells[index];
+    if (!c) return null;
+    if (c.captionH > 0) return { x: c.x, y: c.captionY, w: c.w, h: c.captionH };
+    return { x: c.x, y: c.y + c.h - GALLERY_CAPTION_LINE_H, w: c.w, h: GALLERY_CAPTION_LINE_H };
+  }
+
+  /** The "+ column" / "+ row" pill of a selected chart under the point, or null. */
+  hitTestChartGrow(state: RenderState, worldX: number, worldY: number): { id: string; grow: "row" | "col" } | null {
+    if (state.selection.size !== 1) return null;
+    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    for (const id of state.selection) {
+      if (state.editingId === id) continue;
+      const p = placed.get(id);
+      if (!p) continue;
+      for (const h of chartGrowHandles(p, state.camera.scale)) {
+        if (worldX >= h.x && worldX <= h.x + h.w && worldY >= h.y && worldY <= h.y + h.h) return { id, grow: h.grow };
+      }
+    }
+    return null;
   }
 
   hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {

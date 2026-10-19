@@ -95,7 +95,8 @@ export type ImageSlot = "top" | "bottom" | "left" | "right";
  * canvas alone, so the parity contract never applies to them.
  */
 export interface GalleryItem {
-  /** SHA-256 of the asset — the same id `Style.image` and the slots use. */
+  /** SHA-256 of the asset — the same id `Style.image` and the slots use.
+   *  "" only in a chart (`gallery.chart`): an empty slot. */
   id: string;
   /** Single-line label under the cell. Newlines are not meaningful here. */
   caption?: string;
@@ -198,6 +199,16 @@ export interface Style {
     aspect?: number;
     /** Fixed column count. Absent or 0 = wrap to whatever the box allows. */
     cols?: number;
+    /**
+     * CHART mode: a fixed `cols` × rows board of slots (a topsters/chartr
+     * chart) instead of a list that wraps. `items.length` is always a
+     * multiple of `cols`, and an EMPTY slot is an item whose `id` is "" —
+     * the board's shape is what the user built, so a hole must survive
+     * removing its picture. Pictures are fitted whole ("contain") inside a
+     * square frame rather than cropped, and every slot reserves its title
+     * band, filled or not.
+     */
+    chart?: boolean;
   };
   /**
    * The quizzes attached to this topic (see `QuizInfo`). Nothing renders them:

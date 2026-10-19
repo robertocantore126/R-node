@@ -12,7 +12,7 @@ import { editorMapToPdf } from "../export/editorPdf";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
+import { createCanvasTextMeasurer, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
@@ -21,6 +21,7 @@ import { listShapes } from "../editor/shapeLibrary";
 import type { ImageSlot, MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
+import { CaptionField } from "./CaptionField";
 import { installTrace, trace } from "../dev/trace";
 import { fetchImageAsFile, firstImageFile, firstUriFromList, imageFiles } from "../editor/externalImage";
 
@@ -193,6 +194,10 @@ export function CanvasView(): JSX.Element {
   // Right-click context menu: null = closed, otherwise the wrap-space cursor
   // position and the right-clicked topic (see onContextMenu).
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  // Inline caption field of a gallery / chart cell (double click on a cell):
+  // which cell it is editing. A plain <input> over the title band — not the
+  // Lexical overlay — so it owns none of the §3 parity contract.
+  const [captionEdit, setCaptionEdit] = useState<{ nodeId: string; index: number } | null>(null);
   // Ghost preview of an image being dragged to another node (internal
   // reassignment): world coords of the cursor + the image to draw. Read by
   // paint/currentRenderState on every frame; the renderer draws the cached
@@ -669,6 +674,15 @@ export function CanvasView(): JSX.Element {
     // Xmind-style width resize: grab the handle on the selected node's edge.
     // Checked BEFORE the body hit test so the handle wins on the edge line
     // (skipped while a relationship target is being picked).
+    // A selected chart's "+" pills grow it by a column (right) or a row
+    // (below). They sit OUTSIDE the box, so nothing else claims the point.
+    const growHit = s.relFrom ? null : renderer.hitTestChartGrow(rs, world.x, world.y);
+    if (growHit) {
+      store.resizeChart(growHit.id, growHit.grow === "row" ? 1 : 0, growHit.grow === "col" ? 1 : 0);
+      trace.applied("pointerdown:chart-grow", { id: growHit.id, grow: growHit.grow, wasEditing });
+      return;
+    }
+
     const resizeHit = s.relFrom ? null : renderer.hitTestResize(rs, world.x, world.y);
     if (resizeHit) {
       const rect = renderer.nodeWorldRect(rs, resizeHit.id)!;
@@ -912,7 +926,7 @@ export function CanvasView(): JSX.Element {
       const hit = rendererRef.current!.hitTest(rs, world.x, world.y);
       if (hit) {
         const rects = rendererRef.current!.galleryCellRects(rs, hit);
-        drag.cellDropTo = { nodeId: hit, index: galleryInsertIndex(rects, world.x, world.y) };
+        drag.cellDropTo = { nodeId: hit, index: galleryDropIndex(hit, rects, world.x, world.y) };
         galleryDropRef.current = drag.cellDropTo;
       } else {
         drag.cellDropTo = null;
@@ -1137,16 +1151,15 @@ export function CanvasView(): JSX.Element {
       // the overlay never even starts to mount (the one thing that would drag
       // this feature into the §3 parity contract).
       if (store.sheet.nodes[hit]?.style.gallery) {
-        // Double click on a CELL is how its caption is reached: focus that
-        // cell's field in the Inspector with the text selected, so typing
-        // replaces it. Still no editor on the canvas — the focused element is
-        // a plain <input> in a side panel, which owns none of the §3 contract.
+        // Double click on a CELL renames it in place: a plain <input> opens
+        // over its title band with the text selected, so typing replaces it
+        // and Ctrl+C copies it. Still no rich editor on the canvas — the
+        // field owns none of the §3 contract.
         const cellHit = renderer.hitTestGalleryCell(currentRenderState(), world.x, world.y);
         if (cellHit && cellHit.nodeId === hit) {
           store.selectGalleryCell(cellHit.nodeId, cellHit.index);
-          window.dispatchEvent(
-            new CustomEvent("r-node:focus-gallery-caption", { detail: { nodeId: cellHit.nodeId, index: cellHit.index } }),
-          );
+          setCaptionEdit({ nodeId: cellHit.nodeId, index: cellHit.index });
+          trace.applied("dblclick:caption-edit", { id: cellHit.nodeId, index: cellHit.index });
         } else {
           store.select(hit);
         }
@@ -1252,6 +1265,11 @@ export function CanvasView(): JSX.Element {
     }
   };
 
+  /** Where a drop over a gallery lands: a gap between cells, or — on a chart,
+   *  whose slots are fixed — the slot itself. */
+  const galleryDropIndex = (nodeId: string, rects: { x: number; y: number; w: number; h: number }[], wx: number, wy: number): number =>
+    store.doc.node(nodeId)?.style.gallery?.chart ? chartSlotIndex(rects, wx, wy) : galleryInsertIndex(rects, wx, wy);
+
   const currentRenderState = (): RenderState => {
     const s = store.getSnapshot();
     return {
@@ -1322,6 +1340,31 @@ export function CanvasView(): JSX.Element {
   // -------------------------------------------------------------------------
   // Inline editor overlay
   // -------------------------------------------------------------------------
+
+  // The inline caption field follows its cell through pan and zoom: its rect
+  // is re-read from the renderer on every render, like the editing overlay's.
+  let captionField: JSX.Element | null = null;
+  if (captionEdit) {
+    const item = store.doc.node(captionEdit.nodeId)?.style.gallery?.items[captionEdit.index];
+    const band = item ? rendererRef.current?.galleryCaptionRect(currentRenderState(), captionEdit.nodeId, captionEdit.index) : null;
+    if (item && band) {
+      const tl = worldToScreen(state.camera, viewSize.w, viewSize.h, band.x, band.y);
+      const { nodeId, index } = captionEdit;
+      captionField = (
+        <CaptionField
+          key={`${nodeId}:${index}`}
+          rect={{ left: tl.x, top: tl.y, width: band.w * state.camera.scale, height: band.h * state.camera.scale }}
+          fontSize={GALLERY_CAPTION_SIZE * state.camera.scale}
+          caption={item.caption ?? ""}
+          onCommit={(text) => {
+            setCaptionEdit(null);
+            store.setGalleryCaption(nodeId, index, text);
+          }}
+          onCancel={() => setCaptionEdit(null)}
+        />
+      );
+    }
+  }
 
   let editStyle: CSSProperties | null = null;
   // The overlay wears the node's painted colors; resolving them in the
@@ -1425,7 +1468,7 @@ export function CanvasView(): JSX.Element {
           const isGallery = !!hit && !!store.doc.node(hit)?.style.gallery;
           if (isGallery) {
             const rects = rendererRef.current?.galleryCellRects(rs, hit!) ?? [];
-            galleryDropRef.current = { nodeId: hit!, index: galleryInsertIndex(rects, world.x, world.y) };
+            galleryDropRef.current = { nodeId: hit!, index: galleryDropIndex(hit!, rects, world.x, world.y) };
             // hover may not change between dragover events, so the repaint
             // that draws the caret cannot ride on setHover's notify alone.
             schedule();
@@ -1548,7 +1591,7 @@ export function CanvasView(): JSX.Element {
               files = [file];
             }
             const rects = rendererRef.current?.galleryCellRects(currentRenderState(), target) ?? [];
-            const at = galleryInsertIndex(rects, world.x, world.y);
+            const at = galleryDropIndex(target, rects, world.x, world.y);
             const res = await store.addGalleryImageFilesAt(target, files, at);
             if (res.added === 0) store.toast(res.reason ?? "Could not import image");
             return;
@@ -1590,6 +1633,7 @@ export function CanvasView(): JSX.Element {
         />
       )}
       {ctxMenu && <NodeContextMenu key={ctxMenu.nodeId} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
+      {captionField}
     </div>
   );
 }

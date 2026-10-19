@@ -106,7 +106,21 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
       <button role="menuitem" onClick={act(() => store.createFreeformTopic(node.id))}>
         New freeform topic
       </button>
+      <button role="menuitem" onClick={act(() => store.createChartTopic(node.id))}>
+        New chart topic
+      </button>
       {node.style.freeform && <button role="menuitem" onClick={act(() => store.createFreeformItem(node.id))}>Add text / node</button>}
+      {/* Growing a chart keeps the menu open, like the quiz "+": the point is
+          to click "+ column" three times in a row. */}
+      {node.style.gallery?.chart && (
+        <div className="ctx-size-row" role="group" aria-label="Chart size">
+          <span className="ctx-label">Chart</span>
+          <button role="menuitem" title="Add a row at the bottom" onClick={() => store.resizeChart(node.id, 1, 0)}>+ row</button>
+          <button role="menuitem" title="Add a column on the right" onClick={() => store.resizeChart(node.id, 0, 1)}>+ col</button>
+          <button role="menuitem" title="Remove the bottom row" onClick={() => store.resizeChart(node.id, -1, 0)}>− row</button>
+          <button role="menuitem" title="Remove the right column" onClick={() => store.resizeChart(node.id, 0, -1)}>− col</button>
+        </div>
+      )}
       <button role="menuitem" onClick={act(() => store.createGalleryTopic(node.id))}>
         New gallery topic
       </button>

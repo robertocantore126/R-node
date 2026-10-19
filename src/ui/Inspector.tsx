@@ -6,7 +6,7 @@ import { THEMES } from "../render/theme";
 import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
 import { plainToRuns } from "../core/text";
-import { GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
+import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
@@ -344,6 +344,10 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
 
   const gallery = node?.style.gallery;
   const items = gallery?.items ?? [];
+  const chart = !!gallery?.chart;
+  const shape = chart ? store.chartShape(nodeId) : null;
+  const filled = chart ? items.filter((it) => it.id).length : items.length;
+  const defaultCellW = chart ? CHART_CELL_W : GALLERY_CELL_W;
   // The cell selected on the canvas, so its row here says so: the ring out
   // there and the row in here are one selection seen twice, and a user who
   // clicked a picture should not have to count cells to find its caption.
@@ -364,11 +368,26 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
     <div className="inspector-section">
       <div
         className="inspector-label"
-        data-help="Gallery"
-        data-help-more="Fills the topic with a grid of captioned pictures — a tier-list row, a mood board, a cast list. The title stays above the grid."
+        data-help={chart ? "Chart" : "Gallery"}
+        data-help-more={
+          chart
+            ? "A board of slots, each with a title under it. Select a slot and paste (Ctrl+V) or drop a picture into it; drag a picture onto another slot to swap them. Grow it with + row / + column."
+            : "Fills the topic with a grid of captioned pictures — a tier-list row, a mood board, a cast list. The title stays above the grid."
+        }
       >
-        Gallery
+        {chart ? "Chart" : "Gallery"}
       </div>
+
+      {shape && (
+        <div className="field">
+          <span>Size</span>
+          <span className="muted">{shape.cols} × {shape.rows}</span>
+          <button className="btn tiny" title="Add a row at the bottom" onClick={() => store.resizeChart(nodeId, 1, 0)}>+ row</button>
+          <button className="btn tiny" title="Add a column on the right" onClick={() => store.resizeChart(nodeId, 0, 1)}>+ col</button>
+          <button className="btn tiny" title="Remove the bottom row" disabled={shape.rows <= 1} onClick={() => store.resizeChart(nodeId, -1, 0)}>− row</button>
+          <button className="btn tiny" title="Remove the right column" disabled={shape.cols <= 1} onClick={() => store.resizeChart(nodeId, 0, -1)}>− col</button>
+        </div>
+      )}
 
       <input
         ref={fileRef}
@@ -384,9 +403,9 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
 
       <div className="field">
         <button className="btn small" disabled={busy} onClick={() => fileRef.current?.click()}>
-          {busy ? "Adding…" : items.length > 0 ? "Add more images…" : "Add images…"}
+          {busy ? "Adding…" : filled > 0 ? "Add more images…" : "Add images…"}
         </button>
-        {items.length > 0 && <span className="muted">{items.length} in the grid</span>}
+        {items.length > 0 && <span className="muted">{chart ? `${filled} of ${items.length} slots filled` : `${items.length} in the grid`}</span>}
       </div>
       {note && <p className="muted">{note}</p>}
 
@@ -401,11 +420,11 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
               min={24}
               max={200}
               step={4}
-              value={gallery?.cellW ?? GALLERY_CELL_W}
+              value={gallery?.cellW ?? defaultCellW}
               onChange={(e) => store.setGalleryLayout(nodeId, { cellW: Number(e.target.value) })}
-              title="Side of one cell — the pictures are cropped square to fill it"
+              title={chart ? "Side of one slot — each picture is shown whole inside it" : "Side of one cell — the pictures are cropped square to fill it"}
             />
-            <span className="muted">{gallery?.cellW ?? GALLERY_CELL_W}px</span>
+            <span className="muted">{gallery?.cellW ?? defaultCellW}px</span>
           </div>
           <div className="field">
             <span>Cell shape</span>
@@ -421,7 +440,7 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
               ))}
             </select>
           </div>
-          <div className="field">
+          {!chart && <div className="field">
             <span>Columns</span>
             <input
               type="number"
@@ -435,7 +454,7 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
               title="Cells per row before wrapping — empty uses the default of 5"
             />
             <span className="muted">{gallery?.cols ? "fixed" : `${GALLERY_COLS} default`}</span>
-          </div>
+          </div>}
           <div className="field">
             <span>Captions</span>
             <button
@@ -468,7 +487,7 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
                 index={i}
                 last={i === items.length - 1}
                 caption={item.caption ?? ""}
-                name={store.sheet.attachments.find((a) => a.id === item.id)?.name ?? item.id.slice(0, 8)}
+                name={store.sheet.attachments.find((a) => a.id === item.id)?.name ?? (item.id ? item.id.slice(0, 8) : `slot ${i + 1} — empty`)}
                 selected={sel?.nodeId === nodeId && sel.index === i}
                 inputRef={(el) => {
                   captionRefs.current[i] = el;

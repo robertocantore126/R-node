@@ -25,7 +25,7 @@ import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
-import { createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
+import { CHART_COLS, CHART_MAX_SIDE, CHART_ROWS, createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { THEMES } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
@@ -72,6 +72,20 @@ function formatBytes(bytes: number): string {
  */
 function captionFromFileName(name?: string): string | undefined {
   const stem = (name ?? "").trim();
+  return stem === "" ? undefined : stem;
+}
+
+/**
+ * The starting title for a chart slot. Unlike a gallery caption it drops the
+ * extension: a chart title names the WORK ("blame!"), and the cover's file
+ * format is noise there. A picture pasted from the clipboard arrives under a
+ * made-up name ("pasted-image", "image.png") that names nothing, so it starts
+ * untitled.
+ */
+function chartCaptionFromFileName(name?: string): string | undefined {
+  const raw = (name ?? "").trim();
+  if (raw === "" || /^(pasted-image|image)(\.\w+)?$/i.test(raw)) return undefined;
+  const stem = raw.replace(/\.[a-z0-9]{2,5}$/i, "").trim();
   return stem === "" ? undefined : stem;
 }
 
@@ -2995,6 +3009,15 @@ export class EditorStore {
    */
   async attachImageFile(nodeId: string, file: Blob & { name?: string }, position: ImageSlot = "top"): Promise<{ ok: boolean; reason?: string }> {
     const sheet = this.sheet;
+    if (this.model.node(nodeId)?.style.gallery?.chart) {
+      // A picture pasted onto a chart goes INTO the board: the selected slot
+      // if one of this chart's is selected — read now, before the import
+      // awaits and the user clicks elsewhere — or else the first empty one.
+      const sel = this.state.gallerySel;
+      const at = sel && sel.nodeId === nodeId ? sel.index : undefined;
+      const res = await this.fillChartSlots(nodeId, [file], at);
+      return res.added > 0 ? { ok: true } : { ok: false, reason: res.reason };
+    }
     const res = await this.importToCard(file);
     if (!res.ok) return { ok: false, reason: res.reason };
     if (this.sheet !== sheet || !this.model.node(nodeId)) return { ok: false, reason: "Target topic is no longer open" };
@@ -3072,7 +3095,11 @@ export class EditorStore {
    * carries the ghost of one.
    */
   private putGallery(nodeId: string, items: GalleryItem[], cellW?: number, cols?: number, aspect?: number): void {
-    this.setNodeStyle(nodeId, { gallery: items.length > 0 ? { items, cellW, cols, aspect } : undefined });
+    // Chart-ness is decided once, at creation, and every rewrite carries it:
+    // the callers rebuild the gallery object from its knobs, and a flag they
+    // do not know about would otherwise be dropped by the first edit.
+    const chart = this.model.node(nodeId)?.style.gallery?.chart;
+    this.setNodeStyle(nodeId, { gallery: items.length > 0 ? { items, cellW, cols, aspect, ...(chart ? { chart } : {}) } : undefined });
     // Same reason as setNodeImage: the grid changes the box, and without this
     // the pictures appear and the topic grows around them a frame later.
     this.settleLayoutNow();
@@ -3097,6 +3124,7 @@ export class EditorStore {
     files: (Blob & { name?: string })[],
   ): Promise<{ added: number; failed: number; reason?: string }> {
     if (!this.model.node(nodeId)) return { added: 0, failed: 0 };
+    if (this.model.node(nodeId)?.style.gallery?.chart) return this.fillChartSlots(nodeId, files);
     const items = this.galleryItems(nodeId);
     let added = 0;
     let failed = 0;
@@ -3177,9 +3205,200 @@ export class EditorStore {
   removeGalleryItem(nodeId: string, index: number): void {
     const items = this.galleryItems(nodeId);
     if (index < 0 || index >= items.length) return;
-    items.splice(index, 1);
     const g = this.model.node(nodeId)?.style.gallery;
+    if (g?.chart) {
+      // A chart keeps the slot: the picture goes, the title stays — and a
+      // second Delete on the now-empty slot clears the title too.
+      const it = items[index];
+      if (it.id) items[index] = it.caption ? { id: "", caption: it.caption } : { id: "" };
+      else if (it.caption) items[index] = { id: "" };
+      else return;
+    } else items.splice(index, 1);
     this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
+    this.notify();
+  }
+
+  // -------------------------------------------------------------------------
+  // Chart topics (`Style.gallery.chart`)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a CHART topic under the selection (or a given parent) — the context
+   * menu's "New chart topic". It is born as a CHART_COLS × CHART_ROWS board of
+   * empty slots, so there is something to paste into from the first frame.
+   */
+  createChartTopic(parentId?: string): void {
+    const parent = parentId ? this.model.node(parentId) : this.selectionNode ?? this.model.rootNode;
+    if (!parent) return;
+    const type: NodeType = parent.type === "central" ? "main" : "subtopic";
+    const id = uid("n");
+    const position = this.createNodePosition(parent);
+    const items: GalleryItem[] = Array.from({ length: CHART_COLS * CHART_ROWS }, () => ({ id: "" }));
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id,
+      nodeType: type,
+      parentId: parent.id,
+      index: parent.childrenIds.length,
+      title: "Chart",
+      titleRuns: [{ text: "Chart" }],
+      style: { gallery: { items, cols: CHART_COLS, chart: true } },
+      position,
+    })]);
+    this.settleLayoutNow();
+    this.select(id);
+    trace.applied("chart:create", { nodeId: id, parentId: parent.id });
+  }
+
+  /** Columns and rows of a chart topic, or null when the node is not one. */
+  chartShape(nodeId: string): { cols: number; rows: number } | null {
+    const g = this.model.node(nodeId)?.style.gallery;
+    if (!g?.chart) return null;
+    const cols = Math.max(1, g.cols ?? CHART_COLS);
+    return { cols, rows: Math.max(1, Math.ceil(g.items.length / cols)) };
+  }
+
+  /**
+   * Grow or shrink a chart by whole rows (down) and columns (to the right).
+   * Slots keep their row and column: a new column is spliced onto the end of
+   * EVERY row, never appended to the list, or each row's pictures would slide
+   * one place along. Shrinking drops the last row / column, pictures and all —
+   * one undo step brings them back, like every gallery edit (I7).
+   */
+  resizeChart(nodeId: string, dRows: number, dCols: number): void {
+    const g = this.model.node(nodeId)?.style.gallery;
+    const shape = this.chartShape(nodeId);
+    if (!g || !shape) return;
+    const cols = Math.max(1, Math.min(CHART_MAX_SIDE, shape.cols + dCols));
+    const rows = Math.max(1, Math.min(CHART_MAX_SIDE, shape.rows + dRows));
+    if (cols === shape.cols && rows === shape.rows) {
+      return void trace.ignored("chart:resize", "at size limit", { cols, rows });
+    }
+    const items: GalleryItem[] = [];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const old = r < shape.rows && c < shape.cols ? g.items[r * shape.cols + c] : undefined;
+        items.push(old ? { ...old } : { id: "" });
+      }
+    }
+    // The cell selection is remapped by row and column, not by index, for the
+    // same reason the slots are: index 4 of a 3-wide board is not index 4 of
+    // a 4-wide one.
+    const sel = this.state.gallerySel;
+    if (sel && sel.nodeId === nodeId) {
+      const r = Math.floor(sel.index / shape.cols);
+      const c = sel.index % shape.cols;
+      this.state.gallerySel = r < rows && c < cols ? { nodeId, index: r * cols + c } : null;
+    }
+    this.putGallery(nodeId, items, g.cellW, cols, g.aspect);
+    trace.applied("chart:resize", { nodeId, cols, rows });
+    this.notify();
+  }
+
+  /**
+   * Import files into a chart's slots: the first goes INTO slot `at`
+   * (replacing what is there — that is what pasting onto a picture means),
+   * the rest into the next empty slots after it, and the board grows by rows
+   * when they run out. Without `at`, filling starts at the first empty slot.
+   * One `setStyle` for the whole batch, so one Ctrl+Z undoes the drop.
+   */
+  async fillChartSlots(
+    nodeId: string,
+    files: (Blob & { name?: string })[],
+    at?: number,
+  ): Promise<{ added: number; failed: number; reason?: string }> {
+    const sheet = this.sheet;
+    const cards: AttachmentInfo[] = [];
+    let failed = 0;
+    let reason: string | undefined;
+    for (const file of files) {
+      const res = await this.importToCard(file);
+      if (res.ok) cards.push(res.card);
+      else {
+        failed++;
+        if (reason === undefined) reason = res.reason;
+      }
+    }
+    const g = this.model.node(nodeId)?.style.gallery;
+    if (this.sheet !== sheet || !g?.chart) return { added: 0, failed: failed + cards.length, reason: reason ?? "Target chart is no longer open" };
+    if (cards.length === 0) {
+      this.notify();
+      return { added: 0, failed, reason };
+    }
+    const cols = Math.max(1, g.cols ?? CHART_COLS);
+    const items = this.galleryItems(nodeId);
+    let cursor = at !== undefined && at >= 0 && at < items.length ? at : items.findIndex((it) => !it.id);
+    if (cursor < 0) cursor = items.length;
+    let first = at !== undefined;
+    let lastIndex = cursor;
+    for (const card of cards) {
+      if (!this.sheet.attachments.some((a) => a.id === card.id)) this.sheet.attachments.push({ ...card });
+      // Past the first, skip filled slots: a multi-file drop fills holes, it
+      // does not overwrite the pictures already on the board.
+      if (!first) while (cursor < items.length && items[cursor].id) cursor++;
+      first = false;
+      while (cursor >= items.length) for (let c = 0; c < cols; c++) items.push({ id: "" });
+      const prev = items[cursor];
+      // A title the user already typed for the slot wins over the file name.
+      const caption = prev.caption || chartCaptionFromFileName(card.name);
+      items[cursor] = caption ? { id: card.id, caption } : { id: card.id };
+      lastIndex = cursor;
+      cursor++;
+    }
+    this.putGallery(nodeId, items, g.cellW, cols, g.aspect);
+    this.state.gallerySel = { nodeId, index: lastIndex };
+    trace.applied("chart:fill", { nodeId, added: cards.length, failed });
+    this.notify();
+    return { added: cards.length, failed, reason };
+  }
+
+  /**
+   * A cell drag that starts or ends on a chart. Slots are fixed, so the
+   * picture is LIFTED from its source (a chart slot empties, a gallery cell
+   * leaves its list) and PUT into the target (a chart slot is written, a
+   * gallery takes an insertion). Whatever the target slot held is put back
+   * where the dragged picture came from — a swap — so nothing is ever lost
+   * to a drop. Both writes are ONE batch: one Ctrl+Z undoes the move.
+   */
+  private moveChartCell(fromNodeId: string, fromIndex: number, toNodeId: string, toIndex: number): void {
+    const from = this.model.node(fromNodeId);
+    const to = this.model.node(toNodeId);
+    if (!from || !to) return;
+    const fromItems = this.galleryItems(fromNodeId);
+    const moved = fromItems[fromIndex];
+    if (!moved?.id) return void trace.ignored("chart:move", "empty slot");
+    const fromChart = !!from.style.gallery?.chart;
+    const toChart = !!to.style.gallery?.chart;
+    if (fromNodeId === toNodeId) {
+      // Same board: a swap, which is exactly moveGalleryItem on a chart.
+      if (toIndex !== fromIndex && toIndex >= 0 && toIndex < fromItems.length) this.moveGalleryItem(fromNodeId, fromIndex, toIndex);
+      return;
+    }
+    const toItems = this.galleryItems(toNodeId);
+    let displaced: GalleryItem | null = null;
+    if (toChart) {
+      const k = Math.max(0, Math.min(toItems.length - 1, toIndex));
+      displaced = toItems[k].id ? toItems[k] : null;
+      toItems[k] = { ...moved };
+    } else {
+      toItems.splice(Math.max(0, Math.min(toItems.length, toIndex)), 0, moved);
+    }
+    if (fromChart) fromItems[fromIndex] = displaced ?? { id: "" };
+    else if (displaced) fromItems[fromIndex] = displaced;
+    else fromItems.splice(fromIndex, 1);
+
+    const styleFor = (items: GalleryItem[], base: Style): Style => {
+      const gal = base.gallery;
+      return {
+        ...base,
+        gallery: items.length > 0 ? { items, cellW: gal?.cellW, cols: gal?.cols, aspect: gal?.aspect, ...(gal?.chart ? { chart: true } : {}) } : undefined,
+      };
+    };
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: fromNodeId, style: styleFor(fromItems, from.style), prev: from.style }),
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: toNodeId, style: styleFor(toItems, to.style), prev: to.style }),
+    ]);
+    this.settleLayoutNow();
+    trace.applied("chart:move", { from: fromNodeId, to: toNodeId, fromIndex, toIndex });
     this.notify();
   }
 
@@ -3189,9 +3408,15 @@ export class EditorStore {
     if (from < 0 || from >= items.length) return;
     const dest = Math.max(0, Math.min(items.length - 1, to));
     if (dest === from) return;
-    const [moved] = items.splice(from, 1);
-    items.splice(dest, 0, moved);
     const g = this.model.node(nodeId)?.style.gallery;
+    if (g?.chart) {
+      // A chart is a board of fixed slots: moving one picture onto another
+      // SWAPS them. Sliding the list would shift every slot after it.
+      [items[from], items[dest]] = [items[dest], items[from]];
+    } else {
+      const [moved] = items.splice(from, 1);
+      items.splice(dest, 0, moved);
+    }
     this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
     // The ring follows the picture it is on, not the position it was at: a
     // reorder that left the selection behind would leave it marking whichever
@@ -3222,6 +3447,10 @@ export class EditorStore {
     const from = this.model.node(fromNodeId);
     const to = this.model.node(toNodeId);
     if (!from || !to) return;
+    if (from.style.gallery?.chart || to.style.gallery?.chart) {
+      this.moveChartCell(fromNodeId, fromIndex, toNodeId, toIndex);
+      return;
+    }
     const fromItems = this.galleryItems(fromNodeId);
     if (fromIndex < 0 || fromIndex >= fromItems.length) return;
 
@@ -3278,6 +3507,8 @@ export class EditorStore {
     files: (Blob & { name?: string })[],
     at?: number,
   ): Promise<{ added: number; failed: number; reason?: string }> {
+    // On a chart `at` is the SLOT under the cursor, not a gap between cells.
+    if (this.model.node(nodeId)?.style.gallery?.chart) return this.fillChartSlots(nodeId, files, at);
     const before = this.galleryItems(nodeId).length;
     const res = await this.addGalleryImageFiles(nodeId, files);
     if (res.added > 0 && at !== undefined && at < before) {
