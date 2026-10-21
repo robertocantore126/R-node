@@ -57,6 +57,9 @@ export function App(): JSX.Element {
     // main spanning the full window.
     <div className={`app${state.showSidebar ? "" : " app-no-sidebar"}`}>
       {state.showSidebar && <Sidebar />}
+      {/* Phones only (styles.css): the sidebar is a drawer over the map, and
+          a tap beside it closes it. Hidden on wider screens. */}
+      {state.showSidebar && <div className="sidebar-backdrop" onClick={() => store.toggleSidebar()} />}
 
       <div className="main">
         <TopBar />

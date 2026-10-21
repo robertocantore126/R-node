@@ -21,6 +21,7 @@ import { listShapes } from "../editor/shapeLibrary";
 import type { ImageSlot, MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
+import { TouchGestures } from "./touchGestures";
 import { CaptionField } from "./CaptionField";
 import { installTrace, trace } from "../dev/trace";
 import { fetchImageAsFile, firstImageFile, firstUriFromList, imageFiles } from "../editor/externalImage";
@@ -593,6 +594,16 @@ export function CanvasView(): JSX.Element {
 
   const onPointerDown = (e: RPointerEvent): void => {
     interactedRef.current = true;
+    if (e.pointerType === "touch") {
+      try {
+        canvasRef.current!.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unavailable */
+      }
+      const { x, y } = localPoint(e);
+      touchRef.current.down(e.pointerId, x, y, e.clientX, e.clientY);
+      return;
+    }
     // Best-effort: capture keeps move/up events coming if the pointer leaves
     // the element mid-gesture. Untrusted/synthetic events have no active
     // pointer and throw here — never let that kill the handler.
@@ -835,6 +846,11 @@ export function CanvasView(): JSX.Element {
   };
 
   const onPointerMove = (e: RPointerEvent): void => {
+    if (e.pointerType === "touch") {
+      const { x, y } = localPoint(e);
+      touchRef.current.move(e.pointerId, x, y);
+      return;
+    }
     const s0 = store.getSnapshot();
     const drag = dragRef.current;
     const { x, y } = localPoint(e);
@@ -1038,6 +1054,7 @@ export function CanvasView(): JSX.Element {
   };
 
   const onPointerUp = (e: RPointerEvent): void => {
+    if (e.pointerType === "touch") return touchRef.current.up(e.pointerId);
     const drag = dragRef.current;
     // A plain click on empty canvas (marquee never activated): just reset.
     if (drag.marqueeStartX !== null && !drag.marqueeActive) {
@@ -1136,6 +1153,8 @@ export function CanvasView(): JSX.Element {
   };
 
   const onDblClick = (e: RMouseEvent): void => {
+    // A double tap must not create a floating topic or open the editor.
+    if (touchRef.current.fromTouch()) return;
     const s = store.getSnapshot();
     const { x, y } = localPoint(e as unknown as RPointerEvent);
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
@@ -1182,9 +1201,18 @@ export function CanvasView(): JSX.Element {
     // subtopic / New code topic / Delete / Change color. Right-clicking the
     // empty canvas keeps no menu — the user asked for the node one.
     e.preventDefault();
+    // A finger's long press is handled by the gesture timer; the browser's
+    // own contextmenu for it (Android) would open the menu a second time.
+    if (touchRef.current.fromTouch()) return;
+    const { x, y } = localPoint(e as unknown as RPointerEvent);
+    openNodeMenu(x, y, e.clientX, e.clientY);
+  };
+
+  /** Open the node menu for the topic under canvas point (x, y), placed at the
+   *  client point — the right-click and the long press share it. */
+  const openNodeMenu = (x: number, y: number, clientX: number, clientY: number): void => {
     if (store.getSnapshot().editingId) return; // the editor owns right-click (paste etc.)
     const s = store.getSnapshot();
-    const { x, y } = localPoint(e as unknown as RPointerEvent);
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
     if (!hit) return;
@@ -1194,8 +1222,35 @@ export function CanvasView(): JSX.Element {
     // alone (the same rule the Inspector's picker follows).
     if (!s.selection.includes(hit)) store.select(hit);
     const rect = canvasRef.current!.parentElement!.getBoundingClientRect();
-    setCtxMenu({ x: e.clientX - rect.left, y: e.clientY - rect.top, nodeId: hit });
+    setCtxMenu({ x: clientX - rect.left, y: clientY - rect.top, nodeId: hit });
   };
+
+  // Finger gestures (see touchGestures.ts). The handlers go through a ref
+  // refreshed every render, so the long-lived recogniser never calls a stale
+  // closure.
+  const touchCb = {
+    tap: (x: number, y: number): void => {
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+      trace.applied("touch:tap", { id: hit });
+      if (hit) store.select(hit, { additive: false });
+      else store.clearSelection();
+    },
+    longPress: openNodeMenu,
+  };
+  const touchCbRef = useRef(touchCb);
+  touchCbRef.current = touchCb;
+  const touchRef = useRef<TouchGestures>(null as unknown as TouchGestures);
+  if (!touchRef.current) {
+    touchRef.current = new TouchGestures({
+      pan: (dx, dy) => store.panBy(dx, dy),
+      zoom: (sx, sy, f) => store.zoomAt(sx, sy, f, sizeRef.current.w, sizeRef.current.h),
+      tap: (x, y) => touchCbRef.current.tap(x, y),
+      longPress: (x, y, cx, cy) => touchCbRef.current.longPress(x, y, cx, cy),
+    });
+  }
+  useEffect(() => () => touchRef.current.dispose(), []);
 
   // -------------------------------------------------------------------------
   // Wrapper-level pan over the editing overlay
@@ -1416,6 +1471,9 @@ export function CanvasView(): JSX.Element {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={(e) => {
+          if (e.pointerType === "touch") touchRef.current.up(e.pointerId, true);
+        }}
         onPointerLeave={() => {
           store.setHover(null);
           setResizeHover(false);
