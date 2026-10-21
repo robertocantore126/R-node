@@ -249,6 +249,11 @@ export interface EditorState {
   } | null;
 }
 
+/** Phone-sized viewport (matches the max-width breakpoint in styles.css). */
+function isNarrowScreen(): boolean {
+  return typeof window !== "undefined" && !!window.matchMedia?.("(max-width: 700px)").matches;
+}
+
 export class EditorStore {
   private state: EditorState;
   private snap: EditorState;
@@ -368,8 +373,10 @@ export class EditorStore {
       hoverId: null,
       showPalette: false,
       showOutliner: false,
-      showInspector: true,
-      showSidebar: true,
+      // A phone has no room beside the map: both panels start closed there
+      // (the top bar still toggles them).
+      showInspector: !isNarrowScreen(),
+      showSidebar: !isNarrowScreen(),
       search: "",
       searchResults: [],
       searchIndex: 0,
