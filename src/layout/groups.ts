@@ -5,9 +5,9 @@
  * test and the PDF, so the three cannot draw a box in three places. The layout
  * reserves room for exactly these boxes (see GROUP_PAD in measure.ts).
  *
- * A box encloses each member's whole visible branch — not just the member's
- * own topic — and every group nested inside it, so an inner box never sits on
- * the outer one's line.
+ * A box encloses exactly the topics the user grouped — not their children —
+ * plus every group nested inside it, so an inner box never sits on the outer
+ * one's line.
  */
 import { groupLabel, type GroupShape, type Sheet } from "../core/types";
 import { GROUP_LABEL_H, GROUP_PAD } from "./measure";
@@ -24,7 +24,7 @@ export interface GroupBox {
   box: Box;
   /** The line plus the half of the title tab that sticks out above it. */
   occupied: Box;
-  /** How many placed topics the group encloses (its members' branches). */
+  /** The group's members that are on the map. */
   covered: Set<string>;
 }
 
@@ -37,23 +37,12 @@ function union(a: Box | null, b: Box): Box {
 
 /**
  * Every group's box, keyed by group id. `placed` holds the topics that are on
- * the map right now (a collapsed branch's children are simply absent, so the
- * box shrinks with the branch). A group none of whose topics are placed has
- * no entry.
+ * the map right now (a member inside a collapsed branch is absent, and the box
+ * shrinks to the members still shown). A group none of whose members are
+ * placed has no entry.
  */
 export function groupBoxes(sheet: Sheet, placed: Map<string, Box>): Map<string, GroupBox> {
-  const covers = sheet.boundaries.map((g) => {
-    const covered = new Set<string>();
-    const visit = (id: string, depth: number): void => {
-      if (depth > 256 || covered.has(id)) return;
-      const n = sheet.nodes[id];
-      if (!n) return;
-      if (placed.has(id)) covered.add(id);
-      for (const c of n.childrenIds) visit(c, depth + 1);
-    };
-    for (const id of g.memberIds) visit(id, 0);
-    return { g, covered };
-  });
+  const covers = sheet.boundaries.map((g) => ({ g, covered: new Set(g.memberIds.filter((id) => placed.has(id))) }));
   // Inner groups first: a group's box must already exist when an enclosing
   // group asks for it.
   covers.sort((a, b) => a.covered.size - b.covered.size);

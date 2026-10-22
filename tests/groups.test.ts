@@ -10,9 +10,9 @@ import type { Group, MindNode, Sheet } from "../src/core/types";
 import type { StorageAdapter } from "../src/persist/storage";
 
 /**
- * Group boundaries, XMind-style (G1–G5): the box holds each member's whole
- * branch, nested groups sit inside their parents, the layout makes room for
- * the box, and only the line or the title tab selects it.
+ * Group boundaries: the box holds exactly the grouped topics, nested groups
+ * sit inside their parents, the layout makes room so boxes do not run into
+ * their neighbours, and only the line or the title tab selects a group.
  */
 
 const memoryAdapter: StorageAdapter = { label: "test", async load() { return []; }, async save() {} };
@@ -70,8 +70,8 @@ function makeRenderer(): Renderer {
 }
 afterEach(() => vi.unstubAllGlobals());
 
-describe("G1: a group encloses its members' whole branches", () => {
-  it("the children of a grouped topic are inside the box", () => {
+describe("a group encloses exactly the topics that were grouped", () => {
+  it("the members are inside the box, their children are not", () => {
     const { sheet, add } = makeSheet();
     const a = add(sheet.rootNodeId, "A");
     const a1 = add(a, "A child one");
@@ -79,19 +79,8 @@ describe("G1: a group encloses its members' whole branches", () => {
     sheet.boundaries.push({ id: "g", memberIds: [a] });
     const placed = placedOf(sheet);
     const box = groupBoxes(sheet, placed).get("g")!.box;
-    for (const id of [a, a1, a2]) expect(inside(placed.get(id)!, box)).toBe(true);
-  });
-
-  it("a collapsed branch shrinks the box: hidden children are not placed", () => {
-    const { sheet, add } = makeSheet();
-    const a = add(sheet.rootNodeId, "A");
-    const a1 = add(a, "child");
-    sheet.boundaries.push({ id: "g", memberIds: [a] });
-    const placed = placedOf(sheet);
-    const open = groupBoxes(sheet, placed).get("g")!.box;
-    placed.delete(a1);
-    const shut = groupBoxes(sheet, placed).get("g")!.box;
-    expect(shut.w).toBeLessThan(open.w);
+    expect(inside(placed.get(a)!, box)).toBe(true);
+    for (const id of [a1, a2]) expect(overlaps(placed.get(id)!, box)).toBe(false);
   });
 
   it("a nested group's box, tab included, sits inside its parent's with room to spare", () => {
@@ -135,16 +124,30 @@ describe("G5: the layout makes room for a group", () => {
     expect(overlaps(placed.get(ids[0])!, occupied) || overlaps(placed.get(ids[2])!, occupied)).toBe(true);
   });
 
-  it("a legacy group across branches still draws but reserves nothing", () => {
+  it("a group of cousins opens room in each parent's column", () => {
     const { sheet, add } = makeSheet("logic");
     const a = add(sheet.rootNodeId, "A");
     const b = add(sheet.rootNodeId, "B");
-    const a1 = add(a, "A child");
-    const before = placedOf(sheet);
-    sheet.boundaries.push({ id: "g", memberIds: [a1, b] });
-    const after = placedOf(sheet);
-    expect(after.get(b)).toEqual(before.get(b));
-    expect(groupBoxes(sheet, after).get("g")).toBeDefined();
+    const [a1, a2] = [add(a, "a1"), add(a, "a2")];
+    const [b1, b2] = [add(b, "b1"), add(b, "b2")];
+    const gap = (p: Map<string, Box>, top: string, bottom: string): number => p.get(bottom)!.y - (p.get(top)!.y + p.get(top)!.h);
+    const plain = placedOf(sheet);
+    sheet.boundaries.push({ id: "g", memberIds: [a2, b1] });
+    const grouped = placedOf(sheet);
+    // a2 is the run's first in A's column, b1 the last in B's
+    expect(gap(grouped, a1, a2) - gap(plain, a1, a2)).toBeCloseTo(GROUP_PAD, 5);
+    expect(gap(grouped, b1, b2) - gap(plain, b1, b2)).toBeCloseTo(GROUP_PAD, 5);
+  });
+
+  it("mindmap: a group across main branches keeps them on one side of the root", () => {
+    const { sheet, add } = makeSheet("mindmap");
+    const mains = ["One", "Two", "Three", "Four"].map((t) => add(sheet.rootNodeId, t));
+    const kids = mains.map((m) => add(m, `${m} child`));
+    sheet.boundaries.push({ id: "g", memberIds: [kids[1], kids[2]] });
+    const placed = placedOf(sheet);
+    const rootX = placed.get(sheet.rootNodeId)!.x;
+    const side = (id: string) => Math.sign(placed.get(id)!.x - rootX);
+    expect(side(mains[1])).toBe(side(mains[2]));
   });
 
   it(`the top room is the pad plus half the tab (${GROUP_PAD} + ${GROUP_LABEL_H / 2})`, () => {

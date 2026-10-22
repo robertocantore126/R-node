@@ -440,14 +440,10 @@ export interface Relationship {
 export interface Group {
   id: string;
   /**
-   * Topics enclosed by the boundary — each WITH its whole visible branch, as
-   * an XMind boundary does: grouping a topic and leaving its children outside
-   * the box was the old behaviour and read as a drawing error.
-   *
-   * New groups are one topic or siblings under one parent (G1); only then can
-   * the layout reserve room for the box (G5). Older documents may hold
-   * members from different branches: they still draw, as the union box, but
-   * the layout cannot make room for them.
+   * Topics enclosed by the boundary: exactly these, not their children. Any
+   * topics may be grouped — siblings, cousins, a topic and its grandchild —
+   * and the box is the union of their boxes. The layout makes room for it in
+   * every column the members sit in (see `groupRuns`).
    */
   memberIds: string[];
   /** Title shown in a tab on the boundary's top edge. Empty/absent = no tab. */
@@ -506,20 +502,19 @@ export function groupLabel(g: Group): string | null {
 }
 
 /**
- * The parent whose children a group's members are, or null when the group
- * cannot be laid out as one block: no members, the root among them, or
- * members under different parents (legacy groups). Members are returned in
- * the parent's child order.
+ * A group's members split by parent, each run in its parent's child order.
+ * These are the columns the layout has to open room in: a group of siblings
+ * is one run, a group of cousins one run per parent. The root has no column
+ * and is left out.
  */
-export function groupSiblings(sheet: Sheet, g: Group): { parentId: string; members: string[] } | null {
-  const first = sheet.nodes[g.memberIds[0]];
-  const parentId = first?.parentId;
-  if (!parentId) return null;
-  const parent = sheet.nodes[parentId];
-  if (!parent) return null;
+export function groupRuns(sheet: Sheet, g: Group): { parentId: string; members: string[] }[] {
   const set = new Set(g.memberIds);
-  for (const id of set) if (sheet.nodes[id]?.parentId !== parentId) return null;
-  return { parentId, members: parent.childrenIds.filter((id) => set.has(id)) };
+  const parents = new Set<string>();
+  for (const id of set) {
+    const p = sheet.nodes[id]?.parentId;
+    if (p && sheet.nodes[p]) parents.add(p);
+  }
+  return [...parents].map((parentId) => ({ parentId, members: sheet.nodes[parentId].childrenIds.filter((id) => set.has(id)) }));
 }
 
 export interface Summary {

@@ -674,7 +674,7 @@ function GroupSection({ grp }: { grp: Group }): JSX.Element {
         <span>Show title</span>
         <input type="checkbox" checked={!grp.hideLabel} onChange={(e) => store.setGroup(grp.id, { hideLabel: e.target.checked ? undefined : true })} />
       </label>
-      <p className="muted">{grp.memberIds.length === 1 ? "1 topic and its branch" : `${grp.memberIds.length} topics and their branches`}</p>
+      <p className="muted">{grp.memberIds.length === 1 ? "1 topic enclosed" : `${grp.memberIds.length} topics enclosed`}</p>
       <div className="field">
         <span>Shape</span>
         <select value={grp.shape ?? "rounded"} onChange={(e) => store.setGroup(grp.id, { shape: e.target.value === "rounded" ? undefined : (e.target.value as GroupShape) })}>

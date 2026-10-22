@@ -4552,25 +4552,15 @@ export class EditorStore {
   }
 
   createGroupFromSelection(): void {
-    // XMind's rule (G1): one topic — the box then holds its whole branch —
-    // or siblings under one parent. Topics from different branches used to be
-    // accepted as "the union of their bounds", a box that swallowed whatever
-    // unrelated topics sat in between and that the layout could not make room
-    // for. Older documents keep such groups; new ones cannot be made.
+    // A group encloses exactly the selected topics — siblings, cousins, nodes
+    // from different branches; the box is the union of their boxes and not
+    // of their children. One topic is a group too (a titled frame).
     const nodes = this.state.selection.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
     if (nodes.length === 0) {
-      this.toast("Select a topic, or sibling topics, to group");
+      this.toast("Select the topics to group");
       return;
     }
-    const parent = nodes[0].parentId;
-    if (nodes.length > 1 && (!parent || nodes.some((n) => n.parentId !== parent))) {
-      this.toast("A group holds one topic or siblings of the same parent");
-      return;
-    }
-    // Members in the parent's order, so the box's first/last member — the
-    // ones the layout gives room to — are the outer ones.
-    const order = parent ? this.model.node(parent)?.childrenIds ?? [] : [];
-    const memberIds = nodes.map((n) => n.id).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    const memberIds = nodes.map((n) => n.id);
     const id = uid("grp");
     // The topic selection stays: grouping and then summarizing the same
     // siblings is one workflow.

@@ -24,7 +24,7 @@
  *  - freeform: nothing — manual positions only.
  */
 import { freeformOwner, freeformOffset } from "../core/freeform";
-import { groupLabel, groupSiblings, type MindNode, type Sheet } from "../core/types";
+import { groupLabel, groupRuns, type MindNode, type Sheet } from "../core/types";
 import { GROUP_LABEL_H, GROUP_PAD, imageResolver, measureNode, type TextMeasurer } from "./measure";
 
 export { imageResolver, measureNode } from "./measure";
@@ -75,21 +75,24 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   const cacheH = new Map<string, number>();
   const cacheW = new Map<string, number>();
 
-  // Room for group boundaries (G5). A group of siblings is one block in its
-  // parent's column: its first member gets the space above the box (pad +
-  // half the title tab), its last the space below. Nested groups add up,
-  // which is what keeps an inner box from sitting on the outer one's line.
-  // `before`/`after` run along the stacking axis — vertical for columns,
-  // horizontal for the "down" layouts.
+  // Room for group boundaries (G5). In every column a group's members sit
+  // in, the first member gets the space above the box (pad + half the title
+  // tab) and the last the space below, so the box clears the neighbouring
+  // topics. A group of cousins opens room in each parent's column; the tab
+  // room goes to each of them because which one ends up topmost is only
+  // known after layout. Nested groups add up, which keeps an inner box off
+  // the outer one's line. `before`/`after` run along the stacking axis —
+  // vertical for columns, horizontal for the "down" layouts.
   const marginBefore = new Map<string, number>();
   const marginAfter = new Map<string, number>();
   for (const g of sheet.boundaries) {
-    const sib = groupSiblings(sheet, g);
-    if (!sib || sib.members.length === 0) continue;
-    const first = sib.members[0];
-    const last = sib.members[sib.members.length - 1];
-    marginBefore.set(first, (marginBefore.get(first) ?? 0) + GROUP_PAD + (groupLabel(g) ? GROUP_LABEL_H / 2 : 0));
-    marginAfter.set(last, (marginAfter.get(last) ?? 0) + GROUP_PAD);
+    for (const run of groupRuns(sheet, g)) {
+      if (run.members.length === 0) continue;
+      const first = run.members[0];
+      const last = run.members[run.members.length - 1];
+      marginBefore.set(first, (marginBefore.get(first) ?? 0) + GROUP_PAD + (groupLabel(g) ? GROUP_LABEL_H / 2 : 0));
+      marginAfter.set(last, (marginAfter.get(last) ?? 0) + GROUP_PAD);
+    }
   }
   const before = (id: string): number => marginBefore.get(id) ?? 0;
   const after = (id: string): number => marginAfter.get(id) ?? 0;
@@ -263,13 +266,22 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
         if (st.autoBalance && autoKids.length > 1) {
           const heights = autoKids.map((k) => slotH(k.id));
           const total = heights.reduce((a, b) => a + b, 0);
-          // A group of the root's children must land on ONE side: split
-          // across the root, its box would span the whole map.
+          // A group must land on ONE side of the root: split across it, its
+          // box would span the whole map. Members count by the main branch
+          // they hang from, so a group of cousins keeps its branches together.
+          const branchIndex = (m: string): number => {
+            let cur: string | null = m;
+            for (let hops = 0; cur && hops < 256; hops++) {
+              const node: MindNode | undefined = sheet.nodes[cur];
+              if (!node) return -1;
+              if (node.parentId === id) return autoKids.findIndex((k) => k.id === cur);
+              cur = node.parentId;
+            }
+            return -1;
+          };
           const noCut = new Set<number>();
           for (const g of sheet.boundaries) {
-            const sib = groupSiblings(sheet, g);
-            if (!sib || sib.parentId !== id) continue;
-            const idx = sib.members.map((m) => autoKids.findIndex((k) => k.id === m)).filter((i) => i >= 0);
+            const idx = g.memberIds.map(branchIndex).filter((i) => i >= 0);
             if (idx.length < 2) continue;
             for (let c = Math.min(...idx) + 1; c <= Math.max(...idx); c++) noCut.add(c);
           }
