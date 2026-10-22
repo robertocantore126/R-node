@@ -340,6 +340,7 @@ export class EditorStore {
     this.state = this.makeState();
     this.snap = this.state;
     this.normalizeBranchColors(this.model.sheet);
+    this.dropGroupPlaceholders(this.model.sheet);
   }
 
   // -------------------------------------------------------------------------
@@ -556,6 +557,7 @@ export class EditorStore {
       trace.mark("err", "err:recovery", { what: "init", reason: "first-run" });
     }
     this.normalizeBranchColors(this.model.sheet);
+    this.dropGroupPlaceholders(this.model.sheet);
     this.state = this.makeState();
     if (docs.length > 0) this.state.docs = docs;
     if (docs.length === 0) this.state.sync = "dirty";
@@ -1386,6 +1388,7 @@ export class EditorStore {
     this.switchToDoc(doc.documentId);
     this.state.sync = "dirty"; // loaded from disk — not yet in app storage
     this.normalizeBranchColors(this.sheet);
+    this.dropGroupPlaceholders(this.sheet);
     this.notify();
     return doc.documentId;
   }
@@ -1952,6 +1955,16 @@ export class EditorStore {
    * default for uncoloured branches, the inherited hue under a coloured one.
    * A colour the user actually picked never equals a default and survives.
    */
+  /**
+   * "group" was a placeholder title every group was born with and that
+   * nothing displayed. Titles are drawn now (G2), so the placeholder would
+   * suddenly tag every old group with the word "group": it is dropped on
+   * open, a title the user actually typed is kept.
+   */
+  private dropGroupPlaceholders(sheet: Sheet): void {
+    for (const g of sheet.boundaries) if (g.label === "group") delete g.label;
+  }
+
   private normalizeBranchColors(sheet: Sheet): void {
     const root = sheet.nodes[sheet.rootNodeId];
     if (!root) return;
@@ -4539,20 +4552,29 @@ export class EditorStore {
   }
 
   createGroupFromSelection(): void {
-    // A group can enclose ANY selected topics — siblings, cousins, nodes from
-    // different branches (the box is just the union of their bounds). Only
-    // the summary brace needs a sibling column.
-    const ids = this.state.selection;
-    if (ids.length < 2) {
-      this.toast("Select at least two topics to group");
+    // XMind's rule (G1): one topic — the box then holds its whole branch —
+    // or siblings under one parent. Topics from different branches used to be
+    // accepted as "the union of their bounds", a box that swallowed whatever
+    // unrelated topics sat in between and that the layout could not make room
+    // for. Older documents keep such groups; new ones cannot be made.
+    const nodes = this.state.selection.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
+    if (nodes.length === 0) {
+      this.toast("Select a topic, or sibling topics, to group");
       return;
     }
-    const nodes = ids.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
-    if (nodes.length < 2) {
-      this.toast("Select at least two topics to group");
+    const parent = nodes[0].parentId;
+    if (nodes.length > 1 && (!parent || nodes.some((n) => n.parentId !== parent))) {
+      this.toast("A group holds one topic or siblings of the same parent");
       return;
     }
-    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", { group: { id: uid("grp"), memberIds: nodes.map((n) => n.id), label: "group" } })]);
+    // Members in the parent's order, so the box's first/last member — the
+    // ones the layout gives room to — are the outer ones.
+    const order = parent ? this.model.node(parent)?.childrenIds ?? [] : [];
+    const memberIds = nodes.map((n) => n.id).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    const id = uid("grp");
+    // The topic selection stays: grouping and then summarizing the same
+    // siblings is one workflow.
+    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", { group: { id, memberIds } })]);
     this.toast("Group created");
   }
 
@@ -5119,6 +5141,7 @@ export class EditorStore {
     // later has to get the same pass, or its legacy colour stamps would only
     // disappear after a restart.
     this.normalizeBranchColors(this.model.sheet);
+    this.dropGroupPlaceholders(this.model.sheet);
     this.history.clear();
     // Each document keeps its own file: switching moves the single-file
     // adapter (and the asset store with it) to this document's file, or

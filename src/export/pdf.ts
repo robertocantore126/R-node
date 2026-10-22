@@ -1,7 +1,9 @@
 import { phoneMapPages } from "./pdfPhone";
 import { FREEFORM_HEADER } from "../core/freeform";
-import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, type ResolvedBorder } from "../core/types";
-import { THEMES, type RenderTheme } from "../render/theme";
+import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
+import { THEMES, readableOn, type RenderTheme } from "../render/theme";
+import { groupBoxes, groupRadius, wavePoints } from "../layout/groups";
+import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET } from "../layout/measure";
 /**
  * PDF export — one tall strip of paper, cut into pages.
  *
@@ -642,6 +644,9 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   }
 
   const byId = new Map(placed.map((p) => [p.node.id, p]));
+  // The same boxes the canvas draws: members' whole branches, nested groups
+  // inside their parents, room for the title tab.
+  const groupGeo = groupBoxes(sheet, byId);
   let ops = 0;
   let images = 0;
   const fontSizes: number[] = [];
@@ -679,6 +684,14 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       return roundedPath(x+w/2-radius,y+h/2-radius,radius*2,radius*2,radius,fr);
     }
     return roundedPath(x,y,w,h,shape === "rect" ? 0 : shape === "capsule" ? h/2 : Math.max(0,corner),fr);
+  };
+  /** A group outline as a closed path: the canvas's shapes, point for point. */
+  const groupPath = (g: Group, b: {x:number;y:number;w:number;h:number}, fr: Frame): string => {
+    if (g.shape === "wave") {
+      const pts=wavePoints(b);
+      return pts.map((p,i)=>`${f(fr.X(p.x))} ${f(fr.Y(p.y))} ${i ? "l" : "m"}`).join("\n")+" h";
+    }
+    return roundedPath(b.x,b.y,b.w,b.h,groupRadius(g.shape),fr);
   };
   const drawBox = (cmds: string[], p: Placed, fill: string, fr: Frame): void => {
     const shape = p.node.style.shape ?? "rounded";
@@ -1086,6 +1099,14 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     }
     for(const p of pg.nodes) if(p.node.style.freeform) drawFreeform(cmds,p,fr);
 
+    // Group tints under everything they enclose, outer groups first.
+    if (opts.theme) for (const group of [...sheet.boundaries].sort((a,b)=>(groupGeo.get(b.id)?.covered.size??0)-(groupGeo.get(a.id)?.covered.size??0))) {
+      const gb=groupGeo.get(group.id);
+      if(!group.fill||!gb) continue;
+      cmds.push("q",opacityCommand(group.fill,GROUP_FILL_ALPHA),`${rgb(group.fill)} rg`,groupPath(group,gb.box,fr),"f","Q");
+      ops+=5;
+    }
+
     // Connectors first, so every box paints over the line that reaches it.
     cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
     for (const p of placed) {
@@ -1119,14 +1140,32 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     }
 
     if (opts.theme) for (const group of sheet.boundaries) {
-      const members=group.memberIds.map(id=>byId.get(id)).filter((p):p is Placed=>!!p);
-      if(!members.length) continue;
-      const x=Math.min(...members.map(p=>p.x))-16,y=Math.min(...members.map(p=>p.y))-16;
-      const w=Math.max(...members.map(p=>p.x+p.w))+16-x,h=Math.max(...members.map(p=>p.y+p.h))+16-y;
+      const gb=groupGeo.get(group.id);
+      if(!gb) continue;
+      // Line weight and dashes are screen pixels on the canvas; on paper they
+      // are points, the same at every page scale.
       const width=group.borderWidth??DEFAULT_GROUP_BORDER_WIDTH;
-      const screenScale=fr.s/PT_PER_UNIT;
-      cmds.push("q",`${rgb(group.color??theme.textMuted)} RG`,`${f(width*PT_PER_UNIT)} w`,`[${f(Math.max(7,width*4)*PT_PER_UNIT)} ${f(Math.max(5,width*2.6)*PT_PER_UNIT)}] 0 d`,roundedPath(x,y,w,h,10/screenScale,fr),"S","Q");
-      ops+=7;
+      const color=group.color??theme.textMuted;
+      const style=group.lineStyle??"dashed";
+      if (style !== "none") {
+        const {dash,cap}=groupDash(style,width);
+        cmds.push("q",`${rgb(color)} RG`,`${cap==="round"?1:0} J`,`[${dash.map(d=>f(d*PT_PER_UNIT)).join(" ")}] 0 d`);
+        if (style === "double") {
+          const tPt=Math.max(1,width/3)*PT_PER_UNIT, d=tPt/fr.s;
+          cmds.push(`${f(tPt)} w`);
+          for (const o of [d,-d]) cmds.push(groupPath(group,{x:gb.box.x-o,y:gb.box.y-o,w:gb.box.w+o*2,h:gb.box.h+o*2},fr),"S");
+        } else cmds.push(`${f(width*PT_PER_UNIT)} w`,groupPath(group,gb.box,fr),"S");
+        cmds.push("Q");
+        ops+=7;
+      }
+      const text=groupLabel(group);
+      if (text) {
+        const tw=Math.min(advance(winAnsiText(text),true,false,GROUP_LABEL_FONT)+16,Math.max(40,gb.box.w-GROUP_LABEL_INSET*2));
+        const tx=gb.box.x+GROUP_LABEL_INSET, ty=gb.box.y-GROUP_LABEL_H/2;
+        cmds.push("q",`${rgb(color)} rg`,roundedPath(tx,ty,tw,GROUP_LABEL_H,5,fr),"f","Q");
+        plainText(cmds,text,tx+8,ty+GROUP_LABEL_H/2+GROUP_LABEL_FONT*0.35,GROUP_LABEL_FONT,readableOn(color),fr,true,tw-16);
+        ops+=5;
+      }
     }
     cmds.push("Q");
     // The sheet number, bottom-centre, outside the clip.

@@ -968,7 +968,7 @@ describe("canvas resize drag", () => {
     });
   });
 
-  it("creates a group only from at least two sibling topics, undoable", () => {
+  it("groups one topic (its branch) or siblings, undoable", () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();
     const root = store.doc.node(store.sheet.rootNodeId)!;
@@ -977,21 +977,26 @@ describe("canvas resize drag", () => {
     store.createChild();
     const second = root.childrenIds.find((id) => id !== first.id)!;
 
-    // single selection → rejected
+    // a single topic is a group too: the box holds its whole branch (G1)
     store.select(second);
     store.createGroupFromSelection();
-    expect(store.sheet.boundaries).toHaveLength(0);
+    expect(store.sheet.boundaries).toHaveLength(1);
+    expect(store.sheet.boundaries[0].memberIds).toEqual([second]);
+    store.undo();
 
-    store.selectMany([first.id, second]);
+    // siblings, stored in the parent's order whatever the click order was
+    store.selectMany([second, first.id]);
     store.createGroupFromSelection();
     expect(store.sheet.boundaries).toHaveLength(1);
-    expect(store.sheet.boundaries[0].memberIds).toEqual(expect.arrayContaining([first.id, second]));
+    expect(store.sheet.boundaries[0].memberIds).toEqual(root.childrenIds.filter((id) => id === first.id || id === second));
+    // born without the old "group" placeholder title
+    expect(store.sheet.boundaries[0].label).toBeUndefined();
 
     store.undo();
     expect(store.sheet.boundaries).toHaveLength(0);
   });
 
-  it("groups ANY selected topics, not just siblings, undoable", () => {
+  it("refuses topics from different branches, as summaries do", () => {
     const store = new EditorStore(memoryAdapter);
     // two children of the root, then a grandchild of the first: not siblings
     store.createChild();
@@ -1001,15 +1006,13 @@ describe("canvas resize drag", () => {
     store.createChild();
     const grandchild = store.doc.node(first.childrenIds[0])!;
 
+    // A box over a topic and a grandchild elsewhere swallows whatever sits in
+    // between, and the layout cannot make room for it.
     store.selectMany([first.id, grandchild.id]);
     store.createGroupFromSelection();
-    expect(store.sheet.boundaries).toHaveLength(1);
-    expect(store.sheet.boundaries[0].memberIds).toEqual(expect.arrayContaining([first.id, grandchild.id]));
-
-    store.undo();
     expect(store.sheet.boundaries).toHaveLength(0);
 
-    // but a summary still needs siblings
+    // nor does a summary
     store.selectMany([first.id, grandchild.id]);
     store.createSummaryFromSelection();
     expect(store.sheet.summaries).toHaveLength(0);

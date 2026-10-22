@@ -24,8 +24,8 @@
  *  - freeform: nothing — manual positions only.
  */
 import { freeformOwner, freeformOffset } from "../core/freeform";
-import type { MindNode, Sheet } from "../core/types";
-import { imageResolver, measureNode, type TextMeasurer } from "./measure";
+import { groupLabel, groupSiblings, type MindNode, type Sheet } from "../core/types";
+import { GROUP_LABEL_H, GROUP_PAD, imageResolver, measureNode, type TextMeasurer } from "./measure";
 
 export { imageResolver, measureNode } from "./measure";
 export type { Extent, TextMeasurer } from "./measure";
@@ -75,6 +75,28 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   const cacheH = new Map<string, number>();
   const cacheW = new Map<string, number>();
 
+  // Room for group boundaries (G5). A group of siblings is one block in its
+  // parent's column: its first member gets the space above the box (pad +
+  // half the title tab), its last the space below. Nested groups add up,
+  // which is what keeps an inner box from sitting on the outer one's line.
+  // `before`/`after` run along the stacking axis — vertical for columns,
+  // horizontal for the "down" layouts.
+  const marginBefore = new Map<string, number>();
+  const marginAfter = new Map<string, number>();
+  for (const g of sheet.boundaries) {
+    const sib = groupSiblings(sheet, g);
+    if (!sib || sib.members.length === 0) continue;
+    const first = sib.members[0];
+    const last = sib.members[sib.members.length - 1];
+    marginBefore.set(first, (marginBefore.get(first) ?? 0) + GROUP_PAD + (groupLabel(g) ? GROUP_LABEL_H / 2 : 0));
+    marginAfter.set(last, (marginAfter.get(last) ?? 0) + GROUP_PAD);
+  }
+  const before = (id: string): number => marginBefore.get(id) ?? 0;
+  const after = (id: string): number => marginAfter.get(id) ?? 0;
+  /** A child's share of its parent's column: its branch plus group room. */
+  const slotH = (id: string): number => before(id) + subtreeHeight(id) + after(id);
+  const slotW = (id: string): number => before(id) + subtreeWidth(id) + after(id);
+
   /**
    * Vertical placement of `kids` around a parent box of height `parentH`.
    * Children are split into an above group and a below group (balanced by
@@ -83,7 +105,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
    */
   const stacked = (kids: MindNode[], parentH: number): { centers: Map<string, number>; blockH: number } => {
     const k = kids.length;
-    const blocks = kids.map((kid) => subtreeHeight(kid.id));
+    const blocks = kids.map((kid) => slotH(kid.id));
     const groupTotal = (from: number, to: number): number => {
       if (from >= to) return 0;
       let t = 0;
@@ -108,12 +130,12 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     const centers = new Map<string, number>();
     let y = -parentH / 2 - gap - aboveTotal; // top of the above group
     for (let i = 0; i < best; i++) {
-      centers.set(kids[i].id, y + blocks[i] / 2);
+      centers.set(kids[i].id, y + before(kids[i].id) + subtreeHeight(kids[i].id) / 2);
       y += blocks[i] + st.branchSpacing;
     }
     y = parentH / 2 + gap; // top of the below group
     for (let i = best; i < k; i++) {
-      centers.set(kids[i].id, y + blocks[i] / 2);
+      centers.set(kids[i].id, y + before(kids[i].id) + subtreeHeight(kids[i].id) / 2);
       y += blocks[i] + st.branchSpacing;
     }
     return { centers, blockH };
@@ -135,7 +157,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     // child column, not surrounded by the root-style straddle gaps. Using
     // `stacked()` here overestimates every branch and makes the placement
     // code's actual geometry disagree with the block height used for balance.
-    const childColumnH = kids.reduce((acc, kid) => acc + subtreeHeight(kid.id), 0) + st.branchSpacing * Math.max(0, kids.length - 1);
+    const childColumnH = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + st.branchSpacing * Math.max(0, kids.length - 1);
     const blockH = st.structureType === "mindmap" ? Math.max(h, childColumnH) : stacked(kids, h).blockH;
     cacheH.set(id, blockH);
     return blockH;
@@ -152,7 +174,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       return w;
     }
     const kids = n.childrenIds.map((c) => sheet.nodes[c]).filter((c): c is MindNode => !!c);
-    const childWidths = kids.map((kid) => subtreeWidth(kid.id));
+    const childWidths = kids.map((kid) => slotW(kid.id));
     const blockW = Math.max(w, childWidths.reduce((acc, v) => acc + v, 0) + st.branchSpacing * Math.max(0, kids.length - 1));
     cacheW.set(id, blockW);
     return blockW;
@@ -239,13 +261,24 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       } else {
         let rightCount = autoKids.length;
         if (st.autoBalance && autoKids.length > 1) {
-          const heights = autoKids.map((k) => subtreeHeight(k.id));
+          const heights = autoKids.map((k) => slotH(k.id));
           const total = heights.reduce((a, b) => a + b, 0);
+          // A group of the root's children must land on ONE side: split
+          // across the root, its box would span the whole map.
+          const noCut = new Set<number>();
+          for (const g of sheet.boundaries) {
+            const sib = groupSiblings(sheet, g);
+            if (!sib || sib.parentId !== id) continue;
+            const idx = sib.members.map((m) => autoKids.findIndex((k) => k.id === m)).filter((i) => i >= 0);
+            if (idx.length < 2) continue;
+            for (let c = Math.min(...idx) + 1; c <= Math.max(...idx); c++) noCut.add(c);
+          }
           let acc = 0;
           let bestDiff = Infinity;
-          let best = 1;
+          let best = autoKids.length;
           for (let i = 0; i < autoKids.length - 1; i++) {
             acc += heights[i];
+            if (noCut.has(i + 1)) continue;
             const diff = Math.abs(total - 2 * acc);
             if (diff < bestDiff) {
               bestDiff = diff;
@@ -275,14 +308,13 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       const currentCx = !isAuto(id) && parentNode ? parentNode.position.x + parentSize.w / 2 : cx;
       const currentCy = !isAuto(id) && parentNode ? parentNode.position.y + parentSize.h / 2 : cy;
 
-      const totalKidsH = kids.reduce((acc, kid) => acc + subtreeHeight(kid.id), 0) + st.branchSpacing * Math.max(0, kids.length - 1);
+      const totalKidsH = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + st.branchSpacing * Math.max(0, kids.length - 1);
       let yCursor = currentCy - totalKidsH / 2;
       for (const kid of kids) {
-        const kh = subtreeHeight(kid.id);
         const ke = size(kid);
-        const kidCy = yCursor + kh / 2;
+        const kidCy = yCursor + before(kid.id) + subtreeHeight(kid.id) / 2;
         placeMindmap(kid.id, currentCx + side * (w / 2 + st.spacing + ke.w / 2), kidCy, side);
-        yCursor += kh + st.branchSpacing;
+        yCursor += slotH(kid.id) + st.branchSpacing;
       }
     }
   }
@@ -309,13 +341,13 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
         placeHierarchical(kid.id, cx + w / 2 + st.spacing + size(kid).w / 2, cy + centers.get(kid.id)!, dir);
       }
     } else {
-      const widths = kids.map((kid) => subtreeWidth(kid.id));
+      const widths = kids.map((kid) => slotW(kid.id));
       const totalW = widths.reduce((acc, v) => acc + v, 0) + st.branchSpacing * Math.max(0, kids.length - 1);
       let cursor = cx - totalW / 2;
       for (let i = 0; i < kids.length; i++) {
         const kid = kids[i];
         const sw = widths[i];
-        placeHierarchical(kid.id, cursor + sw / 2, cy + h / 2 + st.spacing + size(kid).h / 2, dir);
+        placeHierarchical(kid.id, cursor + before(kid.id) + subtreeWidth(kid.id) / 2, cy + h / 2 + st.spacing + size(kid).h / 2, dir);
         cursor += sw + st.branchSpacing;
       }
     }
@@ -336,7 +368,9 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
         if (!node.collapsed && !node.style.freeform) for (const childId of node.childrenIds) visit(childId);
       };
       visit(id);
-      return { minY, maxY };
+      // The group room counts as part of the branch, or the collision pass
+      // would slide a neighbour back into the space the stacking reserved.
+      return { minY: minY - before(id), maxY: maxY + after(id) };
     };
 
     const shiftAutoSubtree = (id: string, dy: number): void => {

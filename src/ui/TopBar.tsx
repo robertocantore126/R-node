@@ -91,9 +91,9 @@ export function TopBar(): JSX.Element {
         <button
           className="btn"
           data-help="Group"
-          data-help-more="Wraps the selected topics in a group box. Enabled with two or more topics selected."
-          title="Group the selected topics (❐)"
-          disabled={state.selection.length < 2}
+          data-help-more="Wraps a topic and its branch — or several sibling topics — in a group box."
+          title="Group the selected topic or siblings (❐)"
+          disabled={state.selection.length < 1}
           onClick={() => store.createGroupFromSelection()}
         >
           ❐ Group

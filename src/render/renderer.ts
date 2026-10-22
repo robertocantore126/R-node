@@ -10,14 +10,15 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
  * of the node being edited so the overlay doesn't double-paint.
  */
 import type { Group, ImageSlot, MindNode, ResolvedBorder, Sheet, ConnectorStyle, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
-import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH } from "../core/types";
+import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
+import { groupBoxes, groupRadius, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_SLOT_ALPHA, chartGrowHandles, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_SLOT_ALPHA, chartGrowHandles, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
-import { THEMES, lighten, type RenderTheme, type ThemeName } from "./theme";
+import { THEMES, lighten, readableOn, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
@@ -334,6 +335,9 @@ export class Renderer {
         Math.min(a.y, b.y) <= viewMaxY);
 
     for (const p of placed) if (p.visible && p.node.style.freeform) this.drawFreeform(theme, p);
+
+    // 0) group fills, under everything they enclose
+    this.drawGroupFills(state, byId);
 
     // 1) relationships
     let rels = 0;
@@ -1669,17 +1673,76 @@ export class Renderer {
     return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
   }
 
+  /**
+   * Every group's box for this placement, computed once per `byId` map: the
+   * fill pass, the line pass and the hit test of one frame all ask, and each
+   * walks every member's branch.
+   */
+  private groupGeometry(state: RenderState, byId: Map<string, Placed>): Map<string, GroupBox> {
+    const c = this.groupGeoCache;
+    if (c && c.byId === byId && c.sheet === state.sheet) return c.boxes;
+    const boxes = groupBoxes(state.sheet, byId);
+    this.groupGeoCache = { byId, sheet: state.sheet, boxes };
+    return boxes;
+  }
+  private groupGeoCache: { byId: Map<string, Placed>; sheet: Sheet; boxes: Map<string, GroupBox> } | null = null;
+
+  /** The title tab of a group, or null when it has none. World units. */
+  private groupTab(g: Group, box: Box): (Box & { text: string }) | null {
+    const text = groupLabel(g);
+    if (!text) return null;
+    this.ctx.font = `600 ${GROUP_LABEL_FONT}px ${FONT_STACK}`;
+    const w = Math.min(this.ctx.measureText(text).width + 16, Math.max(40, box.w - GROUP_LABEL_INSET * 2));
+    return { x: box.x + GROUP_LABEL_INSET, y: box.y - GROUP_LABEL_H / 2, w, h: GROUP_LABEL_H, text };
+  }
+
+  private groupOnScreen(state: RenderState, b: Box): boolean {
+    const s = state.camera.scale;
+    if (b.x + b.w < state.camera.x - state.viewW / 2 / s - 40 || b.x > state.camera.x + state.viewW / 2 / s + 40) return false;
+    if (b.y + b.h < state.camera.y - state.viewH / 2 / s - 40 || b.y > state.camera.y + state.viewH / 2 / s + 40) return false;
+    return true;
+  }
+
+  /** Trace a group's outline (rounded, square or wavy) as the current path. */
+  private traceGroup(ctx: CanvasRenderingContext2D, g: Group, b: Box): void {
+    ctx.beginPath();
+    if (g.shape === "wave") {
+      const pts = wavePoints(b);
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+    } else {
+      ctx.roundRect(b.x, b.y, b.w, b.h, groupRadius(g.shape));
+    }
+  }
+
+  /** Group fills go UNDER connectors and topics: a tint behind the branch,
+   *  never a film over it. */
+  private drawGroupFills(state: RenderState, byId: Map<string, Placed>): void {
+    if (!state.sheet.boundaries.some((g) => g.fill)) return;
+    const ctx = this.ctx;
+    const geo = this.groupGeometry(state, byId);
+    // Outer groups first, so a nested tint shows on top of its parent's.
+    const order = [...state.sheet.boundaries].sort((a, b) => (geo.get(b.id)?.covered.size ?? 0) - (geo.get(a.id)?.covered.size ?? 0));
+    for (const g of order) {
+      const gb = geo.get(g.id);
+      if (!g.fill || !gb || !this.groupOnScreen(state, gb.box)) continue;
+      ctx.save();
+      ctx.globalAlpha = GROUP_FILL_ALPHA;
+      ctx.fillStyle = g.fill;
+      this.traceGroup(ctx, g, gb.box);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
   private drawGroupsAndSummaries(theme: RenderTheme, state: RenderState, byId: Map<string, Placed>): void {
     const s = state.camera.scale;
+    const geo = this.groupGeometry(state, byId);
     for (const g of state.sheet.boundaries) {
-      const b = this.membersBounds(state, g.memberIds, byId);
-      if (!b) continue;
-      // cull: skip if the whole box is off-screen
-      if (b.x + b.w < state.camera.x - state.viewW / 2 / s - 40 || b.x > state.camera.x + state.viewW / 2 / s + 40) continue;
-      if (b.y + b.h < state.camera.y - state.viewH / 2 / s - 40 || b.y > state.camera.y + state.viewH / 2 / s + 40) continue;
-      const pad = 16;
-      const selected = state.groupSel === g.id;
-      this.drawGroup(theme, g, b, pad, selected, s);
+      const gb = geo.get(g.id);
+      if (!gb || !this.groupOnScreen(state, gb.occupied)) continue;
+      this.drawGroup(theme, g, gb.box, state.groupSel === g.id, s);
     }
     for (const sum of state.sheet.summaries) {
       const b = this.membersBounds(state, sum.memberIds, byId);
@@ -1702,28 +1765,59 @@ export class Renderer {
    * The dash grows with the line: a 6px stroke under the fixed 7/5 pattern
    * reads as a chain of blobs, not as a dashed box.
    */
-  groupStroke(theme: RenderTheme, g: Group, selected: boolean): { color: string; width: number; dash: [number, number] } {
+  groupStroke(theme: RenderTheme, g: Group, selected: boolean): { color: string; width: number; dash: number[]; cap: "butt" | "round"; double: boolean; none: boolean } {
     const width = g.borderWidth ?? DEFAULT_GROUP_BORDER_WIDTH;
+    const style = g.lineStyle ?? "dashed";
+    const pattern = groupDash(style, width);
     return {
       color: g.color ?? (selected ? theme.selection : theme.textMuted),
       width: selected ? width + 1 : width,
-      dash: [Math.max(7, width * 4), Math.max(5, width * 2.6)],
+      ...pattern,
+      double: style === "double",
+      // A group with no line is still selectable by its tab; selecting it
+      // shows the line so the user can see what they picked.
+      none: style === "none" && !selected,
     };
   }
 
-  private drawGroup(theme: RenderTheme, g: Group, b: { x: number; y: number; w: number; h: number }, pad: number, selected: boolean, s: number): void {
-    // Just the dashed boundary — no fill, no label tag (per the XMind-style
-    // look: the box only "encapsulates" the topics visually).
+  private drawGroup(theme: RenderTheme, g: Group, b: Box, selected: boolean, s: number): void {
     const ctx = this.ctx;
-    const x = b.x - pad, y = b.y - pad, w = b.w + pad * 2, h = b.h + pad * 2;
     const stroke = this.groupStroke(theme, g, selected);
-    ctx.strokeStyle = stroke.color;
-    ctx.lineWidth = stroke.width / s;
-    ctx.setLineDash([stroke.dash[0] / s, stroke.dash[1] / s]);
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 10 / s);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    if (!stroke.none) {
+      ctx.save();
+      ctx.strokeStyle = stroke.color;
+      ctx.lineCap = stroke.cap;
+      // Widths and dashes are SCREEN pixels: divided by the zoom so the line
+      // weighs the same at every zoom level.
+      ctx.setLineDash(stroke.dash.map((d) => d / s));
+      if (stroke.double) {
+        const t = Math.max(1, stroke.width / 3) / s;
+        ctx.lineWidth = t;
+        for (const d of [t, -t]) {
+          this.traceGroup(ctx, g, { x: b.x - d, y: b.y - d, w: b.w + d * 2, h: b.h + d * 2 });
+          ctx.stroke();
+        }
+      } else {
+        ctx.lineWidth = stroke.width / s;
+        this.traceGroup(ctx, g, b);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    const tab = this.groupTab(g, b);
+    if (tab) {
+      ctx.save();
+      ctx.fillStyle = stroke.color;
+      ctx.beginPath();
+      ctx.roundRect(tab.x, tab.y, tab.w, tab.h, 5);
+      ctx.fill();
+      ctx.fillStyle = readableOn(stroke.color);
+      ctx.font = `600 ${GROUP_LABEL_FONT}px ${FONT_STACK}`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(tab.text, tab.x + 8, tab.y + tab.h / 2, tab.w - 16);
+      ctx.restore();
+    }
   }
 
   /** Which side of the root the summary members sit on: a summary on a left
@@ -1813,17 +1907,37 @@ export class Renderer {
     return null;
   }
 
+  /**
+   * A group is hit on its LINE (a band a few screen pixels wide) or its title
+   * tab — not anywhere inside the box (G4). The whole interior used to count,
+   * which made a marquee started inside a group impossible and let the first
+   * of two overlapping groups win every click. Among several hits the smallest
+   * box wins: a click on a nested group's line means that group.
+   */
   hitTestGroup(state: RenderState, wx: number, wy: number): string | null {
     const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const geo = groupBoxes(state.sheet, placed);
+    const s = state.camera.scale;
+    let best: string | null = null;
+    let bestArea = Infinity;
     for (const g of state.sheet.boundaries) {
-      const b = this.membersBounds(state, g.memberIds, placed);
-      if (!b) continue;
-      const pad = 16;
-      if (wx >= b.x - pad && wx <= b.x + b.w + pad && wy >= b.y - pad && wy <= b.y + b.h + pad) return g.id;
+      const gb = geo.get(g.id);
+      if (!gb) continue;
+      const b = gb.box;
+      const tol = Math.max(6, (g.borderWidth ?? DEFAULT_GROUP_BORDER_WIDTH) / 2 + 3) / s + (g.shape === "wave" ? 3 : 0);
+      const inOuter = wx >= b.x - tol && wx <= b.x + b.w + tol && wy >= b.y - tol && wy <= b.y + b.h + tol;
+      const inInner = wx > b.x + tol && wx < b.x + b.w - tol && wy > b.y + tol && wy < b.y + b.h - tol;
+      const tab = this.groupTab(g, b);
+      const onTab = !!tab && wx >= tab.x && wx <= tab.x + tab.w && wy >= tab.y && wy <= tab.y + tab.h;
+      if (!onTab && !(inOuter && !inInner)) continue;
+      const area = b.w * b.h;
+      if (area < bestArea) {
+        bestArea = area;
+        best = g.id;
+      }
     }
-    return null;
+    return best;
   }
-
   hitTestSummary(state: RenderState, wx: number, wy: number): string | null {
     const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
     for (const sum of state.sheet.summaries) {
@@ -2344,6 +2458,7 @@ export class Renderer {
     const all = this.placedNodes({ ...state, showHidden: true });
     const byId = new Map(all.map((p) => [p.node.id, p]));
     for (const p of all) if (p.node.style.freeform) this.drawFreeform(theme, p);
+    this.drawGroupFills({ ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);
     for (const rel of state.sheet.relationships) {
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);

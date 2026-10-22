@@ -439,9 +439,27 @@ export interface Relationship {
 
 export interface Group {
   id: string;
-  /** Topic ids enclosed by the dashed boundary (usually siblings). */
+  /**
+   * Topics enclosed by the boundary — each WITH its whole visible branch, as
+   * an XMind boundary does: grouping a topic and leaving its children outside
+   * the box was the old behaviour and read as a drawing error.
+   *
+   * New groups are one topic or siblings under one parent (G1); only then can
+   * the layout reserve room for the box (G5). Older documents may hold
+   * members from different branches: they still draw, as the union box, but
+   * the layout cannot make room for them.
+   */
   memberIds: string[];
+  /** Title shown in a tab on the boundary's top edge. Empty/absent = no tab. */
   label?: string;
+  /** Hide the tab without losing the title. Absent = shown. */
+  hideLabel?: boolean;
+  /** Line style. Absent = "dashed", the look every older group has. */
+  lineStyle?: BorderStyle;
+  /** Box outline. Absent = "rounded". */
+  shape?: GroupShape;
+  /** Fill colour, painted at GROUP_FILL_ALPHA. Absent = no fill. */
+  fill?: string;
   /**
    * Boundary colour. Absent means the theme’s muted grey, so every document
    * written before this field keeps the look it has — same field name and same
@@ -463,6 +481,46 @@ export interface Group {
  * 1.5 in the UI is how the two quietly disagree.
  */
 export const DEFAULT_GROUP_BORDER_WIDTH = 1.5;
+
+/**
+ * Dash pattern of a group line `width` screen pixels thick. "dashed" (and
+ * absent) keeps the pattern every existing group was drawn with; the other
+ * styles share the topic outline's rule.
+ */
+export function groupDash(style: BorderStyle | undefined, width: number): { dash: number[]; cap: "butt" | "round" } {
+  if (style === undefined || style === "dashed") return { dash: [Math.max(7, width * 4), Math.max(5, width * 2.6)], cap: "butt" };
+  return borderDash(style, width);
+}
+
+export type GroupShape = "rounded" | "rect" | "wave";
+export const GROUP_SHAPES: GroupShape[] = ["rounded", "rect", "wave"];
+
+/** How strongly a group's fill tints the map under it: a tint, never a slab
+ *  that hides the connectors. */
+export const GROUP_FILL_ALPHA = 0.12;
+
+/** The tab text a group shows, or null for no tab. */
+export function groupLabel(g: Group): string | null {
+  const t = g.label?.trim();
+  return t && !g.hideLabel ? t : null;
+}
+
+/**
+ * The parent whose children a group's members are, or null when the group
+ * cannot be laid out as one block: no members, the root among them, or
+ * members under different parents (legacy groups). Members are returned in
+ * the parent's child order.
+ */
+export function groupSiblings(sheet: Sheet, g: Group): { parentId: string; members: string[] } | null {
+  const first = sheet.nodes[g.memberIds[0]];
+  const parentId = first?.parentId;
+  if (!parentId) return null;
+  const parent = sheet.nodes[parentId];
+  if (!parent) return null;
+  const set = new Set(g.memberIds);
+  for (const id of set) if (sheet.nodes[id]?.parentId !== parentId) return null;
+  return { parentId, members: parent.childrenIds.filter((id) => set.has(id)) };
+}
 
 export interface Summary {
   id: string;
