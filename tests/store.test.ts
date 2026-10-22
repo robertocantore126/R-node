@@ -968,7 +968,7 @@ describe("canvas resize drag", () => {
     });
   });
 
-  it("creates a group only from at least two sibling topics, undoable", () => {
+  it("groups one topic or several, undoable", () => {
     const store = new EditorStore(memoryAdapter);
     store.createChild();
     const root = store.doc.node(store.sheet.rootNodeId)!;
@@ -977,15 +977,19 @@ describe("canvas resize drag", () => {
     store.createChild();
     const second = root.childrenIds.find((id) => id !== first.id)!;
 
-    // single selection → rejected
+    // a single topic is a group too (a titled frame)
     store.select(second);
     store.createGroupFromSelection();
-    expect(store.sheet.boundaries).toHaveLength(0);
+    expect(store.sheet.boundaries).toHaveLength(1);
+    expect(store.sheet.boundaries[0].memberIds).toEqual([second]);
+    store.undo();
 
-    store.selectMany([first.id, second]);
+    store.selectMany([second, first.id]);
     store.createGroupFromSelection();
     expect(store.sheet.boundaries).toHaveLength(1);
     expect(store.sheet.boundaries[0].memberIds).toEqual(expect.arrayContaining([first.id, second]));
+    // born without the old "group" placeholder title
+    expect(store.sheet.boundaries[0].label).toBeUndefined();
 
     store.undo();
     expect(store.sheet.boundaries).toHaveLength(0);

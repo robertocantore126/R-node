@@ -64,6 +64,24 @@ export function lighten(hex: string, t: number): string {
   return `#${((1 << 24) | (mix(r) << 16) | (mix(g) << 8) | mix(b)).toString(16).slice(1)}`;
 }
 
+/**
+ * Near-black or white, whichever reads on `color` (a hex, rgb() or rgba()).
+ * For text drawn on a surface the user coloured — a group's title tab — where
+ * no theme colour is guaranteed to contrast.
+ */
+export function readableOn(color: string): string {
+  let r = 128, g = 128, b = 128;
+  const hex = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  const fn = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(color.trim());
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    r = (n >> 16) & 255; g = (n >> 8) & 255; b = n & 255;
+  } else if (fn) {
+    r = Number(fn[1]); g = Number(fn[2]); b = Number(fn[3]);
+  }
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160 ? "#1a1a1a" : "#ffffff";
+}
+
 export const THEMES: Record<ThemeName, RenderTheme> = {
   light: {
     name: "light",

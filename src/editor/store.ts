@@ -340,6 +340,7 @@ export class EditorStore {
     this.state = this.makeState();
     this.snap = this.state;
     this.normalizeBranchColors(this.model.sheet);
+    this.dropGroupPlaceholders(this.model.sheet);
   }
 
   // -------------------------------------------------------------------------
@@ -556,6 +557,7 @@ export class EditorStore {
       trace.mark("err", "err:recovery", { what: "init", reason: "first-run" });
     }
     this.normalizeBranchColors(this.model.sheet);
+    this.dropGroupPlaceholders(this.model.sheet);
     this.state = this.makeState();
     if (docs.length > 0) this.state.docs = docs;
     if (docs.length === 0) this.state.sync = "dirty";
@@ -1386,6 +1388,7 @@ export class EditorStore {
     this.switchToDoc(doc.documentId);
     this.state.sync = "dirty"; // loaded from disk — not yet in app storage
     this.normalizeBranchColors(this.sheet);
+    this.dropGroupPlaceholders(this.sheet);
     this.notify();
     return doc.documentId;
   }
@@ -1952,6 +1955,16 @@ export class EditorStore {
    * default for uncoloured branches, the inherited hue under a coloured one.
    * A colour the user actually picked never equals a default and survives.
    */
+  /**
+   * "group" was a placeholder title every group was born with and that
+   * nothing displayed. Titles are drawn now (G2), so the placeholder would
+   * suddenly tag every old group with the word "group": it is dropped on
+   * open, a title the user actually typed is kept.
+   */
+  private dropGroupPlaceholders(sheet: Sheet): void {
+    for (const g of sheet.boundaries) if (g.label === "group") delete g.label;
+  }
+
   private normalizeBranchColors(sheet: Sheet): void {
     const root = sheet.nodes[sheet.rootNodeId];
     if (!root) return;
@@ -2817,6 +2830,32 @@ export class EditorStore {
     if (ops.length === 0) return;
     addRecentColor(color);
     this.execOps(ops);
+  }
+
+  /**
+   * Set the outline of every selected topic (C1) — one batch, one Ctrl+Z.
+   * A key present with `undefined` clears that field, so `resetSelectionBorder`
+   * is this call with all three cleared and the topic goes back to the theme's
+   * hairline. Code topics (view only, T22) and freeform boards (their frame is
+   * the board itself) are skipped, as the colour rows skip them.
+   */
+  setSelectionBorder(patch: Partial<Pick<Style, "stroke" | "borderWidth" | "borderStyle">>, ids: string[] = this.state.selection): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n || n.style.code || n.style.freeform) continue;
+      const style: Style = { ...n.style, ...patch };
+      for (const k of ["stroke", "borderWidth", "borderStyle"] as const) if (style[k] === undefined) delete style[k];
+      if (JSON.stringify(style) === JSON.stringify(n.style)) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: n.style }));
+    }
+    if (ops.length === 0) return;
+    if (typeof patch.stroke === "string" && patch.stroke.startsWith("#")) addRecentColor(patch.stroke);
+    this.execOps(ops);
+  }
+
+  resetSelectionBorder(ids: string[] = this.state.selection): void {
+    this.setSelectionBorder({ stroke: undefined, borderWidth: undefined, borderStyle: undefined }, ids);
   }
 
   /** Quick emphasis for ordinary selected topics, as one reversible gesture. */
@@ -4513,20 +4552,19 @@ export class EditorStore {
   }
 
   createGroupFromSelection(): void {
-    // A group can enclose ANY selected topics — siblings, cousins, nodes from
-    // different branches (the box is just the union of their bounds). Only
-    // the summary brace needs a sibling column.
-    const ids = this.state.selection;
-    if (ids.length < 2) {
-      this.toast("Select at least two topics to group");
+    // A group encloses exactly the selected topics — siblings, cousins, nodes
+    // from different branches; the box is the union of their boxes and not
+    // of their children. One topic is a group too (a titled frame).
+    const nodes = this.state.selection.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
+    if (nodes.length === 0) {
+      this.toast("Select the topics to group");
       return;
     }
-    const nodes = ids.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
-    if (nodes.length < 2) {
-      this.toast("Select at least two topics to group");
-      return;
-    }
-    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", { group: { id: uid("grp"), memberIds: nodes.map((n) => n.id), label: "group" } })]);
+    const memberIds = nodes.map((n) => n.id);
+    const id = uid("grp");
+    // The topic selection stays: grouping and then summarizing the same
+    // siblings is one workflow.
+    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", { group: { id, memberIds } })]);
     this.toast("Group created");
   }
 
@@ -5093,6 +5131,7 @@ export class EditorStore {
     // later has to get the same pass, or its legacy colour stamps would only
     // disappear after a restart.
     this.normalizeBranchColors(this.model.sheet);
+    this.dropGroupPlaceholders(this.model.sheet);
     this.history.clear();
     // Each document keeps its own file: switching moves the single-file
     // adapter (and the asset store with it) to this document's file, or

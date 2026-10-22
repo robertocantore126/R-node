@@ -137,15 +137,72 @@ export interface QuizInfo {
   lastAnswers?: number[];
 }
 
+/**
+ * How an outline is drawn. "none" is an explicit choice — no outline at all,
+ * not even the theme's hairline — which is why it is a style and not the
+ * absence of one.
+ */
+export type BorderStyle = "solid" | "dashed" | "dotted" | "dashdot" | "double" | "none";
+export const BORDER_STYLES: BorderStyle[] = ["solid", "dashed", "dotted", "dashdot", "double", "none"];
+
+/** `Style.stroke` value meaning "the branch colour, resolved at paint time". */
+export const BRANCH_STROKE = "branch";
+
+/** Outline thickness when a topic has its own outline but no width chosen. */
+export const DEFAULT_NODE_BORDER_WIDTH = 2;
+
+/**
+ * A resolved outline, ready to paint. Dash lengths are in the same units as
+ * `width` and already grown with it, so a thick dashed line still reads as
+ * dashes. `double` draws two lines a third of `width` thick, at the outer and
+ * inner thirds of the band.
+ */
+export interface ResolvedBorder {
+  color: string;
+  width: number;
+  dash: number[];
+  cap: "butt" | "round";
+  double: boolean;
+}
+
+/** Dash pattern for an outline `width` thick — shared by topic outlines and
+ *  group boundaries so the two look like one family. */
+export function borderDash(style: BorderStyle | undefined, width: number): { dash: number[]; cap: "butt" | "round" } {
+  switch (style) {
+    case "dashed":
+      return { dash: [Math.max(6, width * 3.5), Math.max(4, width * 2.2)], cap: "butt" };
+    case "dotted":
+      // A near-zero dash with round caps is a dot `width` across; the gap
+      // must clear the two half-caps that grow into it.
+      return { dash: [0.01, Math.max(3, width * 2.2)], cap: "round" };
+    case "dashdot":
+      return { dash: [Math.max(6, width * 4), width + 4, 0.01, width + 4], cap: "round" };
+    default:
+      return { dash: [], cap: "butt" };
+  }
+}
+
 export interface Style {
   /** Topic containing freely positioned document nodes. */
   freeform?: boolean;
   /** Position relative to the parent inside a freeform topic. */
   freeformPosition?: { x: number; y: number };
   fill?: string;
+  /**
+   * Outline colour: a hex, or BRANCH_STROKE to follow the branch palette at
+   * paint time (so the outline changes with the theme instead of freezing
+   * one theme's colour into the document).
+   *
+   * The three outline fields form one choice: when ANY of them is set the
+   * topic wears its own outline and the absent ones take their defaults
+   * (branch colour, DEFAULT_NODE_BORDER_WIDTH, solid). With none set the
+   * theme's hairline is drawn, as it always was. `Renderer.nodeBorder` is the
+   * one place that applies this rule — canvas, SVG and PDF all ask it.
+   */
   stroke?: string;
+  /** Outline thickness in world units (it scales with zoom, like the box). */
   borderWidth?: number;
-  borderStyle?: "solid" | "dashed" | "dotted";
+  borderStyle?: BorderStyle;
   cornerRadius?: number;
   shape?: TopicShape;
   textColor?: string;
@@ -382,9 +439,23 @@ export interface Relationship {
 
 export interface Group {
   id: string;
-  /** Topic ids enclosed by the dashed boundary (usually siblings). */
+  /**
+   * Topics enclosed by the boundary: exactly these, not their children. Any
+   * topics may be grouped — siblings, cousins, a topic and its grandchild —
+   * and the box is the union of their boxes. The layout makes room for it in
+   * every column the members sit in (see `groupRuns`).
+   */
   memberIds: string[];
+  /** Title shown in a tab on the boundary's top edge. Empty/absent = no tab. */
   label?: string;
+  /** Hide the tab without losing the title. Absent = shown. */
+  hideLabel?: boolean;
+  /** Line style. Absent = "dashed", the look every older group has. */
+  lineStyle?: BorderStyle;
+  /** Box outline. Absent = "rounded". */
+  shape?: GroupShape;
+  /** Fill colour, painted at GROUP_FILL_ALPHA. Absent = no fill. */
+  fill?: string;
   /**
    * Boundary colour. Absent means the theme’s muted grey, so every document
    * written before this field keeps the look it has — same field name and same
@@ -406,6 +477,45 @@ export interface Group {
  * 1.5 in the UI is how the two quietly disagree.
  */
 export const DEFAULT_GROUP_BORDER_WIDTH = 1.5;
+
+/**
+ * Dash pattern of a group line `width` screen pixels thick. "dashed" (and
+ * absent) keeps the pattern every existing group was drawn with; the other
+ * styles share the topic outline's rule.
+ */
+export function groupDash(style: BorderStyle | undefined, width: number): { dash: number[]; cap: "butt" | "round" } {
+  if (style === undefined || style === "dashed") return { dash: [Math.max(7, width * 4), Math.max(5, width * 2.6)], cap: "butt" };
+  return borderDash(style, width);
+}
+
+export type GroupShape = "rounded" | "rect" | "wave";
+export const GROUP_SHAPES: GroupShape[] = ["rounded", "rect", "wave"];
+
+/** How strongly a group's fill tints the map under it: a tint, never a slab
+ *  that hides the connectors. */
+export const GROUP_FILL_ALPHA = 0.12;
+
+/** The tab text a group shows, or null for no tab. */
+export function groupLabel(g: Group): string | null {
+  const t = g.label?.trim();
+  return t && !g.hideLabel ? t : null;
+}
+
+/**
+ * A group's members split by parent, each run in its parent's child order.
+ * These are the columns the layout has to open room in: a group of siblings
+ * is one run, a group of cousins one run per parent. The root has no column
+ * and is left out.
+ */
+export function groupRuns(sheet: Sheet, g: Group): { parentId: string; members: string[] }[] {
+  const set = new Set(g.memberIds);
+  const parents = new Set<string>();
+  for (const id of set) {
+    const p = sheet.nodes[id]?.parentId;
+    if (p && sheet.nodes[p]) parents.add(p);
+  }
+  return [...parents].map((parentId) => ({ parentId, members: sheet.nodes[parentId].childrenIds.filter((id) => set.has(id)) }));
+}
 
 export interface Summary {
   id: string;

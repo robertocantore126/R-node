@@ -116,6 +116,24 @@ describe("vector editor surfaces", () => {
     expect(file).toContain("/ca 0.06 /CA 0.06");
     expect(out.report.coverage.boundaries.emitted).toBe(1);
   });
+
+  it("draws a group's tint, wavy line and title tab, and a topic's resolved outline", async () => {
+    const { sheet, add } = makeSheet();
+    const a = add(sheet.rootNodeId, "Alpha");
+    add(a.id, "Alpha child");
+    applyLayout(sheet, true, HEURISTIC_MEASURER);
+    sheet.boundaries.push({ id: "g", memberIds: [a.id], label: "Ideas", fill: "#30a46c", shape: "wave", lineStyle: "dotted", color: "#30a46c" });
+    const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light,
+      borderOf: (id) => (id === a.id ? { color: "#123456", width: 3, dash: [10, 6], cap: "butt", double: false } : null) });
+    const content = (await pageStreams(out.blob)).join("\n");
+    const file = new TextDecoder("latin1").decode(await out.blob.arrayBuffer());
+    expect(content).toContain("(Ideas) Tj");
+    expect(file).toContain("/ca 0.12 /CA 0.12"); // the tint's alpha
+    expect(content).toContain("1 J"); // dotted = round caps
+    // the topic outline is the one the renderer resolved, not re-derived
+    expect(content).toContain("0.071 0.204 0.337 RG");
+    expect(content).toMatch(/\[[\d.]+ [\d.]+\] 0 d/);
+  });
 });
 
 /** Every FlateDecode stream, decompressed. Image streams are DCT, not zlib. */

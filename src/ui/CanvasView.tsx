@@ -381,6 +381,7 @@ export function CanvasView(): JSX.Element {
           measurer: createCanvasTextMeasurer(),
           colorOf: (id) => renderer.nodeColors(rs, id),
           linkColorOf: (id) => renderer.branchColorOf(rs, id),
+          borderOf: (id) => renderer.nodeBorder(rs, id),
           relColorOf: (relId) => renderer.relationshipColorOf(rs, relId),
           background: THEMES[s.theme].background,
           // The `small` level (256px), not `large` (1024px).
@@ -1191,6 +1192,16 @@ export function CanvasView(): JSX.Element {
       }
       store.startEdit(hit);
     } else {
+      // Double-click on a group's line or tab renames it (G2). The title is
+      // edited in the Inspector's plain field — a canvas overlay would be a
+      // second text renderer and drag the §3 parity contract along.
+      const grpId = renderer.hitTestGroup(currentRenderState(), world.x, world.y);
+      if (grpId) {
+        store.selectGroup(grpId);
+        window.dispatchEvent(new CustomEvent("r-node:focus-group-title", { detail: { id: grpId } }));
+        trace.applied("dblclick:group-title", { id: grpId });
+        return;
+      }
       store.createFloatingAt(world.x - 60, world.y - 18);
     }
   };

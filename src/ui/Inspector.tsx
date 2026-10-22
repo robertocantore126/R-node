@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../editor/context";
-import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
-import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
+import type { Group, GroupShape, Relationship, Style, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
+import { BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_SHAPES } from "../core/types";
+import { BorderPicker } from "./BorderPicker";
 import { THEMES } from "../render/theme";
 import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
@@ -22,15 +23,12 @@ const CELL_SHAPES: [string, number][] = [
 
 const STRUCTURES = ["mindmap", "logic", "tree", "org", "timeline", "fishbone", "matrix", "treetable", "freeform"] as const;
 
+/** Outline thicknesses offered for a topic, in world units. */
+const NODE_BORDER_WIDTHS = [1, 2, 3, 4, 6];
+
 /** Boundary thicknesses offered for a group, in screen px. The second one is
  *  DEFAULT_GROUP_BORDER_WIDTH — the look a group has before anyone picks. */
-const GROUP_WIDTHS: [string, number][] = [
-  ["hairline", 1],
-  ["thin", DEFAULT_GROUP_BORDER_WIDTH],
-  ["medium", 2.5],
-  ["thick", 4],
-  ["heavy", 6],
-];
+const GROUP_WIDTHS = [1, DEFAULT_GROUP_BORDER_WIDTH, 2.5, 4, 6];
 
 export function Inspector(): JSX.Element {
   const store = useStore();
@@ -95,11 +93,9 @@ export function Inspector(): JSX.Element {
           <button className="btn small" onClick={() => store.duplicateTopic()}>⧉ Duplicate</button>
           <button className="btn small danger" onClick={() => store.deleteNodes([node.id])}>Delete</button>
           <button className="btn small" onClick={() => store.beginRelationship(node.id)}>⇄ Link…</button>
+          <button className="btn small" onClick={() => store.createGroupFromSelection()}>❐ Group</button>
           {snap.selection.length >= 2 && (
-            <>
-              <button className="btn small" onClick={() => store.createGroupFromSelection()}>❐ Group</button>
-              <button className="btn small" onClick={() => store.createSummaryFromSelection()}>❨ Summary</button>
-            </>
+            <button className="btn small" onClick={() => store.createSummaryFromSelection()}>❨ Summary</button>
           )}
           <button className="btn small" onClick={() => store.toggleCollapsed(node.id)}>
             {node.collapsed ? "Expand" : "Collapse"}
@@ -209,6 +205,19 @@ export function Inspector(): JSX.Element {
         )}
       </div>
 
+      {!node.style.code && !node.style.freeform && (
+        <div className="inspector-section">
+          <div
+            className="inspector-label"
+            data-help="Outline"
+            data-help-more="Line style, thickness and colour of the topic's border. Applies to every selected topic; the branch swatch follows the theme."
+          >
+            Outline
+          </div>
+          <NodeBorderPicker style={node.style} ids={snap.selection.includes(node.id) ? snap.selection : [node.id]} />
+        </div>
+      )}
+
       <GallerySection nodeId={node.id} />
 
       <div className="inspector-section">
@@ -249,6 +258,29 @@ export function Inspector(): JSX.Element {
 
       <SheetControls />
     </aside>
+  );
+}
+
+/** The outline picker bound to topics: shared by the Inspector and the
+ *  right-click menu so both write the same fields the same way. */
+export function NodeBorderPicker({ style, ids }: { style: Style; ids: string[] }): JSX.Element {
+  const store = useStore();
+  const custom = style.stroke !== undefined || style.borderWidth !== undefined || style.borderStyle !== undefined;
+  return (
+    <BorderPicker
+      value={{ color: style.stroke, width: style.borderWidth, style: style.borderStyle }}
+      // With no outline of its own a topic wears the theme hairline: 1px solid.
+      defaultWidth={custom ? DEFAULT_NODE_BORDER_WIDTH : 1}
+      defaultStyle="solid"
+      widths={NODE_BORDER_WIDTHS}
+      branchToken={BRANCH_STROKE}
+      onChange={(p) => store.setSelectionBorder({
+        ...("color" in p ? { stroke: p.color } : {}),
+        ...("width" in p ? { borderWidth: p.width } : {}),
+        ...("style" in p ? { borderStyle: p.style } : {}),
+      }, ids)}
+      onReset={() => store.resetSelectionBorder(ids)}
+    />
   );
 }
 
@@ -606,53 +638,91 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
 
 function GroupSection({ grp }: { grp: Group }): JSX.Element {
   const store = useStore();
-  const width = grp.borderWidth ?? DEFAULT_GROUP_BORDER_WIDTH;
-  // A width loaded from a document need not be one of the presets, and a
-  // <select> whose value matches no <option> shows the FIRST one — i.e. it
-  // would lie about the boundary on screen. Offer the odd value as its own.
-  const widths: [string, number][] = GROUP_WIDTHS.some(([, w]) => w === width)
-    ? GROUP_WIDTHS
-    : [...GROUP_WIDTHS, [`${width} px`, width]];
+  const [label, setLabel] = useState(grp.label ?? "");
+  const labelRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => setLabel(grp.label ?? ""), [grp.id, grp.label]);
+  // A double-click on the group's line or tab on the canvas asks for this
+  // field (G2): the title is a plain string edited here, never on the canvas.
+  useEffect(() => {
+    const onFocus = (e: Event): void => {
+      if ((e as CustomEvent<{ id: string }>).detail?.id !== grp.id) return;
+      labelRef.current?.focus();
+      labelRef.current?.select();
+    };
+    window.addEventListener("r-node:focus-group-title", onFocus);
+    return () => window.removeEventListener("r-node:focus-group-title", onFocus);
+  }, [grp.id]);
+  const commitLabel = (): void => {
+    const next = label.trim();
+    if (next !== (grp.label ?? "")) store.setGroup(grp.id, { label: next || undefined });
+  };
   return (
     <div className="inspector-section">
       <div className="inspector-label">Group</div>
-      <p className="muted">{grp.memberIds.length} topics enclosed</p>
+      <input
+        ref={labelRef}
+        className="inspector-title"
+        value={label}
+        placeholder="Title (optional)"
+        data-help="Group title"
+        data-help-more="Shown in a tab on the boundary's top edge. Double-click the boundary on the map to jump here."
+        onChange={(e) => setLabel(e.target.value)}
+        onBlur={commitLabel}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      />
+      <label className="field">
+        <span>Show title</span>
+        <input type="checkbox" checked={!grp.hideLabel} onChange={(e) => store.setGroup(grp.id, { hideLabel: e.target.checked ? undefined : true })} />
+      </label>
+      <p className="muted">{grp.memberIds.length === 1 ? "1 topic enclosed" : `${grp.memberIds.length} topics enclosed`}</p>
       <div className="field">
-        <span>Thickness</span>
-        <select
-          value={width}
-          data-help="Boundary thickness"
-          data-help-more="Screen pixels: the boundary keeps the same weight at every zoom level."
-          onChange={(e) => store.setGroup(grp.id, { borderWidth: Number(e.target.value) })}
-        >
-          {widths.map(([name, w]) => (
-            <option key={w} value={w}>{name}</option>
-          ))}
+        <span>Shape</span>
+        <select value={grp.shape ?? "rounded"} onChange={(e) => store.setGroup(grp.id, { shape: e.target.value === "rounded" ? undefined : (e.target.value as GroupShape) })}>
+          {GROUP_SHAPES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
-      <div className="field">
-        <span>Color</span>
-        <input
-          type="color"
-          value={grp.color ?? THEMES.light.textMuted}
-          onChange={(e) => store.setGroup(grp.id, { color: e.target.value })}
+      <div className="inspector-sublabel">Line</div>
+      <BorderPicker
+        value={{ color: grp.color, width: grp.borderWidth, style: grp.lineStyle }}
+        defaultWidth={DEFAULT_GROUP_BORDER_WIDTH}
+        defaultStyle="dashed"
+        widths={GROUP_WIDTHS}
+        onChange={(p) => store.setGroup(grp.id, {
+          ...("color" in p ? { color: p.color } : {}),
+          ...("width" in p ? { borderWidth: p.width } : {}),
+          ...("style" in p ? { lineStyle: p.style } : {}),
+        })}
+        // Back to "no choice at all", not to a grey copied out of the theme:
+        // a group with no fields follows the theme wherever it goes.
+        onReset={() => store.setGroup(grp.id, { color: undefined, borderWidth: undefined, lineStyle: undefined })}
+      />
+      <div className="inspector-sublabel">Fill</div>
+      <div className="border-row colors">
+        <button
+          type="button"
+          className={`ctx-swatch group-nofill${grp.fill ? "" : " active"}`}
+          title="No fill"
+          onClick={() => store.setGroup(grp.id, { fill: undefined })}
         />
-      </div>
-      <div className="ctx-color-row group-swatches">
         {THEMES.light.branch.map((c) => (
           <button
             key={c}
-            className="ctx-swatch"
+            type="button"
+            className={`ctx-swatch${grp.fill === c ? " active" : ""}`}
             style={{ background: c }}
             title={c}
-            onClick={() => store.setGroup(grp.id, { color: c })}
+            onClick={() => store.setGroup(grp.id, { fill: c })}
           />
         ))}
+        <input
+          type="color"
+          className="ctx-color"
+          title="Custom fill"
+          value={grp.fill ?? "#4f46e5"}
+          onChange={(e) => store.setGroup(grp.id, { fill: e.target.value })}
+        />
       </div>
-      <div className="inspector-actions">
-        {/* Back to "no choice at all", not to a grey copied out of the theme:
-            a group with neither field follows the theme wherever it goes. */}
-        <button className="btn small" onClick={() => store.setGroup(grp.id, { color: undefined, borderWidth: undefined })}>Reset style</button>
+      <div className="inspector-actions group-actions">
         <button className="btn small danger" onClick={() => store.deleteGroup(grp.id)}>Delete group</button>
       </div>
     </div>

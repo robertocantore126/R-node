@@ -213,6 +213,21 @@ export const ARROW_LEN = 9;
 /** Half the arrowhead's spread, in radians. */
 export const ARROW_HALF_ANGLE = 0.42;
 
+/**
+ * Group boundary geometry, in world units (I9: the layout reserves exactly the
+ * room the renderer draws into — two copies are how a box ends up overlapping
+ * the neighbour the layout thought it had cleared).
+ *
+ * GROUP_PAD is the space between the enclosed branches and the line. The
+ * title tab is GROUP_LABEL_H tall and straddles the top edge, so a titled
+ * group needs GROUP_LABEL_H / 2 more room above it.
+ */
+export const GROUP_PAD = 16;
+export const GROUP_LABEL_H = 20;
+export const GROUP_LABEL_FONT = 12;
+/** Horizontal offset of the tab from the box's left edge. */
+export const GROUP_LABEL_INSET = 14;
+
 /** A cubic Bézier, in world units. */
 export interface Bezier3 {
   p0: { x: number; y: number };
