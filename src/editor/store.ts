@@ -2819,6 +2819,32 @@ export class EditorStore {
     this.execOps(ops);
   }
 
+  /**
+   * Set the outline of every selected topic (C1) — one batch, one Ctrl+Z.
+   * A key present with `undefined` clears that field, so `resetSelectionBorder`
+   * is this call with all three cleared and the topic goes back to the theme's
+   * hairline. Code topics (view only, T22) and freeform boards (their frame is
+   * the board itself) are skipped, as the colour rows skip them.
+   */
+  setSelectionBorder(patch: Partial<Pick<Style, "stroke" | "borderWidth" | "borderStyle">>, ids: string[] = this.state.selection): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n || n.style.code || n.style.freeform) continue;
+      const style: Style = { ...n.style, ...patch };
+      for (const k of ["stroke", "borderWidth", "borderStyle"] as const) if (style[k] === undefined) delete style[k];
+      if (JSON.stringify(style) === JSON.stringify(n.style)) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: n.style }));
+    }
+    if (ops.length === 0) return;
+    if (typeof patch.stroke === "string" && patch.stroke.startsWith("#")) addRecentColor(patch.stroke);
+    this.execOps(ops);
+  }
+
+  resetSelectionBorder(ids: string[] = this.state.selection): void {
+    this.setSelectionBorder({ stroke: undefined, borderWidth: undefined, borderStyle: undefined }, ids);
+  }
+
   /** Quick emphasis for ordinary selected topics, as one reversible gesture. */
   setSelectionTopicSize(choice: "smaller" | "larger" | "normal" | "large" | "heading"): void {
     const steps = [10, 12, 14, 18, 24, 32, 40, 48, 64, 80, 96, 120, 160, 200];

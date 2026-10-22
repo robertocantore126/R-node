@@ -22,7 +22,7 @@ import { FREEFORM_HEADER } from "../core/freeform";
  * colours, image bytes — so it runs in Node under a heuristic measurer and in
  * the browser under the canvas one.
  */
-import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
+import type { MindNode, Relationship, ResolvedBorder, Sheet, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
 import { positionedImageSlots } from "../layout/measure";
 import { buildReport, publishReport, type ExportReport } from "./report";
@@ -56,6 +56,9 @@ export interface SvgExportOptions {
   colorOf: (nodeId: string) => { fill: string; text: string } | null;
   /** Connector colour for a child node (its branch colour). */
   linkColorOf: (nodeId: string) => string;
+  /** Outline per node, resolved by the renderer (`Renderer.nodeBorder`).
+   *  Absent = boxes are filled only, as before outlines were exported. */
+  borderOf?: (nodeId: string) => ResolvedBorder | null;
   /** Colour for a relationship (its own, else the theme's accent). */
   relColorOf?: (relId: string) => string;
   /** Page background. Pass null for a transparent document. */
@@ -116,11 +119,32 @@ function placeAll(sheet: Sheet, measurer: TextMeasurer): Placed[] {
 }
 
 /** The node outline, in the same geometry the canvas paints. */
-function shapeOf(p: Placed, fill: string): string {
+/**
+ * The box, filled and outlined as the renderer resolved it. A double outline
+ * is two unfilled copies of the shape at the outer and inner thirds of the
+ * band, exactly as the canvas strokes it.
+ */
+function shapeOf(p: Placed, fill: string, border: ResolvedBorder | null): string {
+  const shape = p.node.style.shape ?? "rounded";
+  const radius = p.node.style.cornerRadius ?? 8;
+  if (!border) return shape === "none" ? "" : shapeEl(p, shape, radius, ` fill="${esc(fill)}"`);
+  // An outlined text-only topic gets the default box, as on the canvas.
+  const outlined = shape === "none" ? "rounded" : shape;
+  const dash = border.dash.length > 0 ? ` stroke-dasharray="${border.dash.map(n3).join(" ")}"` : "";
+  const cap = border.cap === "round" ? ` stroke-linecap="round"` : "";
+  if (!border.double) {
+    const f = shape === "none" ? `none` : esc(fill);
+    return shapeEl(p, outlined, radius, ` fill="${f}" stroke="${esc(border.color)}" stroke-width="${n3(border.width)}"${dash}${cap}`);
+  }
+  const t = border.width / 3;
+  const lines = [t, -t].map((d) =>
+    shapeEl({ x: p.x - d, y: p.y - d, w: p.w + d * 2, h: p.h + d * 2 }, outlined, Math.max(0, radius + d), ` fill="none" stroke="${esc(border.color)}" stroke-width="${n3(t)}"${dash}${cap}`)
+  );
+  return (shape === "none" ? "" : shapeEl(p, shape, radius, ` fill="${esc(fill)}"`)) + lines.join("");
+}
+
+function shapeEl(p: { x: number; y: number; w: number; h: number }, shape: string, radius: number, f: string): string {
   const { x, y, w, h } = p;
-  const s = p.node.style;
-  const shape = s.shape ?? "rounded";
-  const f = ` fill="${esc(fill)}"`;
   switch (shape) {
     case "none":
       return "";
@@ -134,10 +158,8 @@ function shapeOf(p: Placed, fill: string): string {
     }
     case "rect":
       return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}"${f}/>`;
-    default: {
-      const r = s.cornerRadius ?? 8;
-      return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}" rx="${n3(r)}"${f}/>`;
-    }
+    default:
+      return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}" rx="${n3(radius)}"${f}/>`;
   }
 }
 
@@ -481,7 +503,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     const fill = colors?.fill ?? "#ffffff";
     const text = colors?.text ?? "#1a1a1a";
     parts.push(`<g>`);
-    const shape = shapeOf(p, fill);
+    const shape = shapeOf(p, fill, opts.borderOf ? opts.borderOf(n.id) : null);
     if (shape) parts.push(shape);
 
     const pos = positionedImageSlots(p, n, resolveImage);
@@ -561,7 +583,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     // Declared, not detected: an exporter cannot notice what it never thought
     // of, so it lists what it covers and the gap is computed against the
     // document. Everything absent here is a known omission.
-    honoured: ["fill", "textColor", "fontSize", "fontWeight", "italic", "underline", "shape", "cornerRadius", "image", "imageWidth", "align", "width", "height"],
+    honoured: ["fill", "textColor", "fontSize", "fontWeight", "italic", "underline", "shape", "cornerRadius", "image", "imageWidth", "align", "width", "height", ...(opts.borderOf ? (["stroke", "borderWidth", "borderStyle"] as const) : [])],
     units: { elements, imageBytes },
     // The document is parsed back: an SVG that does not parse renders as
     // nothing, which is exactly how the PDF failure stayed invisible.

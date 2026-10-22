@@ -1,6 +1,6 @@
 import { phoneMapPages } from "./pdfPhone";
 import { FREEFORM_HEADER } from "../core/freeform";
-import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
+import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, type ResolvedBorder } from "../core/types";
 import { THEMES, type RenderTheme } from "../render/theme";
 /**
  * PDF export — one tall strip of paper, cut into pages.
@@ -202,6 +202,10 @@ export interface PdfExportOptions {
   colorOf: (nodeId: string) => { fill: string; text: string } | null;
   /** Connector colour for a child node (its branch colour). */
   linkColorOf: (nodeId: string) => string;
+  /** Outline per node, resolved by the renderer (`Renderer.nodeBorder`).
+   *  Absent = the exporter's own fallback (theme hairline, custom outline
+   *  only when colour and width are both set). */
+  borderOf?: (nodeId: string) => ResolvedBorder | null;
   /** Colour for a relationship (its own, else the theme's accent). */
   relColorOf?: (relId: string) => string;
   /**
@@ -664,26 +668,46 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     const C = (a: number,b: number,c: number,d: number,e: number,g: number) => `${f(fr.X(a))} ${f(fr.Y(b))} ${f(fr.X(c))} ${f(fr.Y(d))} ${f(fr.X(e))} ${f(fr.Y(g))} c`;
     return [M(x+r,y),L(x+w-r,y),C(x+w-r+k,y,x+w,y+r-k,x+w,y+r),L(x+w,y+h-r),C(x+w,y+h-r+k,x+w-r+k,y+h,x+w-r,y+h),L(x+r,y+h),C(x+r-k,y+h,x,y+h-r+k,x,y+h-r),L(x,y+r),C(x,y+r-k,x+r-k,y,x+r,y),"h"].join("\n");
   };
-  const drawBox = (cmds: string[], p: Placed, fill: string, fr: Frame): void => {
-    const shape = p.node.style.shape ?? "rounded";
-    if (shape === "none") return;
-    const {x,y,w,h} = p;
-    let path: string;
+  const boxPath = (r: {x:number;y:number;w:number;h:number}, shape: string, corner: number, fr: Frame): string => {
+    const {x,y,w,h} = r;
     if (shape === "diamond" || shape === "hexagon") {
       const points = shape === "diamond" ? [[x+w/2,y],[x+w,y+h/2],[x+w/2,y+h],[x,y+h/2]] : [[x+w*.25,y],[x+w*.75,y],[x+w,y+h/2],[x+w*.75,y+h],[x+w*.25,y+h],[x,y+h/2]];
-      path = points.map(([a,b],i)=>`${f(fr.X(a))} ${f(fr.Y(b))} ${i ? "l" : "m"}`).join("\n")+" h";
-    } else if (shape === "circle") {
+      return points.map(([a,b],i)=>`${f(fr.X(a))} ${f(fr.Y(b))} ${i ? "l" : "m"}`).join("\n")+" h";
+    }
+    if (shape === "circle") {
       const radius=Math.max(w,h)/2;
-      path=roundedPath(x+w/2-radius,y+h/2-radius,radius*2,radius*2,radius,fr);
-    } else path=roundedPath(x,y,w,h,shape === "rect" ? 0 : shape === "capsule" ? h/2 : p.node.style.cornerRadius??10,fr);
-    const stroke=p.node.style.borderWidth && p.node.style.stroke && p.node.style.stroke!=="transparent" ? p.node.style.stroke : opts.theme ? theme.nodeBorder : null;
+      return roundedPath(x+w/2-radius,y+h/2-radius,radius*2,radius*2,radius,fr);
+    }
+    return roundedPath(x,y,w,h,shape === "rect" ? 0 : shape === "capsule" ? h/2 : Math.max(0,corner),fr);
+  };
+  const drawBox = (cmds: string[], p: Placed, fill: string, fr: Frame): void => {
+    const shape = p.node.style.shape ?? "rounded";
+    const corner = p.node.style.cornerRadius??10;
+    // The renderer's outline when the caller supplies it; otherwise the rule
+    // this exporter had before outlines were resolved in one place.
+    const border = opts.borderOf ? opts.borderOf(p.node.id) : legacyBorder(p);
+    if (shape === "none" && !border) return;
+    // An outlined text-only topic gets the default box, as on the canvas.
+    const outlined = shape === "none" ? "rounded" : shape;
+    const path = boxPath(p, outlined, corner, fr);
     cmds.push("q");
-    if (fill !== "transparent" && fill !== "none") cmds.push(opacityCommand(fill),`${rgb(fill)} rg`,path,"f");
-    if (stroke) {
-      const dash=p.node.style.borderStyle==="dashed" ? "[6 4]" : p.node.style.borderStyle==="dotted" ? "[2 3]" : "[]";
-      cmds.push(opacityCommand(stroke),`${rgb(stroke)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,`${dash} 0 d`,path,"S");
+    if (shape !== "none" && fill !== "transparent" && fill !== "none") cmds.push(opacityCommand(fill),`${rgb(fill)} rg`,path,"f");
+    if (border) {
+      const dash=`[${border.dash.map(d=>f(d*fr.s)).join(" ")}]`;
+      cmds.push(opacityCommand(border.color),`${rgb(border.color)} RG`,`${border.cap === "round" ? 1 : 0} J`,`${dash} 0 d`);
+      if (border.double) {
+        const t=border.width/3;
+        cmds.push(`${f(t*fr.s)} w`);
+        for (const d of [t,-t]) cmds.push(boxPath({x:p.x-d,y:p.y-d,w:p.w+d*2,h:p.h+d*2},outlined,corner+d,fr),"S");
+      } else cmds.push(`${f(border.width*fr.s)} w`,path,"S");
     }
     cmds.push("Q"); ops+=8;
+  };
+  const legacyBorder = (p: Placed): ResolvedBorder | null => {
+    const s=p.node.style;
+    if (s.shape === "none") return null;
+    if (s.borderWidth && s.stroke && s.stroke!=="transparent") return {color:s.stroke,width:s.borderWidth,...borderDash(s.borderStyle,s.borderWidth),double:false};
+    return opts.theme ? {color:theme.nodeBorder,width:1,dash:[],cap:"butt",double:false} : null;
   };
 
   const plainText = (cmds: string[], text: string, x: number, baseline: number, size: number, color: string, fr: Frame, bold=false, maxWidth?: number): void => {

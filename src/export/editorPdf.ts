@@ -21,6 +21,7 @@ export async function editorMapToPdf(state: RenderState, options: EditorPdfOptio
       page:options.page,margin:options.margin,layout:options.layout,measurer:createCanvasTextMeasurer(),theme,grid:true,background:theme.background,
       colorOf:id=>renderer.nodeColors(snapshot,id),
       linkColorOf:id=>renderer.branchColorOf(snapshot,id),
+      borderOf:id=>renderer.nodeBorder(snapshot,id),
       relColorOf:id=>snapshot.sheet.relationships.find(rel=>rel.id===id)?.color??theme.selection,
       imageBytes:async id=>{
         const image=await pdfImageSource(assetStore,id,{lossless:true,original:true,maxLongSide:options.layout==="phone" ? 1280 : Infinity});

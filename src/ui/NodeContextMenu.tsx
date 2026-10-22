@@ -16,6 +16,7 @@ import { useStore } from "../editor/context";
 import { getRecentColors } from "../editor/recentColors";
 import { THEMES } from "../render/theme";
 import { quizHasMistakes } from "../core/quiz";
+import { NodeBorderPicker } from "./Inspector";
 
 export interface CtxMenuState {
   /** Canvas-wrap coordinates of the cursor when the menu opened. */
@@ -37,6 +38,7 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [recent, setRecent] = useState<string[]>(() => getRecentColors());
   const [pos, setPos] = useState({ x: menu.x, y: menu.y });
+  const [outlineOpen, setOutlineOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Keep the menu inside the canvas area: measure after mount and clamp when
@@ -182,6 +184,21 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
               Reset
             </button>
           </div>
+        </>
+      )}
+      {/* Outline: folded behind one row so the menu does not double in
+          height, and kept open while picking — style, width and colour are
+          usually chosen together. Applies to the selection like Color does. */}
+      {!node.style.code && !node.style.freeform && (
+        <>
+          <button role="menuitem" aria-expanded={outlineOpen} onClick={() => setOutlineOpen((v) => !v)}>
+            Outline {outlineOpen ? "▾" : "▸"}
+          </button>
+          {outlineOpen && (
+            <div className="ctx-outline">
+              <NodeBorderPicker style={node.style} ids={state.selection.includes(node.id) ? state.selection : [node.id]} />
+            </div>
+          )}
         </>
       )}
       <div className="ctx-sep" />

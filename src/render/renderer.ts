@@ -9,8 +9,8 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
  * HTML overlay (allowed by the architecture) — the renderer skips the title
  * of the node being edited so the overlay doesn't double-paint.
  */
-import type { Group, ImageSlot, MindNode, Sheet, ConnectorStyle, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
-import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
+import type { Group, ImageSlot, MindNode, ResolvedBorder, Sheet, ConnectorStyle, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
+import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
@@ -598,6 +598,38 @@ export class Renderer {
     return n ? this.branchColor(theme, n, state.sheet) : theme.connector;
   }
 
+  /**
+   * The outline a topic is drawn with, or null for none. Public and
+   * value-returning like `nodeColors`: the SVG and PDF exports paint what
+   * this returns instead of re-deriving the rule, and tests assert it without
+   * a canvas.
+   */
+  nodeBorder(state: RenderState, id: string): ResolvedBorder | null {
+    const n = state.sheet.nodes[id];
+    return n ? this.resolveBorder(THEMES[state.themeName], n, state.sheet) : null;
+  }
+
+  /**
+   * The rule documented on `Style.stroke`. Setting any one of the three
+   * outline fields makes the outline the topic's own — the bug this replaces
+   * drew a custom outline only when colour AND width were both present, so
+   * picking a dash style or a colour alone silently did nothing.
+   */
+  private resolveBorder(theme: RenderTheme, n: MindNode, sheet: Sheet): ResolvedBorder | null {
+    const { stroke, borderWidth, borderStyle } = n.style;
+    if (borderStyle === "none" || stroke === "transparent") return null;
+    if (stroke === undefined && borderWidth === undefined && borderStyle === undefined) {
+      // A text-only topic has no box for the hairline to trace.
+      if (theme.nodeBorder === "transparent" || (n.style.shape === "none" && !n.style.code)) return null;
+      return { color: theme.nodeBorder, width: 1, dash: [], cap: "butt", double: false };
+    }
+    const color = stroke === undefined || stroke === BRANCH_STROKE ? this.branchColor(theme, n, sheet) : stroke;
+    // A double line is two strokes and the gap between them: under 3 units
+    // the three thirds blur into one line, so it never goes thinner.
+    const width = Math.max(borderStyle === "double" ? 3 : 0.5, borderWidth ?? DEFAULT_NODE_BORDER_WIDTH);
+    return { color, width, ...borderDash(borderStyle, width), double: borderStyle === "double" };
+  }
+
   private branchColor(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     const branchRootId = this.branchRoot(n, sheet);
     const branchRoot = sheet.nodes[branchRootId];
@@ -729,16 +761,31 @@ export class Renderer {
       ctx.shadowBlur = 0;
       ctx.shadowOffsetY = 0;
     }
-    if (n.style.borderWidth && n.style.stroke && n.style.stroke !== "transparent") {
-      ctx.strokeStyle = n.style.stroke;
-      ctx.lineWidth = n.style.borderWidth;
-      ctx.setLineDash(n.style.borderStyle === "dashed" ? [6, 4] : n.style.borderStyle === "dotted" ? [2, 3] : []);
-      ctx.stroke();
+    // Custom artwork carries its own strokes; an outline over it would trace
+    // whatever path the last part left behind.
+    const border = art && art.length > 0 ? null : this.resolveBorder(theme, n, state.sheet);
+    if (border) {
+      // A text-only topic ("none") traces no path, so an outline chosen for it
+      // would vanish: it gets the default rounded box to sit on.
+      const shape = isCode ? "rounded" : n.style.shape === "none" ? "rounded" : n.style.shape ?? "rounded";
+      const radius = isCode ? 8 : n.style.cornerRadius ?? 10;
+      ctx.strokeStyle = border.color;
+      ctx.lineCap = border.cap;
+      ctx.setLineDash(border.dash);
+      if (border.double) {
+        const t = border.width / 3;
+        ctx.lineWidth = t;
+        for (const d of [t, -t]) {
+          this.traceShape(ctx, { ...p, x: p.x - d, y: p.y - d, w: p.w + d * 2, h: p.h + d * 2 }, shape, Math.max(0, radius + d));
+          ctx.stroke();
+        }
+      } else {
+        if (n.style.shape === "none" && !isCode) this.traceShape(ctx, p, shape, radius);
+        ctx.lineWidth = border.width;
+        ctx.stroke();
+      }
       ctx.setLineDash([]);
-    } else if (theme.nodeBorder !== "transparent") {
-      ctx.strokeStyle = theme.nodeBorder;
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      ctx.lineCap = "butt";
     }
 
     // selection ring

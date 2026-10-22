@@ -137,15 +137,72 @@ export interface QuizInfo {
   lastAnswers?: number[];
 }
 
+/**
+ * How an outline is drawn. "none" is an explicit choice — no outline at all,
+ * not even the theme's hairline — which is why it is a style and not the
+ * absence of one.
+ */
+export type BorderStyle = "solid" | "dashed" | "dotted" | "dashdot" | "double" | "none";
+export const BORDER_STYLES: BorderStyle[] = ["solid", "dashed", "dotted", "dashdot", "double", "none"];
+
+/** `Style.stroke` value meaning "the branch colour, resolved at paint time". */
+export const BRANCH_STROKE = "branch";
+
+/** Outline thickness when a topic has its own outline but no width chosen. */
+export const DEFAULT_NODE_BORDER_WIDTH = 2;
+
+/**
+ * A resolved outline, ready to paint. Dash lengths are in the same units as
+ * `width` and already grown with it, so a thick dashed line still reads as
+ * dashes. `double` draws two lines a third of `width` thick, at the outer and
+ * inner thirds of the band.
+ */
+export interface ResolvedBorder {
+  color: string;
+  width: number;
+  dash: number[];
+  cap: "butt" | "round";
+  double: boolean;
+}
+
+/** Dash pattern for an outline `width` thick — shared by topic outlines and
+ *  group boundaries so the two look like one family. */
+export function borderDash(style: BorderStyle | undefined, width: number): { dash: number[]; cap: "butt" | "round" } {
+  switch (style) {
+    case "dashed":
+      return { dash: [Math.max(6, width * 3.5), Math.max(4, width * 2.2)], cap: "butt" };
+    case "dotted":
+      // A near-zero dash with round caps is a dot `width` across; the gap
+      // must clear the two half-caps that grow into it.
+      return { dash: [0.01, Math.max(3, width * 2.2)], cap: "round" };
+    case "dashdot":
+      return { dash: [Math.max(6, width * 4), width + 4, 0.01, width + 4], cap: "round" };
+    default:
+      return { dash: [], cap: "butt" };
+  }
+}
+
 export interface Style {
   /** Topic containing freely positioned document nodes. */
   freeform?: boolean;
   /** Position relative to the parent inside a freeform topic. */
   freeformPosition?: { x: number; y: number };
   fill?: string;
+  /**
+   * Outline colour: a hex, or BRANCH_STROKE to follow the branch palette at
+   * paint time (so the outline changes with the theme instead of freezing
+   * one theme's colour into the document).
+   *
+   * The three outline fields form one choice: when ANY of them is set the
+   * topic wears its own outline and the absent ones take their defaults
+   * (branch colour, DEFAULT_NODE_BORDER_WIDTH, solid). With none set the
+   * theme's hairline is drawn, as it always was. `Renderer.nodeBorder` is the
+   * one place that applies this rule — canvas, SVG and PDF all ask it.
+   */
   stroke?: string;
+  /** Outline thickness in world units (it scales with zoom, like the box). */
   borderWidth?: number;
-  borderStyle?: "solid" | "dashed" | "dotted";
+  borderStyle?: BorderStyle;
   cornerRadius?: number;
   shape?: TopicShape;
   textColor?: string;

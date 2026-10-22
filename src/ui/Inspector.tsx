@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../editor/context";
-import type { Group, Relationship, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
-import { DEFAULT_GROUP_BORDER_WIDTH } from "../core/types";
+import type { Group, Relationship, Style, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
+import { BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH } from "../core/types";
+import { BorderPicker } from "./BorderPicker";
 import { THEMES } from "../render/theme";
 import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
@@ -21,6 +22,9 @@ const CELL_SHAPES: [string, number][] = [
 ];
 
 const STRUCTURES = ["mindmap", "logic", "tree", "org", "timeline", "fishbone", "matrix", "treetable", "freeform"] as const;
+
+/** Outline thicknesses offered for a topic, in world units. */
+const NODE_BORDER_WIDTHS = [1, 2, 3, 4, 6];
 
 /** Boundary thicknesses offered for a group, in screen px. The second one is
  *  DEFAULT_GROUP_BORDER_WIDTH — the look a group has before anyone picks. */
@@ -209,6 +213,19 @@ export function Inspector(): JSX.Element {
         )}
       </div>
 
+      {!node.style.code && !node.style.freeform && (
+        <div className="inspector-section">
+          <div
+            className="inspector-label"
+            data-help="Outline"
+            data-help-more="Line style, thickness and colour of the topic's border. Applies to every selected topic; the branch swatch follows the theme."
+          >
+            Outline
+          </div>
+          <NodeBorderPicker style={node.style} ids={snap.selection.includes(node.id) ? snap.selection : [node.id]} />
+        </div>
+      )}
+
       <GallerySection nodeId={node.id} />
 
       <div className="inspector-section">
@@ -249,6 +266,29 @@ export function Inspector(): JSX.Element {
 
       <SheetControls />
     </aside>
+  );
+}
+
+/** The outline picker bound to topics: shared by the Inspector and the
+ *  right-click menu so both write the same fields the same way. */
+export function NodeBorderPicker({ style, ids }: { style: Style; ids: string[] }): JSX.Element {
+  const store = useStore();
+  const custom = style.stroke !== undefined || style.borderWidth !== undefined || style.borderStyle !== undefined;
+  return (
+    <BorderPicker
+      value={{ color: style.stroke, width: style.borderWidth, style: style.borderStyle }}
+      // With no outline of its own a topic wears the theme hairline: 1px solid.
+      defaultWidth={custom ? DEFAULT_NODE_BORDER_WIDTH : 1}
+      defaultStyle="solid"
+      widths={NODE_BORDER_WIDTHS}
+      branchToken={BRANCH_STROKE}
+      onChange={(p) => store.setSelectionBorder({
+        ...("color" in p ? { stroke: p.color } : {}),
+        ...("width" in p ? { borderWidth: p.width } : {}),
+        ...("style" in p ? { borderStyle: p.style } : {}),
+      }, ids)}
+      onReset={() => store.resetSelectionBorder(ids)}
+    />
   );
 }
 
