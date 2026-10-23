@@ -16,6 +16,7 @@ import { useStore } from "../editor/context";
 import { getRecentColors } from "../editor/recentColors";
 import { THEMES } from "../render/theme";
 import { quizHasMistakes } from "../core/quiz";
+import { flashcardCounts } from "../core/flashcards";
 import { NodeBorderPicker } from "./Inspector";
 
 export interface CtxMenuState {
@@ -256,6 +257,50 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
           a quiz; pasting the answer back attaches it to the selected topic. */}
       <button role="menuitem" onClick={act(() => void store.copyQuizPrompt(node.id))}>
         Copy as quiz prompt
+      </button>
+      {/* The flashcard strip, built like the quiz strip: one square per deck
+          (its bar shows the red / yellow / green split), "×" deletes, "+"
+          appends from the clipboard and keeps the menu open. */}
+      <div className="ctx-quiz-row" role="group" aria-label="Flashcards">
+        {(node.style.flashcards ?? []).map((d) => {
+          const counts = flashcardCounts(d);
+          const total = d.cards.length;
+          const active = state.flashcardsOpen?.deckId === d.id;
+          return (
+            <span key={d.id} className="quiz-chip-wrap">
+              <button
+                className={`quiz-chip flash-chip${active ? " active" : ""}`}
+                title={`${d.name ?? "Flashcards"} · ${total} card${total > 1 ? "s" : ""}`}
+                onClick={act(() => store.openFlashcards(node.id, d.id))}
+              >
+                <span className="quiz-chip-box flash-chip-box" />
+                <span className="flash-chip-bar" aria-hidden="true">
+                  {(["red", "yellow", "green", "none"] as const).map((k) =>
+                    counts[k] > 0 ? <span key={k} className={k} style={{ flexGrow: counts[k] }} /> : null)}
+                </span>
+              </button>
+              <button
+                className="quiz-chip-del"
+                title={`Delete ${d.name ?? "flashcards"}`}
+                aria-label={`Delete ${d.name ?? "flashcards"}`}
+                onClick={() => store.removeFlashcards(node.id, d.id)}
+              >
+                ×
+              </button>
+            </span>
+          );
+        })}
+        <button
+          className="quiz-chip quiz-chip-add"
+          title="Add flashcards from the clipboard"
+          aria-label="Add flashcards from the clipboard"
+          onClick={() => void store.addQuizFromClipboard(node.id)}
+        >
+          +
+        </button>
+      </div>
+      <button role="menuitem" onClick={act(() => void store.copyFlashcardsPrompt(node.id))}>
+        Copy as flashcards prompt
       </button>
       <div className="ctx-sep" />
       {/* The AI expand round trip: copy the branch with a prompt asking an LLM

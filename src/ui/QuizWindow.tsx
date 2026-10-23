@@ -7,10 +7,13 @@
  * The score is written to the topic's `Style.quiz` through the store, so it is
  * persisted in the document and undone by one Ctrl+Z like any other edit; the
  * number recomputes from this run only, never from the stored value.
+ * Closing mid-run remembers the question and the answers so far
+ * (`studyProgress`); "Question 1" starts the run over.
  */
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
+import { clearStudyProgress, loadStudyProgress, saveStudyProgress, validQuizProgress } from "./studyProgress";
 
 export function QuizWindow(): JSX.Element | null {
   const store = useStore();
@@ -20,9 +23,12 @@ export function QuizWindow(): JSX.Element | null {
   const node = nodeId ? store.doc.node(nodeId) : null;
   const quiz = nodeId && quizId ? node?.style.quizzes?.find((q) => q.id === quizId) ?? null : null;
 
-  const [index, setIndex] = useState(0);
-  const [picked, setPicked] = useState<number | null>(null);
-  const [results, setResults] = useState<number[]>([]);
+  // Resume where the last run stopped, if it still fits this quiz.
+  const [saved] = useState(() =>
+    nodeId && quizId && quiz ? validQuizProgress(loadStudyProgress(nodeId, quizId), quiz.questions.length) : null);
+  const [index, setIndex] = useState(saved?.index ?? 0);
+  const [picked, setPicked] = useState<number | null>(saved && saved.results.length > saved.index ? saved.results[saved.index] : null);
+  const [results, setResults] = useState<number[]>(saved?.results ?? []);
   const [done, setDone] = useState(false);
   const submitted = useRef(false);
 
@@ -40,6 +46,13 @@ export function QuizWindow(): JSX.Element | null {
 
   const questions = quiz?.questions ?? [];
   const correctCount = results.filter((r, k) => r === questions[k]?.correct).length;
+
+  // A finished run is forgotten, so the next open starts from question 1.
+  useEffect(() => {
+    if (!nodeId || !quizId) return;
+    if (done || results.length === 0) clearStudyProgress(nodeId, quizId);
+    else saveStudyProgress(nodeId, quizId, { index, results });
+  }, [nodeId, quizId, index, results, done]);
 
   // Persist the score exactly once per finished run (a retry resets the guard).
   useEffect(() => {
@@ -90,6 +103,11 @@ export function QuizWindow(): JSX.Element | null {
           <span className="quiz-progress">
             {done ? "Result" : `Question ${index + 1} / ${questions.length}`}
           </span>
+          {!done && results.length > 0 && (
+            <button className="quiz-restart" title="Start again from question 1" onClick={retry}>
+              ↺ Question 1
+            </button>
+          )}
           <button className="quiz-close" title="Close" onClick={() => store.closeQuiz()}>
             ×
           </button>

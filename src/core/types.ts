@@ -137,6 +137,31 @@ export interface QuizInfo {
   lastAnswers?: number[];
 }
 
+/** How well the user knows a flashcard: red "don't know", yellow "partly",
+ *  green "know it". Absent until the card is rated once. */
+export type FlashcardRating = "red" | "yellow" | "green";
+
+/** One flashcard: `term` is the front, `definition` the back, `topic` the
+ *  subject label shown above both. */
+export interface Flashcard {
+  topic?: string;
+  term: string;
+  definition: string;
+  rating?: FlashcardRating;
+}
+
+/**
+ * A deck of flashcards carried by a topic — the sibling of `QuizInfo`, same
+ * rules: never drawn on the canvas, opened from the right-click menu, stored
+ * in `Style` and written through `setStyle` so a rating undoes like any edit.
+ */
+export interface FlashcardDeck {
+  /** Stable id within the topic; decks are addressed by id, never by index. */
+  id: string;
+  name?: string;
+  cards: Flashcard[];
+}
+
 /**
  * How an outline is drawn. "none" is an explicit choice — no outline at all,
  * not even the theme's hairline — which is why it is a style and not the
@@ -278,6 +303,9 @@ export interface Style {
   quizzes?: QuizInfo[];
   /** Show study arrows for mistakes in this topic's quizzes. */
   showQuizMistakes?: boolean;
+  /** Flashcard decks attached to this topic (see `FlashcardDeck`); reached
+   *  from the right-click menu like `quizzes`, never rendered. */
+  flashcards?: FlashcardDeck[];
   link?: string;
   /**
    * Marks the topic as a read-only code block (T22). The SOURCE lives in
