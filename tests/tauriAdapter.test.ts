@@ -449,6 +449,8 @@ describe("per-document files (two open maps cannot overwrite each other)", () =>
     // Second document: B, opened from B.rnode.
     bk.queuePick("C:/B.rnode");
     await store.openDesktop();
+    // The document IS that file now: nothing to save right after opening.
+    expect(store.getSnapshot().sync).toBe("saved");
     // Switch back to the first document and press Ctrl+S. The OLD behaviour
     // wrote the first document into B.rnode and renamed the file away; the
     // fixed behaviour writes the document's OWN file.

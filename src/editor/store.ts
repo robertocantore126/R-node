@@ -1070,6 +1070,10 @@ export class EditorStore {
     // The file's name IS the document's name from here on. Nothing is renamed
     // on disk — the title simply stops disagreeing with the file it came from.
     this.adoptFileTitle(file);
+    // The adapter now reads and writes this very file: nothing to save yet.
+    this.state.sync = "saved";
+    trace.mark("state", "state:sync", { status: "saved", via: "open" });
+    this.notify();
     this.toast(`Opened "${titleFromDocPath(file)}"`);
     return true;
   }
@@ -1309,11 +1313,13 @@ export class EditorStore {
           return;
         }
         const id = this.importDocumentFromJson(JSON.stringify(doc));
+        if (id) await this.settleOpenedDocument();
         this.toast(id ? `Opened ${file.name}` : "Not a valid R-node file");
         return;
       }
       const text = new TextDecoder().decode(buf);
       const id = this.importDocumentFromJson(text);
+      if (id) await this.settleOpenedDocument();
       if (id) this.toast(`Opened ${file.name}`);
       else this.toast("Not a valid R-node file");
     } catch (e) {
@@ -1397,12 +1403,33 @@ export class EditorStore {
       this.fileHandles.set(key, handle);
       await this.storeFileHandle(key, handle);
     }
+    await this.settleOpenedDocument();
     this.notify();
     this.toast(
       result.skipped > 0
         ? `Opened ${fileName} — ${result.skipped} image${result.skipped === 1 ? "" : "s"} missing from the file`
         : `Opened ${fileName}`
     );
+  }
+
+  /**
+   * A document just opened from a file on the web is identical to that file,
+   * but only lives in memory: `importDocumentFromJson` marks it dirty for
+   * that reason. Copy it into app storage, so the indicator says "saved"
+   * instead of asking for a save that would change nothing. An edit made
+   * while the copy runs, or a storage failure, leaves it dirty.
+   */
+  private async settleOpenedDocument(): Promise<void> {
+    const stamp = this.model.doc.updatedAt;
+    try {
+      await this.adapter.save(this.state.docs);
+    } catch {
+      return;
+    }
+    if (this.model.doc.updatedAt !== stamp) return;
+    this.state.sync = "saved";
+    trace.mark("state", "state:sync", { status: "saved", via: "open" });
+    this.notify();
   }
 
   /**
