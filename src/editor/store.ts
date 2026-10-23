@@ -976,7 +976,7 @@ export class EditorStore {
    * another open document must not drag the active document's file with it.
    */
   private async renameFileToTitleOnce(doc: RnodeDocument = this.model.doc): Promise<void> {
-    if (!(this.adapter instanceof TauriStorageAdapter)) return;
+    if (!(this.adapter instanceof TauriStorageAdapter)) return this.renamePortableFilesToTitle(doc);
     const current = this.docFilePaths.get(doc.documentId);
     if (!current) return; // never saved: the first "Save as…" chooses the name
     if (typeof window === "undefined" || !window.__TAURI__) return;
@@ -1000,6 +1000,39 @@ export class EditorStore {
     this.docFilePaths.set(doc.documentId, target);
     this.toast(`Renamed to "${base}.rnode"`);
     this.notify();
+  }
+
+  /**
+   * Web: a file saved through the picker keeps the name it was first saved
+   * with, because every later save overwrites it through the stored handle.
+   * Rename it in place where the browser supports `FileSystemFileHandle.move`;
+   * otherwise forget the handle, so the next save asks where to save with the
+   * new name already filled in.
+   */
+  private async renamePortableFilesToTitle(doc: RnodeDocument): Promise<void> {
+    const base = docFileBaseName(doc.title);
+    const extensions: Record<PortableFormat, string> = { rnode: ".rnode", json: ".rnode.json", zip: ".rnode.zip" };
+    for (const format of Object.keys(extensions) as PortableFormat[]) {
+      const key = portableFileKey(doc.documentId, format);
+      const handle = this.fileHandles.get(key) ?? (await this.loadFileHandle(key));
+      if (!handle) continue;
+      const target = base + extensions[format];
+      if (handle.name === target) continue;
+      const move = (handle as FileSystemFileHandle & { move?: (name: string) => Promise<void> }).move;
+      try {
+        if (typeof move !== "function") throw new Error("FileSystemFileHandle.move is not supported");
+        await move.call(handle, target);
+        this.fileHandles.set(key, handle);
+        await this.storeFileHandle(key, handle);
+        trace.mark("files", "files:rename", { from: handle.name, to: target, via: "handle" });
+        this.toast(`Renamed to "${target}"`);
+      } catch (e) {
+        trace.mark("files", "files:failure", { op: "rename", error: String(e) });
+        this.fileHandles.delete(key);
+        await this.clearFileHandle(key);
+        this.toast(`The browser cannot rename "${handle.name}" — the next save asks where to save "${target}"`);
+      }
+    }
   }
 
   /**
