@@ -12,6 +12,7 @@ import { ShapeLibrary } from "./ui/ShapeLibrary";
 import { Palette } from "./ui/Palette";
 import { SearchBar } from "./ui/SearchBar";
 import { QuizWindow } from "./ui/QuizWindow";
+import { FlashcardWindow } from "./ui/FlashcardWindow";
 
 export function App(): JSX.Element {
   const store = useStore();
@@ -86,6 +87,7 @@ export function App(): JSX.Element {
       <Palette />
 
       {state.quizOpen && <QuizWindow key={`${state.quizOpen.nodeId}:${state.quizOpen.quizId}`} />}
+      {state.flashcardsOpen && <FlashcardWindow key={`${state.flashcardsOpen.nodeId}:${state.flashcardsOpen.deckId}`} />}
 
       {state.message && (
         <div className="toast" onClick={() => (store as unknown as { toast: (m: string) => void }).toast("")}>

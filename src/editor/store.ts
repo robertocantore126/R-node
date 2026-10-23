@@ -14,13 +14,15 @@ import { guessCodeLang } from "../core/codeHighlight";
 import type { ShapeTemplate } from "./shapeLibrary";
 import { addRecentColor } from "./recentColors";
 import { quizClipText } from "./quizPrompts";
+import { flashcardsClipText } from "./flashcardPrompts";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
 import { applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type AttachmentInfo, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { parseQuiz, quizTopicOutline, type QuizSeed } from "../core/quiz";
+import { parseFlashcards, type FlashcardSeed } from "../core/flashcards";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
@@ -205,6 +207,8 @@ export interface EditorState {
   /** The quiz window that is open — the topic and the quiz id within it — or
    *  null. Opened from the topic's right-click menu; never drawn on the canvas. */
   quizOpen: { nodeId: string; quizId: string } | null;
+  /** The flashcard window that is open — the topic and the deck id — or null. */
+  flashcardsOpen: { nodeId: string; deckId: string } | null;
   /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
   pendingInsert: string | null;
   sync: "saved" | "dirty";
@@ -383,6 +387,7 @@ export class EditorStore {
       searchIndex: 0,
       searchOpen: false,
       quizOpen: null,
+      flashcardsOpen: null,
       pendingInsert: null,
       sync: "saved",
       message: null,
@@ -971,7 +976,7 @@ export class EditorStore {
    * another open document must not drag the active document's file with it.
    */
   private async renameFileToTitleOnce(doc: RnodeDocument = this.model.doc): Promise<void> {
-    if (!(this.adapter instanceof TauriStorageAdapter)) return;
+    if (!(this.adapter instanceof TauriStorageAdapter)) return this.renamePortableFilesToTitle(doc);
     const current = this.docFilePaths.get(doc.documentId);
     if (!current) return; // never saved: the first "Save as…" chooses the name
     if (typeof window === "undefined" || !window.__TAURI__) return;
@@ -995,6 +1000,39 @@ export class EditorStore {
     this.docFilePaths.set(doc.documentId, target);
     this.toast(`Renamed to "${base}.rnode"`);
     this.notify();
+  }
+
+  /**
+   * Web: a file saved through the picker keeps the name it was first saved
+   * with, because every later save overwrites it through the stored handle.
+   * Rename it in place where the browser supports `FileSystemFileHandle.move`;
+   * otherwise forget the handle, so the next save asks where to save with the
+   * new name already filled in.
+   */
+  private async renamePortableFilesToTitle(doc: RnodeDocument): Promise<void> {
+    const base = docFileBaseName(doc.title);
+    const extensions: Record<PortableFormat, string> = { rnode: ".rnode", json: ".rnode.json", zip: ".rnode.zip" };
+    for (const format of Object.keys(extensions) as PortableFormat[]) {
+      const key = portableFileKey(doc.documentId, format);
+      const handle = this.fileHandles.get(key) ?? (await this.loadFileHandle(key));
+      if (!handle) continue;
+      const target = base + extensions[format];
+      if (handle.name === target) continue;
+      const move = (handle as FileSystemFileHandle & { move?: (name: string) => Promise<void> }).move;
+      try {
+        if (typeof move !== "function") throw new Error("FileSystemFileHandle.move is not supported");
+        await move.call(handle, target);
+        this.fileHandles.set(key, handle);
+        await this.storeFileHandle(key, handle);
+        trace.mark("files", "files:rename", { from: handle.name, to: target, via: "handle" });
+        this.toast(`Renamed to "${target}"`);
+      } catch (e) {
+        trace.mark("files", "files:failure", { op: "rename", error: String(e) });
+        this.fileHandles.delete(key);
+        await this.clearFileHandle(key);
+        this.toast(`The browser cannot rename "${handle.name}" — the next save asks where to save "${target}"`);
+      }
+    }
   }
 
   /**
@@ -4016,9 +4054,48 @@ export class EditorStore {
       /* clipboard read blocked — treat as empty */
     }
     if (!text) return trace.ignored("quiz:add", "clipboard empty or blocked");
-    const seed = parseQuiz(text);
-    if (!seed) return trace.ignored("quiz:add", "clipboard does not hold a quiz payload");
-    this.attachQuiz(nodeId, seed);
+    if (!this.attachStudyPayload(nodeId, text)) trace.ignored("quiz:add", "clipboard holds neither a quiz nor flashcards");
+  }
+
+  /**
+   * Attach whatever study payload `text` holds — a quiz or a flashcard deck,
+   * told apart by `kind` — to a topic. Both "+" squares and Ctrl+V go through
+   * here, so a payload lands in the right strip whichever one was used.
+   */
+  private attachStudyPayload(nodeId: string, text: string): boolean {
+    const quiz = parseQuiz(text);
+    if (quiz) { this.attachQuiz(nodeId, quiz); return true; }
+    const deck = parseFlashcards(text);
+    if (deck) { this.attachFlashcards(nodeId, deck); return true; }
+    return false;
+  }
+
+  /** Copy a branch's outline plus the flashcard-generation prompt. The
+   *  outline is the plain one: cards carry no topic links. */
+  async copyFlashcardsPrompt(nodeId: string): Promise<void> {
+    if (!this.model.node(nodeId)) return;
+    this.commitEdit();
+    const text = flashcardsClipText(this.outlineText([nodeId]));
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be blocked; the prompt was still built */
+    }
+    this.toast("Copied flashcards prompt");
+  }
+
+  /** APPEND a deck to a topic's flashcard strip — one undoable `setStyle`. */
+  attachFlashcards(nodeId: string, seed: FlashcardSeed): void {
+    const node = this.model.node(nodeId);
+    if (!node) return;
+    const deck: FlashcardDeck = { id: uid("cards"), cards: seed.cards };
+    if (seed.name) deck.name = seed.name;
+    const flashcards = [...(node.style.flashcards ?? []), deck];
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style: { ...node.style, flashcards }, prev: node.style }),
+    ]);
+    const n = seed.cards.length;
+    this.toast(`Flashcards added (${n} card${n > 1 ? "s" : ""})`);
   }
 
   /**
@@ -4211,11 +4288,11 @@ export class EditorStore {
     // so without this it would fall through to the plain-text branch and be
     // typed into the topic as raw JSON (and then show up in Ctrl+F).
     // parseQuiz tolerates a ```json fence, which an LLM adds often enough.
-    const quizSeed = parseQuiz(text);
-    if (quizSeed) {
+    // A flashcard deck takes the same route; `kind` decides which strip.
+    if (parseQuiz(text) || parseFlashcards(text)) {
       const target = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
-      if (!target) return trace.ignored("paste:quiz", "no topic selected to attach the quiz to");
-      this.attachQuiz(target.id, quizSeed);
+      if (!target) return trace.ignored("paste:quiz", "no topic selected to attach the quiz or flashcards to");
+      this.attachStudyPayload(target.id, text);
       return;
     }
     if (!parsed || parsed.app !== "r-node" || !parsed.payload) {
@@ -4926,6 +5003,53 @@ export class EditorStore {
     this.notify();
   }
 
+  // -------------------------------------------------------------------------
+  // Flashcards (a modal window, like the quiz)
+  // -------------------------------------------------------------------------
+
+  openFlashcards(nodeId: string, deckId: string): void {
+    const node = this.model.node(nodeId);
+    if (!node?.style.flashcards?.some((d) => d.id === deckId)) return;
+    this.state.flashcardsOpen = { nodeId, deckId };
+    trace.mark("ui", "ui:modal", { open: true, flashcards: deckId });
+    this.notify();
+  }
+
+  closeFlashcards(): void {
+    if (this.state.flashcardsOpen === null) return;
+    this.state.flashcardsOpen = null;
+    trace.mark("ui", "ui:modal", { open: false });
+    this.notify();
+  }
+
+  /** Delete one deck — the "×" on its square. Undo brings it back with its
+   *  ratings. */
+  removeFlashcards(nodeId: string, deckId: string): void {
+    const node = this.model.node(nodeId);
+    const decks = node?.style.flashcards;
+    if (!node || !decks?.some((d) => d.id === deckId)) return;
+    if (this.state.flashcardsOpen?.deckId === deckId) this.closeFlashcards();
+    const rest = decks.filter((d) => d.id !== deckId);
+    const style: Style = { ...node.style, flashcards: rest };
+    if (rest.length === 0) delete style.flashcards;
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style, prev: node.style })]);
+    this.toast("Flashcards deleted");
+  }
+
+  /** Rate one card. Written at once, so a run closed halfway keeps what was
+   *  rated; each rating is one undo step. */
+  rateFlashcard(nodeId: string, deckId: string, cardIndex: number, rating: FlashcardRating): void {
+    const node = this.model.node(nodeId);
+    const decks = node?.style.flashcards;
+    const deck = decks?.find((d) => d.id === deckId);
+    if (!node || !decks || !deck || !deck.cards[cardIndex] || deck.cards[cardIndex].rating === rating) return;
+    const cards = deck.cards.map((card, i) => (i === cardIndex ? { ...card, rating } : card));
+    const flashcards = decks.map((d) => (d.id === deckId ? { ...d, cards } : d));
+    this.execOps([
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style: { ...node.style, flashcards }, prev: node.style }),
+    ]);
+  }
+
   setQuizMistakesVisible(nodeId: string, visible: boolean): void {
     const node = this.model.node(nodeId);
     if (!node || !!node.style.showQuizMistakes === visible) return;
@@ -5145,6 +5269,7 @@ export class EditorStore {
     this.state.searchResults = [];
     this.state.searchOpen = false;
     this.state.quizOpen = null;
+    this.state.flashcardsOpen = null;
     this.state.sync = "saved"; // the loaded doc is its persisted version
     this.focusRoot();
     this.notify();
