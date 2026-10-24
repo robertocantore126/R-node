@@ -228,7 +228,13 @@ export class Renderer {
     // Visibility depends on the camera, so it belongs in the key alongside the
     // revision: a pan changes which nodes are visible without changing any box.
     // The open chart note follows the selection, not the revision.
-    return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}|${openChartNote(state.sheet, state) ?? ""}`;
+    return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}|${this.openNote(state) ?? ""}`;
+  }
+
+  /** The chart note on screen. None while a picture is being dragged: the
+   *  note would cover the boxes the user is aiming at. */
+  private openNote(state: RenderState): string | null {
+    return state.ghostImage ? null : openChartNote(state.sheet, state);
   }
 
   private placedNodes(state: RenderState): Placed[] {
@@ -282,7 +288,7 @@ export class Renderer {
     }
     // A chart slot's note is a floating topic drawn only while open (see
     // openChartNote); a closed one is neither painted nor hit.
-    const openNote = openChartNote(sheet, state);
+    const openNote = this.openNote(state);
     let closedNotes = 0;
     for (const n of Object.values(sheet.nodes)) {
       if (n.type !== "floating" || seen.has(n.id)) continue;

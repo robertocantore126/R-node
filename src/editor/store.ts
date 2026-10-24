@@ -3322,7 +3322,9 @@ export class EditorStore {
     if (index < 0 || index >= items.length) return;
     const next = caption.trim();
     if ((items[index].caption ?? "") === next) return;
-    items[index] = next ? { id: items[index].id, caption: next } : { id: items[index].id };
+    // Rebuilt from the cell minus its caption, so a chart slot's note stays.
+    const { caption: _old, ...rest } = items[index];
+    items[index] = next ? { ...rest, caption: next } : rest;
     const g = this.model.node(nodeId)?.style.gallery;
     this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
     this.notify();
@@ -3509,18 +3511,17 @@ export class EditorStore {
   }
 
   /**
-   * Insert a NEW box holding the placeholder picture right after slot
-   * `after` (or at the end) — the box menu's "Add placeholder box". The
-   * board keeps its shape rule (`items.length` a multiple of `cols`): the
-   * insert pushes the later slots along, and the last slot falls off if it
-   * is a bare hole, otherwise a row is added. One `setStyle`, one undo.
+   * Put the placeholder picture INTO slot `index` — the box menu's "Add
+   * placeholder box", acting on the box that was right-clicked. The slot keeps
+   * its title and its note; a picture already there is replaced, as a drop
+   * onto it would. One `setStyle`, one undo.
    */
-  async addChartPlaceholder(chartId: string, after?: number): Promise<boolean> {
+  async addChartPlaceholder(chartId: string, index: number): Promise<boolean> {
     const sheet = this.sheet;
     const res = await this.importToCard(chartPlaceholderFile());
     const g = this.model.node(chartId)?.style.gallery;
-    if (this.sheet !== sheet || !g?.chart) {
-      trace.ignored("chart:placeholder", "target chart is no longer open", { nodeId: chartId });
+    if (this.sheet !== sheet || !g?.chart || index < 0 || index >= g.items.length) {
+      trace.ignored("chart:placeholder", "target box is no longer there", { nodeId: chartId, index });
       return false;
     }
     if (!res.ok) {
@@ -3528,19 +3529,12 @@ export class EditorStore {
       return false;
     }
     if (!this.sheet.attachments.some((a) => a.id === res.card.id)) this.sheet.attachments.push({ ...res.card });
-    const cols = Math.max(1, g.cols ?? CHART_COLS);
     const items = this.galleryItems(chartId);
-    const at = after !== undefined && after >= 0 && after < items.length ? after + 1 : items.length;
-    items.splice(at, 0, { id: res.card.id });
-    if (items.length % cols !== 0) {
-      const last = items[items.length - 1];
-      if (!last.id && !last.caption && !last.noteId) items.pop();
-      while (items.length % cols !== 0) items.push({ id: "" });
-    }
-    this.putGallery(chartId, items, g.cellW, cols, g.aspect);
+    items[index] = { ...items[index], id: res.card.id };
+    this.putGallery(chartId, items, g.cellW, g.cols, g.aspect);
     this.state.selection = [chartId];
-    this.state.gallerySel = { nodeId: chartId, index: at };
-    trace.applied("chart:placeholder", { nodeId: chartId, index: at });
+    this.state.gallerySel = { nodeId: chartId, index };
+    trace.applied("chart:placeholder", { nodeId: chartId, index });
     this.notify();
     return true;
   }

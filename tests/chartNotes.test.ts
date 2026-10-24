@@ -189,22 +189,25 @@ describe("box notes", () => {
 });
 
 describe("placeholder box", () => {
-  it("inserts after the selected box and keeps the board's shape", async () => {
+  it("fills the right-clicked box, keeping the board's shape", async () => {
     const { store, id } = seeded();
-    expect(await store.addChartPlaceholder(id, 1)).toBe(true);
-    expect(ids(store, id)).toEqual(["", "", "id:placeholder.png", "", "", ""]);
+    expect(await store.addChartPlaceholder(id, 4)).toBe(true);
+    expect(ids(store, id)).toEqual(["", "", "", "", "id:placeholder.png", ""]);
     expect(store.chartShape(id)).toEqual({ cols: CHART_COLS, rows: CHART_ROWS });
-    expect(store.getSnapshot().gallerySel).toEqual({ nodeId: id, index: 2 });
+    expect(store.getSnapshot().gallerySel).toEqual({ nodeId: id, index: 4 });
     expect(store.sheet.attachments.some((a) => a.id === "id:placeholder.png")).toBe(true);
     store.undo();
     expect(ids(store, id)).toEqual(["", "", "", "", "", ""]);
   });
 
-  it("adds a row when the last box is in use", async () => {
+  it("replaces a picture but keeps the box's title and note", async () => {
     const { store, id } = seeded();
-    store.doc.node(id)!.style.gallery!.items[5] = { id: "last" };
+    const noteId = store.addChartNote(id, 0)!;
+    store.commitEdit();
+    store.setGalleryCaption(id, 0, "Kept");
+    store.doc.node(id)!.style.gallery!.items[0].id = "old";
     await store.addChartPlaceholder(id, 0);
-    expect(store.chartShape(id)).toEqual({ cols: CHART_COLS, rows: CHART_ROWS + 1 });
-    expect(ids(store, id)).toEqual(["", "id:placeholder.png", "", "", "", "", "last", "", ""]);
+    const it = store.doc.node(id)!.style.gallery!.items[0];
+    expect(it).toEqual({ id: "id:placeholder.png", caption: "Kept", noteId });
   });
 });
