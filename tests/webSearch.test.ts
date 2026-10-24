@@ -32,13 +32,38 @@ describe("searchWeb", () => {
     const f = fake({
       "itunes.apple.com/search": () => json({ results: [{ collectionName: "OK Computer", artistName: "Radiohead", artworkUrl100: "https://is1.mzstatic.com/a/100x100bb.jpg", releaseDate: "1997-05-21T07:00:00Z", primaryGenreName: "Alternative", trackCount: 12 }] }),
     });
-    const [r] = await searchWeb("albums", "ok computer", "it", f.fetch);
+    const [r] = await searchWeb("albums", "ok computer", "it", f.fetch, "");
     expect(f.asked[0]).toContain("entity=album");
     expect(f.asked[0]).toContain("country=IT");
     expect(r.title).toBe("OK Computer");
+    expect(r.caption).toBe("Radiohead - OK Computer");
     expect(r.subtitle).toBe("Radiohead");
     expect(r.imageUrl).toBe("https://is1.mzstatic.com/a/600x600bb.jpg");
     expect(r.details).toBe("Radiohead\n1997 · Alternative · 12 tracks");
+  });
+
+  it("searches Last.fm with the user's key, and fetches tags and tracks on drop", async () => {
+    const f = fake({
+      "method=album.search": () => json({ results: { albummatches: { album: [
+        { name: "OK Computer", artist: "Radiohead", url: "https://www.last.fm/music/Radiohead/OK+Computer", image: [{ "#text": "https://lastfm.freetls.fastly.net/i/u/34s/abc.png", size: "small" }, { "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/abc.png", size: "extralarge" }] },
+        { name: "Bootleg", artist: "Nobody", image: [{ "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png" }] },
+      ] } } }),
+      "method=album.getinfo": () => json({ album: { tags: { tag: [{ name: "alternative" }, { name: "rock" }] }, tracks: { track: [{}, {}, {}] }, wiki: { summary: 'A classic. <a href="https://www.last.fm/x">Read more on Last.fm</a>' } } }),
+    });
+    const [a, b] = await searchWeb("albums", "ok computer", "en", f.fetch, "KEY");
+    expect(f.asked[0]).toContain("ws.audioscrobbler.com");
+    expect(f.asked[0]).toContain("api_key=KEY");
+    expect(a.caption).toBe("Radiohead - OK Computer");
+    expect(a.imageUrl).toBe("https://lastfm.freetls.fastly.net/i/u/600x600/abc.png");
+    // Last.fm's grey star is "no cover", not a picture.
+    expect(b.imageUrl).toBeUndefined();
+    const full = await resolveWebItem(a, f.fetch, "KEY");
+    expect(full.details).toBe("Radiohead\nalternative, rock · 3 tracks\nA classic.");
+  });
+
+  it("says when Last.fm refuses the key", async () => {
+    const f = fake({ "audioscrobbler": () => new Response(JSON.stringify({ error: 10, message: "Invalid API key" }), { status: 403 }) });
+    await expect(searchWeb("albums", "x", "en", f.fetch, "BAD")).rejects.toThrow(/refused the API key/);
   });
 
   it("reads Open Library books, with no picture when there is no cover", async () => {
@@ -99,15 +124,15 @@ function storeWithChart(): { store: EditorStore; chart: string } {
   return { store, chart };
 }
 
-const album: WebItem = { source: "albums", title: "OK Computer", imageUrl: "https://x/cover.jpg", details: "Radiohead\n1997" };
+const album: WebItem = { source: "albums", title: "OK Computer", caption: "Radiohead - OK Computer", imageUrl: "https://x/cover.jpg", details: "Radiohead\n1997" };
 
 describe("placeWebItem", () => {
   it("fills a chart box with picture, caption and a note, undone in one step", async () => {
     const { store, chart } = storeWithChart();
     expect((await store.placeWebItem(album, { kind: "chart", nodeId: chart, index: 2 })).ok).toBe(true);
     const item = store.doc.node(chart)!.style.gallery!.items[2];
-    expect(item.id).toBe("id:OK Computer");
-    expect(item.caption).toBe("OK Computer");
+    expect(item.id).toBe("id:Radiohead - OK Computer");
+    expect(item.caption).toBe("Radiohead - OK Computer");
     expect(chartSlotNote(store.sheet, chart, 2)?.title).toBe("Radiohead\n1997");
     store.undo();
     expect(store.doc.node(chart)!.style.gallery!.items[2]).toEqual({ id: "" });
@@ -131,8 +156,8 @@ describe("placeWebItem", () => {
     const id = store.getSnapshot().selection[0];
     const n = store.doc.node(id)!;
     expect(n.type).toBe("floating");
-    expect(n.title).toBe("OK Computer");
-    expect(n.style.image).toBe("id:OK Computer");
+    expect(n.title).toBe("Radiohead - OK Computer");
+    expect(n.style.image).toBe("id:Radiohead - OK Computer");
     expect(n.notes).toBe("Radiohead\n1997\n\nhttps://x/page");
     store.undo();
     expect(Object.keys(store.sheet.nodes).length).toBe(before);

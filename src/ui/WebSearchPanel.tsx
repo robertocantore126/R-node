@@ -6,7 +6,7 @@
  */
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { useStore } from "../editor/context";
-import { searchWeb, WEB_ITEM_DRAG_TYPE, WEB_SOURCES, type WebItem, type WebLang, type WebSource } from "../editor/webSearch";
+import { getLastfmKey, searchWeb, setLastfmKey, WEB_ITEM_DRAG_TYPE, WEB_SOURCES, type WebItem, type WebLang, type WebSource } from "../editor/webSearch";
 
 /** Remembered between sessions per browser: the tab and the language. */
 const PREFS_KEY = "rnode.webSearch";
@@ -27,6 +27,9 @@ export function WebSearchPanel(): JSX.Element {
   const [results, setResults] = useState<WebItem[]>([]);
   const [status, setStatus] = useState<"idle" | "loading" | "error" | "empty">("idle");
   const [error, setError] = useState("");
+  const [lastfmKey, setKeyState] = useState(getLastfmKey);
+  const [keyDraft, setKeyDraft] = useState("");
+  const [editingKey, setEditingKey] = useState(false);
   const seq = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -48,7 +51,7 @@ export function WebSearchPanel(): JSX.Element {
     const timer = window.setTimeout(async () => {
       setStatus("loading");
       try {
-        const found = await searchWeb(prefs.source, q, prefs.lang);
+        const found = await searchWeb(prefs.source, q, prefs.lang, undefined, lastfmKey);
         if (mine !== seq.current) return;
         setResults(found);
         setStatus(found.length === 0 ? "empty" : "idle");
@@ -60,7 +63,14 @@ export function WebSearchPanel(): JSX.Element {
       }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [query, prefs.source, prefs.lang]);
+  }, [query, prefs.source, prefs.lang, lastfmKey]);
+
+  const saveKey = (): void => {
+    setLastfmKey(keyDraft);
+    setKeyState(getLastfmKey());
+    setKeyDraft("");
+    setEditingKey(false);
+  };
 
   const onDragStart = (e: DragEvent, item: WebItem): void => {
     e.dataTransfer.effectAllowed = "copy";
@@ -109,6 +119,31 @@ export function WebSearchPanel(): JSX.Element {
         // Keys typed here belong to the field, not to the map's shortcuts.
         onKeyDown={(e) => e.stopPropagation()}
       />
+      {prefs.source === "albums" && (
+        <div className="websearch-provider">
+          {editingKey ? (
+            <>
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder="Last.fm API key"
+                aria-label="Last.fm API key"
+                value={keyDraft}
+                onChange={(e) => setKeyDraft(e.target.value)}
+                onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") saveKey(); if (e.key === "Escape") setEditingKey(false); }}
+              />
+              <button onClick={saveKey}>{keyDraft.trim() || !lastfmKey ? "Save" : "Remove"}</button>
+            </>
+          ) : (
+            <>
+              <span>{lastfmKey ? "From Last.fm" : "From iTunes"}</span>
+              <button onClick={() => setEditingKey(true)} title="Albums come from Last.fm with your own free API key (last.fm/api/account/create); without one, from iTunes. The key stays in this browser.">
+                {lastfmKey ? "Change key" : "Use Last.fm…"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
       <div className="websearch-hint">Drag a result onto a chart box, a topic or the canvas.</div>
       <div className="websearch-results">
         {status === "loading" && <div className="websearch-status">Searching…</div>}

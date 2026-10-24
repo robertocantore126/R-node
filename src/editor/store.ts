@@ -2,7 +2,7 @@ import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, 
 import { chartNoteIds, chartSlotNote, isChartNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
-import { resolveWebItem, type WebItem } from "./webSearch";
+import { resolveWebItem, webCaption, type WebItem } from "./webSearch";
 /**
  * EditorStore — the editor interaction layer.
  *
@@ -3572,7 +3572,8 @@ export class EditorStore {
     const fetched = (item.imageUrl ? await fetchImageAsFile(item.imageUrl, fetcher) : null)
       ?? (item.thumbUrl && item.thumbUrl !== item.imageUrl ? await fetchImageAsFile(item.thumbUrl, fetcher) : null);
     // Named after the result so every caption rule derives the title from it.
-    const file = fetched ? new File([fetched], item.title, { type: fetched.type }) : null;
+    const name = webCaption(item);
+    const file = fetched ? new File([fetched], name, { type: fetched.type }) : null;
     const fail = (reason: string): { ok: false; reason: string } => {
       trace.ignored("web:place", reason, { kind: target.kind, title: item.title });
       this.toast(reason);
@@ -3590,8 +3591,8 @@ export class EditorStore {
         nodeType: "floating",
         parentId: null,
         index: 0,
-        title: item.title,
-        titleRuns: [{ text: item.title }],
+        title: name,
+        titleRuns: [{ text: name }],
         style: card?.ok ? { image: card.card.id } : {},
         position: { x: target.x, y: target.y, manual: true },
       })];
@@ -3640,7 +3641,7 @@ export class EditorStore {
         position: { x: 0, y: 0, manual: false },
       }));
     }
-    items[target.index] = { ...items[target.index], id: card.card.id, caption: item.title, ...(noteId ? { noteId } : {}) };
+    items[target.index] = { ...items[target.index], id: card.card.id, caption: name, ...(noteId ? { noteId } : {}) };
     ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chart.id, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
     this.execOps(ops);
     this.settleLayoutNow();

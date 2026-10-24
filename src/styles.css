@@ -1262,6 +1262,33 @@ textarea:focus {
   color: var(--text);
   font: inherit;
 }
+.websearch-provider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.websearch-provider input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.websearch-provider button {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
 .websearch-hint {
   padding: 4px 12px 6px;
   font-size: 11px;

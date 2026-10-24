@@ -27,8 +27,11 @@ export type WebLang = "it" | "en";
  *  DataTransfer payload (WEB_ITEM_DRAG_TYPE). */
 export interface WebItem {
   source: WebSource;
-  /** What the result IS — the topic title or the chart box's caption. */
+  /** What the result IS, as listed in the panel. */
   title: string;
+  /** What lands on the map — the box caption, the topic title — when it
+   *  should say more than `title`: an album is "Artist - Album". */
+  caption?: string;
   /** Second line in the results list (artist, author, description). */
   subtitle?: string;
   /** Small picture for the results list. */
@@ -41,7 +44,58 @@ export interface WebItem {
   url?: string;
   /** Wikipedia only: the page to fetch the summary of on drop. */
   wiki?: { lang: WebLang; key: string };
+  /** Last.fm only: the album to fetch tags, tracks and summary of on drop. */
+  lastfm?: { artist: string; album: string };
 }
+
+/** What a result is called on the map. */
+export const webCaption = (item: WebItem): string => item.caption ?? item.title;
+
+/**
+ * The user's own Last.fm API key (free at last.fm/api/account/create).
+ * Last.fm answers browsers directly but refuses every call without a key,
+ * and a key cannot ship in a public web app, so each user brings theirs. It
+ * stays in this browser's storage. Without one, albums come from iTunes.
+ */
+const LASTFM_KEY = "rnode.lastfmKey";
+export function getLastfmKey(): string {
+  try { return localStorage.getItem(LASTFM_KEY)?.trim() ?? ""; } catch { return ""; }
+}
+export function setLastfmKey(key: string): void {
+  try {
+    if (key.trim()) localStorage.setItem(LASTFM_KEY, key.trim());
+    else localStorage.removeItem(LASTFM_KEY);
+  } catch { /* private mode: not remembered */ }
+}
+
+/** Last.fm's grey star, served for albums it has no cover for. */
+const LASTFM_NO_COVER = "2a96cbd8b46e442fc41c2b86b821562f";
+/** Last.fm serves any square size from the same path. */
+const lastfmArt = (url: string | undefined, px: number): string | undefined =>
+  url && !url.includes(LASTFM_NO_COVER) ? url.replace(/\/i\/u\/[^/]+\//, `/i/u/${px}x${px}/`) : undefined;
+
+/** One Last.fm API call; its errors come back as JSON with a message. */
+async function lastfmCall(params: Record<string, string>, key: string, fetcher: FetchFn): Promise<Record<string, unknown>> {
+  const qs = new URLSearchParams({ ...params, api_key: key, format: "json" });
+  const res = await fetcher(`https://ws.audioscrobbler.com/2.0/?${qs}`);
+  const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok || j.error) {
+    throw new Error(j.error === 10 || j.error === 26 ? "Last.fm refused the API key — check it in the panel" : `Last.fm: ${String(j.message ?? `HTTP ${res.status}`)}`);
+  }
+  return j;
+}
+
+interface LastfmAlbum {
+  name?: string;
+  artist?: string;
+  url?: string;
+  image?: { "#text"?: string; size?: string }[];
+}
+
+const largestImage = (images?: { "#text"?: string }[]): string | undefined => {
+  for (let i = (images?.length ?? 0) - 1; i >= 0; i--) if (images![i]["#text"]) return images![i]["#text"];
+  return undefined;
+};
 
 /** DataTransfer type of a dragged WebItem (JSON). */
 export const WEB_ITEM_DRAG_TYPE = "application/x-rnode-web-item";
@@ -123,17 +177,36 @@ async function wikiSearch(source: WebSource, q: string, lang: WebLang, fetcher: 
 
 /** Search one source. Throws on a network or HTTP failure; an empty list
  *  means the source answered with nothing. */
-export async function searchWeb(source: WebSource, query: string, lang: WebLang = "it", fetcher: FetchFn = resolveFetcher()): Promise<WebItem[]> {
+export async function searchWeb(source: WebSource, query: string, lang: WebLang = "it", fetcher: FetchFn = resolveFetcher(), lastfmKey = getLastfmKey()): Promise<WebItem[]> {
   const q = query.trim();
   if (q === "") return [];
   const enc = encodeURIComponent(q);
   const country = lang === "it" ? "IT" : "US";
   switch (source) {
     case "albums": {
+      if (lastfmKey) {
+        const j = await lastfmCall({ method: "album.search", album: q, limit: "24" }, lastfmKey, fetcher);
+        const found = ((j.results as { albummatches?: { album?: LastfmAlbum[] | LastfmAlbum } } | undefined)?.albummatches?.album) ?? [];
+        return (Array.isArray(found) ? found : [found]).filter((a) => a.name && a.artist).map((a) => {
+          const art = largestImage(a.image);
+          return {
+            source,
+            title: a.name!,
+            caption: `${a.artist} - ${a.name}`,
+            subtitle: a.artist,
+            thumbUrl: lastfmArt(art, 174),
+            imageUrl: lastfmArt(art, 600),
+            details: a.artist,
+            url: a.url,
+            lastfm: { artist: a.artist!, album: a.name! },
+          };
+        });
+      }
       const j = (await getJson(`https://itunes.apple.com/search?term=${enc}&entity=album&limit=24&country=${country}`, fetcher)) as { results?: ItunesHit[] };
       return (j.results ?? []).filter((r) => r.collectionName).map((r) => ({
         source,
         title: r.collectionName!,
+        caption: r.artistName ? `${r.artistName} - ${r.collectionName}` : undefined,
         subtitle: r.artistName,
         thumbUrl: itunesArt(r.artworkUrl100, 200),
         imageUrl: itunesArt(r.artworkUrl100, 600),
@@ -171,7 +244,8 @@ export async function searchWeb(source: WebSource, query: string, lang: WebLang 
  * (the text) and a picture large enough to use. Other sources are complete.
  * A failed summary keeps the item as it was rather than losing the drop.
  */
-export async function resolveWebItem(item: WebItem, fetcher: FetchFn = resolveFetcher()): Promise<WebItem> {
+export async function resolveWebItem(item: WebItem, fetcher: FetchFn = resolveFetcher(), lastfmKey = getLastfmKey()): Promise<WebItem> {
+  if (item.lastfm) return lastfmDetails(item, fetcher, lastfmKey);
   if (!item.wiki) return item;
   try {
     const s = (await getJson(`https://${item.wiki.lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(item.wiki.key)}`, fetcher)) as {
@@ -188,6 +262,34 @@ export async function resolveWebItem(item: WebItem, fetcher: FetchFn = resolveFe
     const imageUrl = orig?.source && (orig.width ?? 0) <= 1600 ? orig.source : thumb ? thumb.replace(/\/\d+px-/, "/1280px-") : item.imageUrl;
     const text = s.extract ? clipDetails(s.extract) : s.description;
     return { ...item, imageUrl, details: text ?? item.details };
+  } catch {
+    return item;
+  }
+}
+
+/** Last.fm's search carries no facts: tags, track count and the album's
+ *  wiki summary come from album.getInfo, on drop. */
+async function lastfmDetails(item: WebItem, fetcher: FetchFn, key: string): Promise<WebItem> {
+  if (!item.lastfm || !key) return item;
+  try {
+    const j = await lastfmCall({ method: "album.getinfo", artist: item.lastfm.artist, album: item.lastfm.album, autocorrect: "1" }, key, fetcher);
+    const a = j.album as {
+      tags?: { tag?: { name?: string }[] | { name?: string } };
+      tracks?: { track?: unknown[] | unknown };
+      wiki?: { published?: string; summary?: string };
+      image?: { "#text"?: string }[];
+    } | undefined;
+    if (!a) return item;
+    const tags = a.tags?.tag ? (Array.isArray(a.tags.tag) ? a.tags.tag : [a.tags.tag]).map((t) => t.name).filter(Boolean).slice(0, 3).join(", ") : undefined;
+    const tracks = a.tracks?.track ? (Array.isArray(a.tracks.track) ? a.tracks.track.length : 1) : undefined;
+    // The summary ends in an HTML "Read more on Last.fm" link.
+    const summary = a.wiki?.summary?.replace(/<a [^>]*>.*?<\/a>\.?/g, "").replace(/<[^>]+>/g, "").trim();
+    const art = lastfmArt(largestImage(a.image), 600);
+    return {
+      ...item,
+      imageUrl: item.imageUrl ?? art,
+      details: [item.lastfm.artist, joinLine([tags, tracks ? `${tracks} tracks` : undefined]), summary ? clipDetails(summary, 400) : undefined].filter(Boolean).join("\n"),
+    };
   } catch {
     return item;
   }
