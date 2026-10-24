@@ -442,7 +442,9 @@ function placeAll(sheet: Sheet, measurer: TextMeasurer): Placed[] {
     if (!node.collapsed) queue.push(...node.childrenIds);
   }
   for (const node of Object.values(sheet.nodes)) {
-    if (seen.has(node.id) || node.parentId) continue;
+    // A chart slot's note is only drawn while open, and an export has no
+    // selection to open one.
+    if (seen.has(node.id) || node.parentId || node.style.chartNote) continue;
     seen.add(node.id);
     const m = measureNode(node, measurer, resolveImage);
     out.push({ node, x: node.position.x, y: node.position.y, w: m.w, h: m.h });

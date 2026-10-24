@@ -25,7 +25,8 @@
  */
 import { freeformOwner, freeformOffset } from "../core/freeform";
 import { groupLabel, groupRuns, type MindNode, type Sheet } from "../core/types";
-import { GROUP_LABEL_H, GROUP_PAD, imageResolver, measureNode, type TextMeasurer } from "./measure";
+import { CHART_NOTE_GAP, GROUP_LABEL_H, GROUP_PAD, imageResolver, measureNode, positionedImageSlots, type TextMeasurer } from "./measure";
+import { chartSlotNote } from "../core/chartNotes";
 
 export { imageResolver, measureNode } from "./measure";
 export type { Extent, TextMeasurer } from "./measure";
@@ -188,7 +189,9 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       if (force || n.position.manual) positions.set(n.id, { x: n.position.x, y: n.position.y });
     }
     placeFreeformContents();
-    return { positions, bounds: boundsOf(positions, sheet, size) };
+    const bounds = boundsOf(positions, sheet, size);
+    placeChartNotes();
+    return { positions, bounds };
   }
 
   if (st.structureType === "mindmap") {
@@ -203,7 +206,31 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   if (st.structureType === "mindmap") resolveIntersections(root.id);
   placeFreeformContents();
 
-  return { positions, bounds: boundsOf(positions, sheet, size) };
+  // Bounds first: a note is drawn only while it is open, so it must not
+  // widen what "fit to screen" frames.
+  const bounds = boundsOf(positions, sheet, size);
+  placeChartNotes();
+  return { positions, bounds };
+
+  /**
+   * Chart slot notes (`Style.chartNote`) hang just right of their slot,
+   * level with its top. Always placed, open or not, so opening one is a
+   * repaint and never a relayout. Manual positions do not apply: a note
+   * belongs to its slot and follows it wherever the chart goes.
+   */
+  function placeChartNotes(): void {
+    for (const chart of Object.values(sheet.nodes)) {
+      const g = chart.style.gallery;
+      if (!g?.chart || !g.items.some((it) => it.noteId)) continue;
+      const at = positions.get(chart.id) ?? chart.position;
+      const { w, h } = size(chart);
+      const { cells } = positionedImageSlots({ x: at.x, y: at.y, w, h }, chart, resolveImage);
+      cells.forEach((c, i) => {
+        const note = chartSlotNote(sheet, chart.id, i);
+        if (note) positions.set(note.id, { x: c.x + c.w + CHART_NOTE_GAP, y: c.y });
+      });
+    }
+  }
 
   function placeFreeformContents(): void {
     // Content coordinates are local to their parent, unaffected by auto layout.
@@ -472,7 +499,7 @@ export function applyLayout(sheet: Sheet, force: boolean, measurer?: TextMeasure
   for (const [id, p] of result.positions) {
     const n = sheet.nodes[id];
     if (!n) continue;
-    if (clearManual || force || !n.position.manual || freeformOwner(sheet, id)) {
+    if (clearManual || force || !n.position.manual || freeformOwner(sheet, id) || n.style.chartNote) {
       n.position = {
         x: p.x,
         y: p.y,

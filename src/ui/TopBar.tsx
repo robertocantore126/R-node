@@ -125,6 +125,9 @@ export function TopBar(): JSX.Element {
       </div>
 
       <div className="topbar-group">
+        <button className={`btn icon${state.showWebSearch ? " on" : ""}`} data-help="Web search" data-help-more="Search albums, films and books, then drag a result onto a chart box, a topic or the canvas." title="Web search" onClick={() => store.toggleWebSearch()}>
+          ⌕
+        </button>
         <button className={`btn icon${state.showOutliner ? " on" : ""}`} data-help="Outline panel" data-help-more="Toggles the document outline — the same tree as the canvas, as a list." title="Outline panel" onClick={() => store.toggleOutliner()}>
           ▤
         </button>

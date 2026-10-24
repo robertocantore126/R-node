@@ -17,6 +17,7 @@ import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
 import { SHAPE_DRAG_TYPE } from "./ShapeLibrary";
+import { WEB_ITEM_DRAG_TYPE, type WebItem } from "../editor/webSearch";
 import { listShapes } from "../editor/shapeLibrary";
 import type { ImageSlot, MindNode, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
@@ -805,11 +806,13 @@ export function CanvasView(): JSX.Element {
         commits: wasEditing && s.editingId !== hit,
       });
       store.select(hit, { additive });
+      drag.marqueeStartX = null;
+      // A chart slot's note hangs off its slot; the layout owns its place.
+      if (store.sheet.nodes[hit]?.style.chartNote) return void trace.ignored("drag:start", "chart note follows its slot", { id: hit });
       drag.dragging = hit;
       // Capture the pre-drag position: the final op's `prev` must be this,
       // so undo restores the exact pre-drag state (see commitNodeDrag).
       store.beginNodeDrag(hit);
-      drag.marqueeStartX = null;
     } else {
       // Overlay objects first: a relationship line, a group box, a summary
       // brace/label — then, on plain empty canvas, begin a marquee box.
@@ -1181,6 +1184,10 @@ export function CanvasView(): JSX.Element {
           store.selectGalleryCell(cellHit.nodeId, cellHit.index);
           setCaptionEdit({ nodeId: cellHit.nodeId, index: cellHit.index });
           trace.applied("dblclick:caption-edit", { id: cellHit.nodeId, index: cellHit.index });
+        } else if (store.sheet.nodes[hit]?.style.gallery?.chart) {
+          // Outside the slots, a chart's title is renamed in place like any
+          // topic's (startEdit lets charts through).
+          store.startEdit(hit);
         } else {
           store.select(hit);
         }
@@ -1227,12 +1234,24 @@ export function CanvasView(): JSX.Element {
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
     if (!hit) return;
+    const rect = canvasRef.current!.parentElement!.getBoundingClientRect();
+    // A chart answers with its BOX menu when a box is selected: right-clicking
+    // a box selects it first, and a box selected earlier stays the target.
+    // With no box selected the chart gets the ordinary topic menu.
+    if (store.doc.node(hit)?.style.gallery?.chart) {
+      const cellHit = rendererRef.current?.hitTestGalleryCell(currentRenderState(), world.x, world.y) ?? null;
+      if (cellHit?.nodeId === hit) store.selectGalleryCell(hit, cellHit.index);
+      const sel = store.getSnapshot().gallerySel;
+      if (sel?.nodeId === hit) {
+        setCtxMenu({ x: clientX - rect.left, y: clientY - rect.top, nodeId: hit, cell: sel.index });
+        return;
+      }
+    }
     // A topic already inside a marquee multi-selection keeps the WHOLE
     // selection: the menu's Change color then recolours every selected topic,
     // not just the one clicked. Right-clicking an unselected topic selects it
     // alone (the same rule the Inspector's picker follows).
     if (!s.selection.includes(hit)) store.select(hit);
-    const rect = canvasRef.current!.parentElement!.getBoundingClientRect();
     setCtxMenu({ x: clientX - rect.left, y: clientY - rect.top, nodeId: hit });
   };
 
@@ -1507,6 +1526,15 @@ export function CanvasView(): JSX.Element {
             e.dataTransfer.dropEffect = hit ? "copy" : "none";
             return;
           }
+          // A web search result (WebSearchPanel) lands anywhere: a box, a
+          // topic, or empty canvas, which makes a new topic. One with a picture
+          // also carries text/uri-list and takes the image path below, for
+          // its ghost and the gallery caret.
+          if (e.dataTransfer.types.includes(WEB_ITEM_DRAG_TYPE) && !e.dataTransfer.types.includes("text/uri-list")) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+            return;
+          }
           // Accept the drop (T13-2): without preventDefault the browser would
           // navigate away on drop. Highlight the node under the cursor while
           // dragging so the user sees the target.
@@ -1603,6 +1631,34 @@ export function CanvasView(): JSX.Element {
             const template = listShapes().find((t) => t.id === shapeId);
             if (!template) return trace.ignored("drop:shape", "shape is no longer in the library", { shape: shapeId });
             store.insertShape(template, target, store.doc.node(target)?.style.freeform ? world : undefined);
+            return;
+          }
+          const webRaw = e.dataTransfer.getData(WEB_ITEM_DRAG_TYPE);
+          if (webRaw) {
+            e.preventDefault();
+            clearExternalGhost();
+            store.setDrop(null);
+            store.setHover(null);
+            galleryDropRef.current = null;
+            let item: WebItem;
+            try {
+              item = JSON.parse(webRaw) as WebItem;
+            } catch {
+              return trace.ignored("drop:web", "unreadable payload");
+            }
+            const { x, y } = localPoint(e as unknown as RPointerEvent);
+            const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+            const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+            const board = hit && (store.doc.node(hit)?.style.freeform ? hit : freeformOwner(store.sheet, hit));
+            const g = hit ? store.doc.node(hit)?.style.gallery : undefined;
+            const rects = hit && g ? rendererRef.current?.galleryCellRects(currentRenderState(), hit) ?? [] : [];
+            trace.applied("drop:web", { source: item.source, hit: hit ?? "canvas" });
+            await store.placeWebItem(item,
+              !hit ? { kind: "canvas", x: world.x, y: world.y }
+              : board ? { kind: "freeform", nodeId: board, x: world.x, y: world.y }
+              : g?.chart ? { kind: "chart", nodeId: hit, index: galleryDropIndex(hit, rects, world.x, world.y) }
+              : g ? { kind: "gallery", nodeId: hit, at: galleryDropIndex(hit, rects, world.x, world.y) }
+              : { kind: "topic", nodeId: hit, side: extDropSideRef.current ?? "top" });
             return;
           }
           const point = localPoint(e as unknown as RPointerEvent);
@@ -1702,7 +1758,7 @@ export function CanvasView(): JSX.Element {
           colors={editColors}
         />
       )}
-      {ctxMenu && <NodeContextMenu key={ctxMenu.nodeId} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
+      {ctxMenu && <NodeContextMenu key={`${ctxMenu.nodeId}:${ctxMenu.cell ?? ""}`} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
       {captionField}
     </div>
   );

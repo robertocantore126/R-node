@@ -18,6 +18,7 @@ import { THEMES } from "../render/theme";
 import { quizHasMistakes } from "../core/quiz";
 import { flashcardCounts } from "../core/flashcards";
 import { NodeBorderPicker } from "./Inspector";
+import { chartSlotNote } from "../core/chartNotes";
 
 export interface CtxMenuState {
   /** Canvas-wrap coordinates of the cursor when the menu opened. */
@@ -25,6 +26,9 @@ export interface CtxMenuState {
   y: number;
   /** The right-clicked topic. */
   nodeId: string;
+  /** Set when the topic is a chart with one of its boxes selected: the menu
+   *  is then the BOX menu, about that slot, instead of the topic menu. */
+  cell?: number;
 }
 
 interface Props {
@@ -97,6 +101,26 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
     setRecent(getRecentColors());
     onClose();
   };
+
+  if (menu.cell !== undefined && node.style.gallery?.chart) {
+    const cell = menu.cell;
+    const note = chartSlotNote(store.sheet, node.id, cell);
+    const slot = node.style.gallery.items[cell];
+    const boxEmpty = !slot?.id && !slot?.caption && !note;
+    return (
+      <div ref={ref} className="ctx-menu" style={{ left: pos.x, top: pos.y }} role="menu" aria-label="Box">
+        {note ? <>
+          <button role="menuitem" onClick={act(() => store.startEdit(note.id))}>Edit note</button>
+          <button role="menuitem" onClick={act(() => store.removeChartNote(node.id, cell))}>Remove note</button>
+        </> : (
+          <button role="menuitem" onClick={act(() => store.addChartNote(node.id, cell))}>Add note</button>
+        )}
+        <button role="menuitem" onClick={act(() => void store.addChartPlaceholder(node.id, cell))}>Add placeholder box</button>
+        <div className="ctx-sep" />
+        <button role="menuitem" disabled={boxEmpty} onClick={act(() => store.clearChartBox(node.id, cell))}>Clear box</button>
+      </div>
+    );
+  }
 
   return (
     <div ref={ref} className="ctx-menu" style={{ left: pos.x, top: pos.y }} role="menu">

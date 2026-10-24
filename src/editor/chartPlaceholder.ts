@@ -1,0 +1,20 @@
+/**
+ * The picture "Add placeholder box" puts into a new chart slot: a grey
+ * mountain-and-sun, 240 × 240 PNG.
+ *
+ * It ships as bytes rather than being drawn on a canvas at click time so it
+ * goes through the SAME import path as a dropped file — hashed, carded,
+ * stored — and is therefore an ordinary picture the user can replace by
+ * dropping onto it (I11: the id is the SHA-256 of these bytes). One file,
+ * one id: every placeholder in every chart shares one attachment card.
+ */
+const PLACEHOLDER_PNG_BASE64 =
+  "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";
+
+/** A fresh File holding the placeholder PNG. */
+export function chartPlaceholderFile(): File {
+  const bin = atob(PLACEHOLDER_PNG_BASE64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new File([bytes], "placeholder.png", { type: "image/png" });
+}
