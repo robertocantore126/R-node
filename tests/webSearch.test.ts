@@ -71,12 +71,12 @@ describe("searchWeb", () => {
     expect(b.imageUrl).toBeUndefined();
   });
 
-  it("searches the chosen Wikipedia and fetches the summary on drop", async () => {
+  it("finds films on the chosen Wikipedia and takes a large picture on drop", async () => {
     const f = fake({
       "it.wikipedia.org/w/rest.php": () => json({ pages: [{ key: "Colosseo", title: "Colosseo", description: "anfiteatro", thumbnail: { url: "//upload.wikimedia.org/x/60px-C.jpg" } }] }),
       "page/summary/Colosseo": () => json({ extract: "Il Colosseo è un anfiteatro.", originalimage: { source: "https://upload.wikimedia.org/big.jpg", width: 4000 }, thumbnail: { source: "https://upload.wikimedia.org/x/320px-C.jpg" } }),
     });
-    const [r] = await searchWeb("wikipedia", "colosseo", "it", f.fetch);
+    const [r] = await searchWeb("films", "colosseo", "it", f.fetch);
     expect(r.thumbUrl).toBe("https://upload.wikimedia.org/x/60px-C.jpg");
     const full = await resolveWebItem(r, f.fetch);
     expect(full.details).toBe("Il Colosseo è un anfiteatro.");

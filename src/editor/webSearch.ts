@@ -1,24 +1,24 @@
 /**
- * Web search for pictures with facts attached: album covers, film posters,
- * book covers and Wikipedia pages. Results are dragged from the Web search
- * panel onto the map — into a chart box, a gallery, a topic or empty canvas.
+ * Web search for pictures: album covers, film posters and book covers.
+ * Results are dragged from the Web search panel onto the map — into a chart
+ * box, a gallery, a topic or empty canvas.
  *
  * Only keyless public APIs that answer a browser directly (CORS), so the web
- * build needs no server of its own: iTunes Search (albums), Open Library
- * (books) and the Wikipedia REST API (pages, and films via their infobox).
- * Deezer refuses cross-origin calls and MusicBrainz rate-limits hard, which
- * is why neither is here. The
- * desktop build fetches through `resolveFetcher` (tauri-plugin-http), the
- * same door dropped image URLs already use.
+ * build needs no server of its own: iTunes Search (albums; Last.fm with the
+ * user's own key), Open Library (books) and Wikipedia's film pages (films).
+ * A Wikipedia tab of its own was removed at the user's request. Deezer
+ * refuses cross-origin calls and MusicBrainz rate-limits hard, which is why
+ * neither is here. The desktop
+ * build fetches through `resolveFetcher` (tauri-plugin-http), the same door
+ * dropped image URLs already use.
  */
 import { resolveFetcher, type FetchFn } from "./externalImage";
 
-export type WebSource = "albums" | "films" | "books" | "wikipedia";
+export type WebSource = "albums" | "films" | "books";
 export const WEB_SOURCES: { id: WebSource; label: string }[] = [
   { id: "albums", label: "Albums" },
   { id: "films", label: "Films" },
   { id: "books", label: "Books" },
-  { id: "wikipedia", label: "Wikipedia" },
 ];
 
 export type WebLang = "it" | "en";
@@ -231,8 +231,6 @@ export async function searchWeb(source: WebSource, query: string, lang: WebLang 
         url: d.key ? `https://openlibrary.org${d.key}` : undefined,
       }));
     }
-    case "wikipedia":
-      return wikiSearch(source, q, lang, fetcher);
   }
 }
 

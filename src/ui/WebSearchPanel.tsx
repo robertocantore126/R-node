@@ -1,5 +1,5 @@
 /**
- * Web search panel: find an album, a film, a book or a Wikipedia page and
+ * Web search panel: find an album, a film or a book and
  * drag the result onto the map (see `EditorStore.placeWebItem`). DOM chrome
  * beside the canvas, like the Outliner — the single-canvas rule (I1) governs
  * the map, not the panels around it.
@@ -101,7 +101,7 @@ export function WebSearchPanel(): JSX.Element {
         ))}
         <select
           aria-label="Language"
-          title="Language (Wikipedia, store country)"
+          title="Language of the results"
           value={prefs.lang}
           onChange={(e) => setPrefs({ ...prefs, lang: e.target.value === "en" ? "en" : "it" })}
         >
@@ -113,7 +113,7 @@ export function WebSearchPanel(): JSX.Element {
         ref={inputRef}
         className="websearch-input"
         type="search"
-        placeholder={prefs.source === "wikipedia" ? "Search Wikipedia…" : `Search ${prefs.source}…`}
+        placeholder={`Search ${prefs.source}…`}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         // Keys typed here belong to the field, not to the map's shortcuts.
