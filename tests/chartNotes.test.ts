@@ -159,7 +159,7 @@ describe("box notes", () => {
     expect(chartSlotNote(store.sheet, id, 0)?.id).toBe(noteId);
   });
 
-  it("stays on its slot when a picture moves to another chart", async () => {
+  it("travels with its box to another chart, and back with one undo", async () => {
     const { store, id } = seeded();
     store.createChartTopic(store.sheet.rootNodeId);
     const other = store.getSnapshot().selection[0];
@@ -168,8 +168,33 @@ describe("box notes", () => {
     store.commitEdit();
     store.moveGalleryCellTo(id, 0, other, 3);
     expect(ids(store, other)[3]).toBe("id:a.png");
+    expect(chartSlotNote(store.sheet, other, 3)?.id).toBe(noteId);
+    expect(chartSlotNote(store.sheet, id, 0)).toBeNull();
+    store.undo();
+    expect(ids(store, id)[0]).toBe("id:a.png");
     expect(chartSlotNote(store.sheet, id, 0)?.id).toBe(noteId);
-    expect(store.doc.node(other)!.style.gallery!.items.every((it) => !it.noteId)).toBe(true);
+    expect(store.doc.node(noteId)!.style.chartNote).toEqual({ chartId: id });
+  });
+
+  it("follows its box inside a chart", async () => {
+    const { store, id } = seeded();
+    await store.fillChartSlots(id, [new File([new Uint8Array([1])], "a.png", { type: "image/png" })], 0);
+    const noteId = store.addChartNote(id, 0)!;
+    store.commitEdit();
+    store.moveGalleryCellTo(id, 0, id, 5);
+    expect(chartSlotNote(store.sheet, id, 5)?.id).toBe(noteId);
+  });
+
+  it("stays on the chart when its box moves into a plain gallery", async () => {
+    const { store, id } = seeded();
+    store.createGalleryTopic(store.sheet.rootNodeId);
+    const gallery = store.getSnapshot().selection[0];
+    await store.fillChartSlots(id, [new File([new Uint8Array([1])], "a.png", { type: "image/png" })], 0);
+    const noteId = store.addChartNote(id, 0)!;
+    store.commitEdit();
+    store.moveGalleryCellTo(id, 0, gallery, 0);
+    expect(chartSlotNote(store.sheet, id, 0)?.id).toBe(noteId);
+    expect(store.doc.node(gallery)!.style.gallery!.items.every((it) => !it.noteId)).toBe(true);
   });
 
   it("round-trips through a .rnode file", async () => {

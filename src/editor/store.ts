@@ -1,6 +1,8 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
 import { chartNoteIds, chartSlotNote, isChartNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
+import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
+import { resolveWebItem, type WebItem } from "./webSearch";
 /**
  * EditorStore — the editor interaction layer.
  *
@@ -199,6 +201,8 @@ export interface EditorState {
   hoverId: string | null;
   showPalette: boolean;
   showOutliner: boolean;
+  /** The Web search panel (albums, films, books, Wikipedia) — see webSearch.ts. */
+  showWebSearch: boolean;
   showInspector: boolean;
   showSidebar: boolean;
   search: string;
@@ -380,6 +384,7 @@ export class EditorStore {
       hoverId: null,
       showPalette: false,
       showOutliner: false,
+      showWebSearch: false,
       // A phone has no room beside the map: both panels start closed there
       // (the top bar still toggles them).
       showInspector: !isNarrowScreen(),
@@ -3539,6 +3544,111 @@ export class EditorStore {
     return true;
   }
 
+  /** Network door for web search drops; tests replace it. */
+  webFetch: FetchFn | null = null;
+
+  /**
+   * Put a web search result (see webSearch.ts) where it was dropped:
+   *  - a chart box: the picture, the title as caption and the facts as the
+   *    box's note — one batch, one undo (a note the box already has stays);
+   *  - a gallery: a new cell at `at`; a freeform board: an image item;
+   *  - a topic: its picture, in `side`;
+   *  - empty canvas: a new floating topic with picture, title and the facts
+   *    in its notes, again one batch.
+   */
+  async placeWebItem(
+    raw: WebItem,
+    target:
+      | { kind: "chart"; nodeId: string; index: number }
+      | { kind: "gallery"; nodeId: string; at: number }
+      | { kind: "freeform"; nodeId: string; x: number; y: number }
+      | { kind: "topic"; nodeId: string; side: ImageSlot }
+      | { kind: "canvas"; x: number; y: number },
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const fetcher = this.webFetch ?? resolveFetcher();
+    const sheet = this.sheet;
+    const item = await resolveWebItem(raw, fetcher);
+    // The small list picture is the fallback when the large one is refused.
+    const fetched = (item.imageUrl ? await fetchImageAsFile(item.imageUrl, fetcher) : null)
+      ?? (item.thumbUrl && item.thumbUrl !== item.imageUrl ? await fetchImageAsFile(item.thumbUrl, fetcher) : null);
+    // Named after the result so every caption rule derives the title from it.
+    const file = fetched ? new File([fetched], item.title, { type: fetched.type }) : null;
+    const fail = (reason: string): { ok: false; reason: string } => {
+      trace.ignored("web:place", reason, { kind: target.kind, title: item.title });
+      this.toast(reason);
+      return { ok: false, reason };
+    };
+    if (this.sheet !== sheet) return fail("The document changed before the picture arrived");
+    if (target.kind === "canvas") {
+      const card = file ? await this.importToCard(file) : null;
+      if (card && !card.ok) return fail(card.reason);
+      if (this.sheet !== sheet) return fail("The document changed before the picture arrived");
+      if (card?.ok && !this.sheet.attachments.some((a) => a.id === card.card.id)) this.sheet.attachments.push({ ...card.card });
+      const id = uid("n");
+      const ops: Op[] = [makeOp<Op & { type: "createNode" }>("createNode", {
+        id,
+        nodeType: "floating",
+        parentId: null,
+        index: 0,
+        title: item.title,
+        titleRuns: [{ text: item.title }],
+        style: card?.ok ? { image: card.card.id } : {},
+        position: { x: target.x, y: target.y, manual: true },
+      })];
+      const notes = [item.details, item.url].filter(Boolean).join("\n\n");
+      if (notes) ops.push(makeOp<Op & { type: "setNotes" }>("setNotes", { id, notes, prev: "" }));
+      this.execOps(ops);
+      this.settleLayoutNow();
+      this.select(id);
+      trace.applied("web:place", { kind: "canvas", nodeId: id });
+      return { ok: true };
+    }
+    if (!file) return fail(item.imageUrl ? "Could not load the picture" : "This result has no picture");
+    if (target.kind === "gallery") {
+      const res = await this.addGalleryImageFilesAt(target.nodeId, [file], target.at);
+      return res.added > 0 ? { ok: true } : fail(res.reason ?? "Could not import the picture");
+    }
+    if (target.kind === "freeform") {
+      await this.addFreeformImageFile(target.nodeId, file, target.x, target.y);
+      return { ok: true };
+    }
+    if (target.kind === "topic") {
+      const res = await this.attachImageFile(target.nodeId, file, target.side);
+      return res.ok ? { ok: true } : fail(res.reason ?? "Could not import the picture");
+    }
+    const card = await this.importToCard(file);
+    if (!card.ok) return fail(card.reason);
+    const chart = this.model.node(target.nodeId);
+    const g = chart?.style.gallery;
+    if (this.sheet !== sheet || !chart || !g?.chart || target.index < 0 || target.index >= g.items.length) {
+      return fail("The chart box is no longer there");
+    }
+    if (!this.sheet.attachments.some((a) => a.id === card.card.id)) this.sheet.attachments.push({ ...card.card });
+    const items = g.items.map((it) => ({ ...it }));
+    const ops: Op[] = [];
+    let noteId = chartSlotNote(this.sheet, chart.id, target.index)?.id;
+    if (!noteId && item.details) {
+      noteId = uid("n");
+      ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
+        id: noteId,
+        nodeType: "floating",
+        parentId: null,
+        index: 0,
+        title: item.details,
+        titleRuns: plainToRuns(item.details),
+        style: { chartNote: { chartId: chart.id }, align: "left" },
+        position: { x: 0, y: 0, manual: false },
+      }));
+    }
+    items[target.index] = { ...items[target.index], id: card.card.id, caption: item.title, ...(noteId ? { noteId } : {}) };
+    ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chart.id, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.selectGalleryCell(chart.id, target.index);
+    trace.applied("web:place", { kind: "chart", nodeId: chart.id, index: target.index, note: !!noteId });
+    return { ok: true };
+  }
+
   /**
    * Import files into a chart's slots: the first goes INTO slot `at`
    * (replacing what is there — that is what pasting onto a picture means),
@@ -3619,23 +3729,35 @@ export class EditorStore {
       return;
     }
     const toItems = this.galleryItems(toNodeId);
-    // Across boards a slot's note stays with the SLOT: a note names its chart
-    // (`Style.chartNote`), so one carried to another board would be orphaned.
+    // A note travels with its box. Between two charts the boxes simply swap,
+    // notes included, and each moved note is re-pointed at its new chart
+    // (`Style.chartNote`) in the same batch. A plain gallery cannot hold a
+    // note, so a box leaving a chart for one leaves its note on the slot.
     const card = (it: GalleryItem, noteId?: string): GalleryItem => {
       const { noteId: _drop, ...rest } = it;
       return noteId ? { ...rest, noteId } : rest;
     };
+    const rehome: { noteId: string; chartId: string }[] = [];
     let displaced: GalleryItem | null = null;
-    if (toChart) {
+    if (fromChart && toChart) {
       const k = Math.max(0, Math.min(toItems.length - 1, toIndex));
-      displaced = toItems[k].id ? card(toItems[k]) : null;
-      toItems[k] = card(moved, toItems[k].noteId);
+      const target = toItems[k];
+      toItems[k] = { ...moved };
+      fromItems[fromIndex] = { ...target };
+      if (moved.noteId) rehome.push({ noteId: moved.noteId, chartId: toNodeId });
+      if (target.noteId) rehome.push({ noteId: target.noteId, chartId: fromNodeId });
     } else {
-      toItems.splice(Math.max(0, Math.min(toItems.length, toIndex)), 0, card(moved));
+      if (toChart) {
+        const k = Math.max(0, Math.min(toItems.length - 1, toIndex));
+        displaced = toItems[k].id ? card(toItems[k]) : null;
+        toItems[k] = card(moved, toItems[k].noteId);
+      } else {
+        toItems.splice(Math.max(0, Math.min(toItems.length, toIndex)), 0, card(moved));
+      }
+      if (fromChart) fromItems[fromIndex] = card(displaced ?? { id: "" }, fromItems[fromIndex].noteId);
+      else if (displaced) fromItems[fromIndex] = displaced;
+      else fromItems.splice(fromIndex, 1);
     }
-    if (fromChart) fromItems[fromIndex] = card(displaced ?? { id: "" }, fromItems[fromIndex].noteId);
-    else if (displaced) fromItems[fromIndex] = displaced;
-    else fromItems.splice(fromIndex, 1);
 
     const styleFor = (items: GalleryItem[], base: Style): Style => {
       const gal = base.gallery;
@@ -3647,6 +3769,10 @@ export class EditorStore {
     this.execOps([
       makeOp<Op & { type: "setStyle" }>("setStyle", { id: fromNodeId, style: styleFor(fromItems, from.style), prev: from.style }),
       makeOp<Op & { type: "setStyle" }>("setStyle", { id: toNodeId, style: styleFor(toItems, to.style), prev: to.style }),
+      ...rehome.flatMap(({ noteId, chartId }) => {
+        const note = this.model.node(noteId);
+        return note ? [makeOp<Op & { type: "setStyle" }>("setStyle", { id: noteId, style: { ...note.style, chartNote: { chartId } }, prev: note.style })] : [];
+      }),
     ]);
     this.settleLayoutNow();
     trace.applied("chart:move", { from: fromNodeId, to: toNodeId, fromIndex, toIndex });
@@ -5235,6 +5361,11 @@ export class EditorStore {
   togglePalette(): void {
     this.state.showPalette = !this.state.showPalette;
     trace.mark("ui", "ui:modal", { open: this.state.showPalette });
+    this.notify();
+  }
+
+  toggleWebSearch(): void {
+    this.state.showWebSearch = !this.state.showWebSearch;
     this.notify();
   }
 

@@ -9,6 +9,7 @@ import { CanvasView } from "./ui/CanvasView";
 import { Outliner } from "./ui/Outliner";
 import { Inspector } from "./ui/Inspector";
 import { ShapeLibrary } from "./ui/ShapeLibrary";
+import { WebSearchPanel } from "./ui/WebSearchPanel";
 import { Palette } from "./ui/Palette";
 import { SearchBar } from "./ui/SearchBar";
 import { QuizWindow } from "./ui/QuizWindow";
@@ -70,6 +71,7 @@ export function App(): JSX.Element {
             <CanvasView />
             <SearchBar />
             {state.showOutliner && <Outliner />}
+            {state.showWebSearch && <WebSearchPanel />}
           </div>
           {state.showInspector && (
             /* One grid item holding both panels: the Inspector scrolls in the

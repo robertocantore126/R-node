@@ -231,10 +231,11 @@ export class Renderer {
     return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}|${this.openNote(state) ?? ""}`;
   }
 
-  /** The chart note on screen. None while a picture is being dragged: the
-   *  note would cover the boxes the user is aiming at. */
+  /** The chart note on screen. None while a picture is being dragged (a
+   *  box's, or one from outside over a grid): the note would cover the boxes
+   *  the user is aiming at. */
   private openNote(state: RenderState): string | null {
-    return state.ghostImage ? null : openChartNote(state.sheet, state);
+    return state.ghostImage || state.galleryDrop ? null : openChartNote(state.sheet, state);
   }
 
   private placedNodes(state: RenderState): Placed[] {
