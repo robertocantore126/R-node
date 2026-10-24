@@ -44,8 +44,6 @@ export interface WebItem {
   url?: string;
   /** Wikipedia only: the page to fetch the summary of on drop. */
   wiki?: { lang: WebLang; key: string };
-  /** Last.fm only: the album to fetch tags, tracks and summary of on drop. */
-  lastfm?: { artist: string; album: string };
 }
 
 /** What a result is called on the map. */
@@ -198,7 +196,6 @@ export async function searchWeb(source: WebSource, query: string, lang: WebLang 
             imageUrl: lastfmArt(art, 600),
             details: a.artist,
             url: a.url,
-            lastfm: { artist: a.artist!, album: a.name! },
           };
         });
       }
@@ -244,8 +241,7 @@ export async function searchWeb(source: WebSource, query: string, lang: WebLang 
  * (the text) and a picture large enough to use. Other sources are complete.
  * A failed summary keeps the item as it was rather than losing the drop.
  */
-export async function resolveWebItem(item: WebItem, fetcher: FetchFn = resolveFetcher(), lastfmKey = getLastfmKey()): Promise<WebItem> {
-  if (item.lastfm) return lastfmDetails(item, fetcher, lastfmKey);
+export async function resolveWebItem(item: WebItem, fetcher: FetchFn = resolveFetcher()): Promise<WebItem> {
   if (!item.wiki) return item;
   try {
     const s = (await getJson(`https://${item.wiki.lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(item.wiki.key)}`, fetcher)) as {
@@ -262,34 +258,6 @@ export async function resolveWebItem(item: WebItem, fetcher: FetchFn = resolveFe
     const imageUrl = orig?.source && (orig.width ?? 0) <= 1600 ? orig.source : thumb ? thumb.replace(/\/\d+px-/, "/1280px-") : item.imageUrl;
     const text = s.extract ? clipDetails(s.extract) : s.description;
     return { ...item, imageUrl, details: text ?? item.details };
-  } catch {
-    return item;
-  }
-}
-
-/** Last.fm's search carries no facts: tags, track count and the album's
- *  wiki summary come from album.getInfo, on drop. */
-async function lastfmDetails(item: WebItem, fetcher: FetchFn, key: string): Promise<WebItem> {
-  if (!item.lastfm || !key) return item;
-  try {
-    const j = await lastfmCall({ method: "album.getinfo", artist: item.lastfm.artist, album: item.lastfm.album, autocorrect: "1" }, key, fetcher);
-    const a = j.album as {
-      tags?: { tag?: { name?: string }[] | { name?: string } };
-      tracks?: { track?: unknown[] | unknown };
-      wiki?: { published?: string; summary?: string };
-      image?: { "#text"?: string }[];
-    } | undefined;
-    if (!a) return item;
-    const tags = a.tags?.tag ? (Array.isArray(a.tags.tag) ? a.tags.tag : [a.tags.tag]).map((t) => t.name).filter(Boolean).slice(0, 3).join(", ") : undefined;
-    const tracks = a.tracks?.track ? (Array.isArray(a.tracks.track) ? a.tracks.track.length : 1) : undefined;
-    // The summary ends in an HTML "Read more on Last.fm" link.
-    const summary = a.wiki?.summary?.replace(/<a [^>]*>.*?<\/a>\.?/g, "").replace(/<[^>]+>/g, "").trim();
-    const art = lastfmArt(largestImage(a.image), 600);
-    return {
-      ...item,
-      imageUrl: item.imageUrl ?? art,
-      details: [item.lastfm.artist, joinLine([tags, tracks ? `${tracks} tracks` : undefined]), summary ? clipDetails(summary, 400) : undefined].filter(Boolean).join("\n"),
-    };
   } catch {
     return item;
   }

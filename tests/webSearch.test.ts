@@ -42,13 +42,12 @@ describe("searchWeb", () => {
     expect(r.details).toBe("Radiohead\n1997 · Alternative · 12 tracks");
   });
 
-  it("searches Last.fm with the user's key, and fetches tags and tracks on drop", async () => {
+  it("searches Last.fm with the user's key", async () => {
     const f = fake({
       "method=album.search": () => json({ results: { albummatches: { album: [
         { name: "OK Computer", artist: "Radiohead", url: "https://www.last.fm/music/Radiohead/OK+Computer", image: [{ "#text": "https://lastfm.freetls.fastly.net/i/u/34s/abc.png", size: "small" }, { "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/abc.png", size: "extralarge" }] },
         { name: "Bootleg", artist: "Nobody", image: [{ "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png" }] },
       ] } } }),
-      "method=album.getinfo": () => json({ album: { tags: { tag: [{ name: "alternative" }, { name: "rock" }] }, tracks: { track: [{}, {}, {}] }, wiki: { summary: 'A classic. <a href="https://www.last.fm/x">Read more on Last.fm</a>' } } }),
     });
     const [a, b] = await searchWeb("albums", "ok computer", "en", f.fetch, "KEY");
     expect(f.asked[0]).toContain("ws.audioscrobbler.com");
@@ -57,8 +56,6 @@ describe("searchWeb", () => {
     expect(a.imageUrl).toBe("https://lastfm.freetls.fastly.net/i/u/600x600/abc.png");
     // Last.fm's grey star is "no cover", not a picture.
     expect(b.imageUrl).toBeUndefined();
-    const full = await resolveWebItem(a, f.fetch, "KEY");
-    expect(full.details).toBe("Radiohead\nalternative, rock · 3 tracks\nA classic.");
   });
 
   it("says when Last.fm refuses the key", async () => {
@@ -127,13 +124,14 @@ function storeWithChart(): { store: EditorStore; chart: string } {
 const album: WebItem = { source: "albums", title: "OK Computer", caption: "Radiohead - OK Computer", imageUrl: "https://x/cover.jpg", details: "Radiohead\n1997" };
 
 describe("placeWebItem", () => {
-  it("fills a chart box with picture, caption and a note, undone in one step", async () => {
+  it("fills a chart box with picture and caption only, undone in one step", async () => {
     const { store, chart } = storeWithChart();
     expect((await store.placeWebItem(album, { kind: "chart", nodeId: chart, index: 2 })).ok).toBe(true);
     const item = store.doc.node(chart)!.style.gallery!.items[2];
     expect(item.id).toBe("id:Radiohead - OK Computer");
     expect(item.caption).toBe("Radiohead - OK Computer");
-    expect(chartSlotNote(store.sheet, chart, 2)?.title).toBe("Radiohead\n1997");
+    expect(chartSlotNote(store.sheet, chart, 2)).toBeNull();
+    expect(Object.values(store.sheet.nodes).some((n) => n.style.chartNote)).toBe(false);
     store.undo();
     expect(store.doc.node(chart)!.style.gallery!.items[2]).toEqual({ id: "" });
     expect(Object.values(store.sheet.nodes).some((n) => n.style.chartNote)).toBe(false);
@@ -149,7 +147,7 @@ describe("placeWebItem", () => {
     expect(store.doc.node(noteId)!.title).toBe("Mine");
   });
 
-  it("makes a topic with picture and notes on empty canvas", async () => {
+  it("makes a topic with picture and title only on empty canvas", async () => {
     const { store } = storeWithChart();
     const before = Object.keys(store.sheet.nodes).length;
     await store.placeWebItem({ ...album, url: "https://x/page" }, { kind: "canvas", x: 500, y: 300 });
@@ -158,7 +156,7 @@ describe("placeWebItem", () => {
     expect(n.type).toBe("floating");
     expect(n.title).toBe("Radiohead - OK Computer");
     expect(n.style.image).toBe("id:Radiohead - OK Computer");
-    expect(n.notes).toBe("Radiohead\n1997\n\nhttps://x/page");
+    expect(n.notes).toBe("");
     store.undo();
     expect(Object.keys(store.sheet.nodes).length).toBe(before);
   });

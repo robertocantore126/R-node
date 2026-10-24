@@ -213,6 +213,32 @@ describe("box notes", () => {
   });
 });
 
+describe("clear box", () => {
+  it("empties picture, title and note at once, and undoes in one step", async () => {
+    const { store, id } = seeded();
+    await store.fillChartSlots(id, [new File([new Uint8Array([1])], "a.png", { type: "image/png" })], 1);
+    const noteId = store.addChartNote(id, 1)!;
+    store.commitEdit();
+    store.clearChartBox(id, 1);
+    expect(store.doc.node(id)!.style.gallery!.items[1]).toEqual({ id: "" });
+    expect(store.doc.node(noteId)).toBeUndefined();
+    expect(store.chartShape(id)).toEqual({ cols: CHART_COLS, rows: CHART_ROWS });
+    expect(store.getSnapshot().gallerySel).toEqual({ nodeId: id, index: 1 });
+    store.undo();
+    const back = store.doc.node(id)!.style.gallery!.items[1];
+    expect(back.id).toBe("id:a.png");
+    expect(back.caption).toBe("a");
+    expect(chartSlotNote(store.sheet, id, 1)?.id).toBe(noteId);
+  });
+
+  it("does nothing on an empty box", () => {
+    const { store, id } = seeded();
+    const before = store.doc.node(id)!.style;
+    store.clearChartBox(id, 0);
+    expect(store.doc.node(id)!.style).toBe(before);
+  });
+});
+
 describe("placeholder box", () => {
   it("fills the right-clicked box, keeping the board's shape", async () => {
     const { store, id } = seeded();

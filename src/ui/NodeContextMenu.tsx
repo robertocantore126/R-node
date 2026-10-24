@@ -105,6 +105,8 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
   if (menu.cell !== undefined && node.style.gallery?.chart) {
     const cell = menu.cell;
     const note = chartSlotNote(store.sheet, node.id, cell);
+    const slot = node.style.gallery.items[cell];
+    const boxEmpty = !slot?.id && !slot?.caption && !note;
     return (
       <div ref={ref} className="ctx-menu" style={{ left: pos.x, top: pos.y }} role="menu" aria-label="Box">
         {note ? <>
@@ -114,6 +116,8 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
           <button role="menuitem" onClick={act(() => store.addChartNote(node.id, cell))}>Add note</button>
         )}
         <button role="menuitem" onClick={act(() => void store.addChartPlaceholder(node.id, cell))}>Add placeholder box</button>
+        <div className="ctx-sep" />
+        <button role="menuitem" disabled={boxEmpty} onClick={act(() => store.clearChartBox(node.id, cell))}>Clear box</button>
       </div>
     );
   }

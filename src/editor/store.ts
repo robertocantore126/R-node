@@ -3516,6 +3516,31 @@ export class EditorStore {
   }
 
   /**
+   * Empty box `index` of a chart — the box menu's "Clear box": the picture,
+   * the title and the box's note all go, in one batch, so one Ctrl+Z brings
+   * the whole box back. The slot itself stays: the board keeps its shape.
+   */
+  clearChartBox(chartId: string, index: number): void {
+    const chart = this.model.node(chartId);
+    const g = chart?.style.gallery;
+    if (!chart || !g?.chart || index < 0 || index >= g.items.length) return void trace.ignored("chart:clear", "not a chart box", { nodeId: chartId, index });
+    const it = g.items[index];
+    const note = chartSlotNote(this.sheet, chartId, index);
+    if (!it.id && !it.caption && !note) return void trace.ignored("chart:clear", "box is already empty", { nodeId: chartId, index });
+    const ops: Op[] = [];
+    if (note) {
+      const removedRelationships = this.sheet.relationships.filter((r) => r.fromId === note.id || r.toId === note.id);
+      ops.push(makeOp<Op & { type: "deleteNode" }>("deleteNode", { id: note.id, parentId: null, index: 0, subtree: [note], removedRelationships }));
+    }
+    const items = g.items.map((x, k) => (k === index ? { id: "" } : { ...x }));
+    ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chartId, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.selectGalleryCell(chartId, index);
+    trace.applied("chart:clear", { nodeId: chartId, index, note: !!note });
+  }
+
+  /**
    * Put the placeholder picture INTO slot `index` — the box menu's "Add
    * placeholder box", acting on the box that was right-clicked. The slot keeps
    * its title and its note; a picture already there is replaced, as a drop
@@ -3549,12 +3574,12 @@ export class EditorStore {
 
   /**
    * Put a web search result (see webSearch.ts) where it was dropped:
-   *  - a chart box: the picture, the title as caption and the facts as the
-   *    box's note — one batch, one undo (a note the box already has stays);
+   *  - a chart box: the picture and the title as caption, one undo (a note
+   *    the box already has stays where it is);
    *  - a gallery: a new cell at `at`; a freeform board: an image item;
    *  - a topic: its picture, in `side`;
-   *  - empty canvas: a new floating topic with picture, title and the facts
-   *    in its notes, again one batch.
+   *  - empty canvas: a new floating topic with picture and title.
+   * Only the picture and the title travel: the user asked for no notes.
    */
   async placeWebItem(
     raw: WebItem,
@@ -3596,8 +3621,6 @@ export class EditorStore {
         style: card?.ok ? { image: card.card.id } : {},
         position: { x: target.x, y: target.y, manual: true },
       })];
-      const notes = [item.details, item.url].filter(Boolean).join("\n\n");
-      if (notes) ops.push(makeOp<Op & { type: "setNotes" }>("setNotes", { id, notes, prev: "" }));
       this.execOps(ops);
       this.settleLayoutNow();
       this.select(id);
@@ -3626,27 +3649,11 @@ export class EditorStore {
     }
     if (!this.sheet.attachments.some((a) => a.id === card.card.id)) this.sheet.attachments.push({ ...card.card });
     const items = g.items.map((it) => ({ ...it }));
-    const ops: Op[] = [];
-    let noteId = chartSlotNote(this.sheet, chart.id, target.index)?.id;
-    if (!noteId && item.details) {
-      noteId = uid("n");
-      ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
-        id: noteId,
-        nodeType: "floating",
-        parentId: null,
-        index: 0,
-        title: item.details,
-        titleRuns: plainToRuns(item.details),
-        style: { chartNote: { chartId: chart.id }, align: "left" },
-        position: { x: 0, y: 0, manual: false },
-      }));
-    }
-    items[target.index] = { ...items[target.index], id: card.card.id, caption: name, ...(noteId ? { noteId } : {}) };
-    ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chart.id, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
-    this.execOps(ops);
+    items[target.index] = { ...items[target.index], id: card.card.id, caption: name };
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: chart.id, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style })]);
     this.settleLayoutNow();
     this.selectGalleryCell(chart.id, target.index);
-    trace.applied("web:place", { kind: "chart", nodeId: chart.id, index: target.index, note: !!noteId });
+    trace.applied("web:place", { kind: "chart", nodeId: chart.id, index: target.index });
     return { ok: true };
   }
 
