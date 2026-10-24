@@ -805,11 +805,13 @@ export function CanvasView(): JSX.Element {
         commits: wasEditing && s.editingId !== hit,
       });
       store.select(hit, { additive });
+      drag.marqueeStartX = null;
+      // A chart slot's note hangs off its slot; the layout owns its place.
+      if (store.sheet.nodes[hit]?.style.chartNote) return void trace.ignored("drag:start", "chart note follows its slot", { id: hit });
       drag.dragging = hit;
       // Capture the pre-drag position: the final op's `prev` must be this,
       // so undo restores the exact pre-drag state (see commitNodeDrag).
       store.beginNodeDrag(hit);
-      drag.marqueeStartX = null;
     } else {
       // Overlay objects first: a relationship line, a group box, a summary
       // brace/label — then, on plain empty canvas, begin a marquee box.
@@ -1181,6 +1183,10 @@ export function CanvasView(): JSX.Element {
           store.selectGalleryCell(cellHit.nodeId, cellHit.index);
           setCaptionEdit({ nodeId: cellHit.nodeId, index: cellHit.index });
           trace.applied("dblclick:caption-edit", { id: cellHit.nodeId, index: cellHit.index });
+        } else if (store.sheet.nodes[hit]?.style.gallery?.chart) {
+          // Outside the slots, a chart's title is renamed in place like any
+          // topic's (startEdit lets charts through).
+          store.startEdit(hit);
         } else {
           store.select(hit);
         }
@@ -1227,12 +1233,24 @@ export function CanvasView(): JSX.Element {
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
     if (!hit) return;
+    const rect = canvasRef.current!.parentElement!.getBoundingClientRect();
+    // A chart answers with its BOX menu when a box is selected: right-clicking
+    // a box selects it first, and a box selected earlier stays the target.
+    // With no box selected the chart gets the ordinary topic menu.
+    if (store.doc.node(hit)?.style.gallery?.chart) {
+      const cellHit = rendererRef.current?.hitTestGalleryCell(currentRenderState(), world.x, world.y) ?? null;
+      if (cellHit?.nodeId === hit) store.selectGalleryCell(hit, cellHit.index);
+      const sel = store.getSnapshot().gallerySel;
+      if (sel?.nodeId === hit) {
+        setCtxMenu({ x: clientX - rect.left, y: clientY - rect.top, nodeId: hit, cell: sel.index });
+        return;
+      }
+    }
     // A topic already inside a marquee multi-selection keeps the WHOLE
     // selection: the menu's Change color then recolours every selected topic,
     // not just the one clicked. Right-clicking an unselected topic selects it
     // alone (the same rule the Inspector's picker follows).
     if (!s.selection.includes(hit)) store.select(hit);
-    const rect = canvasRef.current!.parentElement!.getBoundingClientRect();
     setCtxMenu({ x: clientX - rect.left, y: clientY - rect.top, nodeId: hit });
   };
 
@@ -1702,7 +1720,7 @@ export function CanvasView(): JSX.Element {
           colors={editColors}
         />
       )}
-      {ctxMenu && <NodeContextMenu key={ctxMenu.nodeId} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
+      {ctxMenu && <NodeContextMenu key={`${ctxMenu.nodeId}:${ctxMenu.cell ?? ""}`} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
       {captionField}
     </div>
   );

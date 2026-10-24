@@ -100,6 +100,14 @@ export interface GalleryItem {
   id: string;
   /** Single-line label under the cell. Newlines are not meaningful here. */
   caption?: string;
+  /**
+   * Chart only: the id of this slot's NOTE — a floating topic carrying
+   * `Style.chartNote` that points back at this chart. Selecting the slot
+   * opens it to the slot's right. The pair is checked both ways
+   * (`chartSlotNote`): a copied chart keeps the id but not the note, and a
+   * dangling id is simply "no note".
+   */
+  noteId?: string;
 }
 
 /**
@@ -301,6 +309,13 @@ export interface Style {
    * neither.
    */
   quizzes?: QuizInfo[];
+  /**
+   * Marks a floating topic as the NOTE of a chart slot (see
+   * `GalleryItem.noteId`). A note is an ordinary topic — rich title, styles,
+   * the one editor overlay — drawn only while its slot or the note itself is
+   * selected, and placed by the layout just right of its slot.
+   */
+  chartNote?: { chartId: string };
   /** Show study arrows for mistakes in this topic's quizzes. */
   showQuizMistakes?: boolean;
   /** Flashcard decks attached to this topic (see `FlashcardDeck`); reached

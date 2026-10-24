@@ -1,5 +1,6 @@
 import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
 import { quizMistakeNodeIds } from "../core/quiz";
+import { chartSlotNote, isChartNote, openChartNote } from "../core/chartNotes";
 import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
 /**
  * Canvas renderer — one <canvas>, no DOM/SVG nodes per topic.
@@ -16,7 +17,7 @@ import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_SLOT_ALPHA, chartGrowHandles, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, readableOn, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -226,7 +227,8 @@ export class Renderer {
     if (state.rev === undefined) return null; // caller opted out
     // Visibility depends on the camera, so it belongs in the key alongside the
     // revision: a pan changes which nodes are visible without changing any box.
-    return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}`;
+    // The open chart note follows the selection, not the revision.
+    return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}|${openChartNote(state.sheet, state) ?? ""}`;
   }
 
   private placedNodes(state: RenderState): Placed[] {
@@ -278,9 +280,16 @@ export class Renderer {
       add(n);
       if (state.showHidden === true || !n.collapsed) queue.push(...n.childrenIds);
     }
+    // A chart slot's note is a floating topic drawn only while open (see
+    // openChartNote); a closed one is neither painted nor hit.
+    const openNote = openChartNote(sheet, state);
+    let closedNotes = 0;
     for (const n of Object.values(sheet.nodes)) {
-      if (n.type === "floating" && !seen.has(n.id)) add(n);
+      if (n.type !== "floating" || seen.has(n.id)) continue;
+      if (isChartNote(n) && n.id !== openNote) { closedNotes++; continue; }
+      add(n);
     }
+    if (closedNotes > 0) trace.mark("render", "render:chart-notes", { closed: closedNotes, open: openNote ? 1 : 0 });
     return out;
   }
 
@@ -806,6 +815,9 @@ export class Renderer {
       const hs = 9;
       const hy = p.y + p.h / 2 - hs / 2;
       for (const hx of [p.x - hs / 2, p.x + p.w - hs / 2]) {
+        // roundRect only appends: without a fresh path the box's own outline
+        // is still in it, and the pill fill below repainted the whole chart.
+        ctx.beginPath();
         this.roundRect(ctx, hx, hy, hs, hs, 2);
         ctx.strokeStyle = theme.background;
         ctx.lineWidth = 3.2;
@@ -819,6 +831,7 @@ export class Renderer {
       // the width handles; the rects come from chartGrowHandles, which the hit
       // test reads too.
       for (const hnd of chartGrowHandles(p, this.curScale)) {
+        ctx.beginPath();
         this.roundRect(ctx, hnd.x, hnd.y, hnd.w, hnd.h, hnd.w / 4);
         ctx.fillStyle = theme.background;
         ctx.fill();
@@ -919,7 +932,7 @@ export class Renderer {
         this.drawCodeBlock(theme, p);
       } else {
         this.drawImage(p);
-        this.drawGallery(theme, p);
+        this.drawGallery(theme, p, state.sheet);
         this.drawText(theme, p, textColor);
       }
     }
@@ -1169,11 +1182,12 @@ export class Renderer {
    * parity machinery is involved and none of it needs to be. `captionLines`
    * decides the wrap, and the exports call the same function.
    */
-  private drawGallery(theme: RenderTheme, p: Placed): void {
+  private drawGallery(theme: RenderTheme, p: Placed, sheet: Sheet): void {
     const { cells, gallery } = positionedImageSlots(p, p.node, this.resolveImage);
     if (!gallery) return;
     const ctx = this.ctx;
-    for (const c of cells) {
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
       if (gallery.chart) {
         // A chart slot is a frame first: filled or empty, it is there, and
         // the empty ones are what invite the next picture.
@@ -1183,6 +1197,20 @@ export class Renderer {
         ctx.fillRect(c.x, c.y, c.w, c.h);
         ctx.restore();
         if (c.crop) this.paintSlot(p, c.id, c.pic.w, c.pic.h, c.pic.x, c.pic.y, null);
+        // A slot with a note says so with a folded corner, top right: the
+        // note itself is only drawn while the slot is selected.
+        if (chartSlotNote(sheet, p.node.id, i)) {
+          const k = Math.min(CHART_NOTE_MARK, c.w / 3);
+          ctx.save();
+          ctx.fillStyle = theme.selection;
+          ctx.beginPath();
+          ctx.moveTo(c.x + c.w - k, c.y);
+          ctx.lineTo(c.x + c.w, c.y);
+          ctx.lineTo(c.x + c.w, c.y + k);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
         continue;
       }
       if (c.crop) {
@@ -2288,6 +2316,11 @@ export class Renderer {
   ): { nodeId: string; index: number; part: "picture" | "caption"; rect: { x: number; y: number; w: number; h: number } } | null {
     const placed = this.placedNodes(state).filter((p) => p.visible);
     for (let i = placed.length - 1; i >= 0; i--) {
+      // A topic painted OVER a grid (an open chart note does exactly that)
+      // owns the point: the cell under it is hidden, so it is not a target.
+      const p = placed[i];
+      const inBox = worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h;
+      if (inBox && !p.node.style.gallery && !p.node.style.freeform) return null;
       const { cells } = positionedImageSlots(placed[i], placed[i].node, this.resolveImage);
       for (let k = 0; k < cells.length; k++) {
         const c = cells[k];

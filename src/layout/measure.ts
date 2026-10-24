@@ -192,6 +192,11 @@ export const CHART_GAP = 10;
  *  so it reads as a dark square on a dark map and a grey one on a light map.
  *  Shared by the canvas, the SVG and the PDF (I9). */
 export const CHART_SLOT_ALPHA = 0.22;
+/** Space between a chart slot and its open note (`Style.chartNote`), which
+ *  the layout places this far right of the slot, level with its top. */
+export const CHART_NOTE_GAP = 8;
+/** Side of the folded corner that marks a chart slot holding a note. */
+export const CHART_NOTE_MARK = 14;
 /** Most rows or columns a chart may grow to — a guard, not a design size. */
 export const CHART_MAX_SIDE = 30;
 

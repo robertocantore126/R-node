@@ -29,7 +29,7 @@ import { useStore } from "../editor/context";
 import type { EditorStore } from "../editor/store";
 import type { MindNode, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
-import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, FONT_STACK, imageResolver, LINE_HEIGHT_FACTOR, positionedImageSlots, TEXT_INSET } from "../layout/measure";
+import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, CHART_SLOT_ALPHA, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, imageResolver, LINE_HEIGHT_FACTOR, positionedImageSlots, TEXT_INSET } from "../layout/measure";
 import { getAssetStore } from "../persist/assets";
 import { trace } from "../dev/trace";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
@@ -134,7 +134,9 @@ export function RichEditor({
     node,
     imageResolver(store.sheet)
   );
-  const hasImage = pos.items.length > 0;
+  // A chart's board is reserved like an image: its title is the only text
+  // the overlay edits, and it sits above the board exactly as on the canvas.
+  const hasImage = pos.items.length > 0 || !!pos.gallery?.chart;
   // Straight from the shared helper — NOT recomputed here. Adding IMAGE_GAP on
   // every side (the previous shape of these four lines) reserved a gap on
   // slots that hold no image, so a topic with only a top image opened its
@@ -151,6 +153,19 @@ export function RichEditor({
         <div className="topic-rich-inner" style={inner}>
           {pos.items.map((it) => (
             <NodeImageBlock key={it.slot} id={it.id} imgW={it.size.w} imgH={it.size.h} left={it.x} top={it.y} />
+          ))}
+          {/* The canvas does not paint a node while it is edited (I3), so a
+              chart's slots are shown here, at the cells the canvas uses. */}
+          {pos.gallery?.chart && pos.cells.map((c, i) => (
+            <div key={`cell${i}`} contentEditable={false}>
+              <div style={{ position: "absolute", left: c.x, top: c.y, width: c.w, height: c.h, background: "var(--text-muted)", opacity: CHART_SLOT_ALPHA }} />
+              {c.id && c.crop && <NodeImageBlock id={c.id} imgW={c.pic.w} imgH={c.pic.h} left={c.pic.x} top={c.pic.y} />}
+              {c.caption && c.captionH > 0 && (
+                <div style={{ position: "absolute", left: c.x, top: c.captionY, width: c.w, height: c.captionH, overflow: "hidden", textAlign: "center", fontSize: GALLERY_CAPTION_SIZE, lineHeight: `${GALLERY_CAPTION_LINE_H}px`, fontWeight: 400, fontStyle: "normal", color: "var(--text-muted)" }}>
+                  {c.caption}
+                </div>
+              )}
+            </div>
           ))}
           <RichTextPlugin
             contentEditable={

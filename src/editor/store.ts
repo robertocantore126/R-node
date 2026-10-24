@@ -1,4 +1,6 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
+import { chartNoteIds, chartSlotNote, isChartNote } from "../core/chartNotes";
+import { chartPlaceholderFile } from "./chartPlaceholder";
 /**
  * EditorStore — the editor interaction layer.
  *
@@ -1756,8 +1758,10 @@ export class EditorStore {
     // renderer over the source, and the §3 parity contract exists precisely
     // because two renderers over one title drift. The refusal still selects
     // the topic, so the double-click shows what it acted on; a mute return
-    // would be indistinguishable from a defect (§4bis).
-    if (node.style.code || node.style.gallery || node.style.freeform) {
+    // would be indistinguishable from a defect (§4bis). A CHART is the
+    // exception: its title is a heading over a fixed board, and the overlay
+    // sits above the board exactly as it sits above any topic's images.
+    if (node.style.code || (node.style.gallery && !node.style.gallery.chart) || node.style.freeform) {
       this.state.selection = [id];
       this.state.editingId = null;
       this.state.pendingInsert = null;
@@ -1791,8 +1795,11 @@ export class EditorStore {
     if (!node) return;
     // Same refusal as startEdit: a code topic never enters the editor, not
     // even through type/paste-to-edit (T22), and neither does a gallery
-    // topic, whose body is pictures (T25).
-    if (node.style.code || node.style.gallery || node.style.freeform) {
+    // topic, whose body is pictures (T25) — unless it is a chart, whose
+    // title is edited like any other (see startEdit). With one of a chart's
+    // boxes selected the box is the target, and typing is not a rename.
+    if (this.state.gallerySel) return trace.ignored("paste-to-edit:trigger", "a gallery cell is selected", { nodeId: node.id });
+    if (node.style.code || (node.style.gallery && !node.style.gallery.chart) || node.style.freeform) {
       const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
       return trace.ignored("paste-to-edit:trigger", why, { nodeId: node.id });
     }
@@ -2143,6 +2150,7 @@ export class EditorStore {
 
   createChild(): void {
     const node = this.selectionNode ?? this.model.rootNode;
+    if (isChartNote(node)) return void trace.ignored("create:child", "a chart note has no subtopics", { nodeId: node.id });
     const type: NodeType = node.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(node);
@@ -2163,6 +2171,10 @@ export class EditorStore {
   createChildOf(parentId: string): string | null {
     const parent = this.model.node(parentId);
     if (!parent) return null;
+    if (isChartNote(parent)) {
+      trace.ignored("create:child", "a chart note has no subtopics", { nodeId: parentId });
+      return null;
+    }
     const type: NodeType = parent.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(parent);
@@ -2490,7 +2502,11 @@ export class EditorStore {
 
   /** Delete nodes (and descendants); central topic is protected. */
   deleteNodes(ids: string[]): void {
-    const pruned = [...new Set(ids)].filter((id) => id !== this.sheet.rootNodeId && this.model.node(id));
+    const asked = [...new Set(ids)].filter((id) => id !== this.sheet.rootNodeId && this.model.node(id));
+    // A chart takes its slot notes with it: they are floating topics, outside
+    // its subtree, and would otherwise linger as notes of nothing.
+    const notes = asked.flatMap((id) => this.model.subtreeIds(id).flatMap((sid) => chartNoteIds(this.sheet, sid)));
+    const pruned = [...new Set([...asked, ...notes])];
     // Drop every id that has an ANCESTOR in the set, whatever order the
     // selection lists them in. Checking only the ids kept so far let a child
     // listed before its ancestor through: two ops, and the undo restored the
@@ -2538,6 +2554,23 @@ export class EditorStore {
       if (s.memberIds.length > 0 && s.memberIds.every((m) => deletedSet.has(m))) {
         ops.push(makeOp<Op & { type: "deleteSummary" }>("deleteSummary", { id: s.id, summary: s }));
       }
+    }
+    // A note deleted on its own leaves its slot: clear the slot's `noteId` in
+    // the same batch, so one Ctrl+Z brings the note back AND re-attaches it.
+    const chartsToClear = new Set<string>();
+    for (const id of deletedSet) {
+      const chartId = this.model.node(id)?.style.chartNote?.chartId;
+      if (chartId && !deletedSet.has(chartId) && this.model.node(chartId)?.style.gallery?.chart) chartsToClear.add(chartId);
+    }
+    for (const chartId of chartsToClear) {
+      const chart = this.model.requireNode(chartId);
+      const g = chart.style.gallery!;
+      const items = g.items.map((it) => {
+        if (!it.noteId || !deletedSet.has(it.noteId)) return { ...it };
+        const { noteId: _drop, ...rest } = it;
+        return rest;
+      });
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chartId, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
     }
     if (ops.length) {
       this.execOps(ops);
@@ -3339,9 +3372,11 @@ export class EditorStore {
     if (g?.chart) {
       // A chart keeps the slot: the picture goes, the title stays — and a
       // second Delete on the now-empty slot clears the title too.
+      // The slot's note stays too: it belongs to the slot, not the picture.
       const it = items[index];
-      if (it.id) items[index] = it.caption ? { id: "", caption: it.caption } : { id: "" };
-      else if (it.caption) items[index] = { id: "" };
+      const note = it.noteId ? { noteId: it.noteId } : {};
+      if (it.id) items[index] = it.caption ? { id: "", caption: it.caption, ...note } : { id: "", ...note };
+      else if (it.caption) items[index] = { id: "", ...note };
       else return;
     } else items.splice(index, 1);
     this.putGallery(nodeId, items, g?.cellW, g?.cols, g?.aspect);
@@ -3425,6 +3460,92 @@ export class EditorStore {
   }
 
   /**
+   * Attach a NOTE to slot `index` of a chart — the box menu's "Add note". A
+   * note is a floating topic marked `Style.chartNote`, linked from the slot's
+   * `noteId`; both are written in ONE batch, so one Ctrl+Z removes the pair.
+   * Its position is not part of the op: the layout derives it from the slot
+   * (I6). A slot that already has a note opens that one for editing instead.
+   */
+  addChartNote(chartId: string, index: number): string | null {
+    const chart = this.model.node(chartId);
+    const g = chart?.style.gallery;
+    if (!chart || !g?.chart || index < 0 || index >= g.items.length) {
+      trace.ignored("chart:note-add", "not a chart slot", { nodeId: chartId, index });
+      return null;
+    }
+    const existing = chartSlotNote(this.sheet, chartId, index);
+    if (existing) {
+      this.startEdit(existing.id);
+      return existing.id;
+    }
+    const id = uid("n");
+    const items = g.items.map((it) => ({ ...it }));
+    items[index] = { ...items[index], noteId: id };
+    this.execOps([
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id,
+        nodeType: "floating",
+        parentId: null,
+        index: 0,
+        title: "Note",
+        titleRuns: [{ text: "Note" }],
+        style: { chartNote: { chartId }, align: "left" },
+        position: { x: 0, y: 0, manual: false },
+      }),
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: chartId, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }),
+    ]);
+    this.settleLayoutNow();
+    this.startEdit(id);
+    trace.applied("chart:note-add", { nodeId: chartId, index, noteId: id });
+    return id;
+  }
+
+  /** Delete the note of slot `index` (box menu), leaving the slot selected. */
+  removeChartNote(chartId: string, index: number): void {
+    const note = chartSlotNote(this.sheet, chartId, index);
+    if (!note) return void trace.ignored("chart:note-remove", "slot has no note", { nodeId: chartId, index });
+    this.deleteNodes([note.id]);
+    this.selectGalleryCell(chartId, index);
+  }
+
+  /**
+   * Insert a NEW box holding the placeholder picture right after slot
+   * `after` (or at the end) — the box menu's "Add placeholder box". The
+   * board keeps its shape rule (`items.length` a multiple of `cols`): the
+   * insert pushes the later slots along, and the last slot falls off if it
+   * is a bare hole, otherwise a row is added. One `setStyle`, one undo.
+   */
+  async addChartPlaceholder(chartId: string, after?: number): Promise<boolean> {
+    const sheet = this.sheet;
+    const res = await this.importToCard(chartPlaceholderFile());
+    const g = this.model.node(chartId)?.style.gallery;
+    if (this.sheet !== sheet || !g?.chart) {
+      trace.ignored("chart:placeholder", "target chart is no longer open", { nodeId: chartId });
+      return false;
+    }
+    if (!res.ok) {
+      this.toast(`Could not add the placeholder: ${res.reason}`);
+      return false;
+    }
+    if (!this.sheet.attachments.some((a) => a.id === res.card.id)) this.sheet.attachments.push({ ...res.card });
+    const cols = Math.max(1, g.cols ?? CHART_COLS);
+    const items = this.galleryItems(chartId);
+    const at = after !== undefined && after >= 0 && after < items.length ? after + 1 : items.length;
+    items.splice(at, 0, { id: res.card.id });
+    if (items.length % cols !== 0) {
+      const last = items[items.length - 1];
+      if (!last.id && !last.caption && !last.noteId) items.pop();
+      while (items.length % cols !== 0) items.push({ id: "" });
+    }
+    this.putGallery(chartId, items, g.cellW, cols, g.aspect);
+    this.state.selection = [chartId];
+    this.state.gallerySel = { nodeId: chartId, index: at };
+    trace.applied("chart:placeholder", { nodeId: chartId, index: at });
+    this.notify();
+    return true;
+  }
+
+  /**
    * Import files into a chart's slots: the first goes INTO slot `at`
    * (replacing what is there — that is what pasting onto a picture means),
    * the rest into the next empty slots after it, and the board grows by rows
@@ -3470,7 +3591,7 @@ export class EditorStore {
       const prev = items[cursor];
       // A title the user already typed for the slot wins over the file name.
       const caption = prev.caption || chartCaptionFromFileName(card.name);
-      items[cursor] = caption ? { id: card.id, caption } : { id: card.id };
+      items[cursor] = { id: card.id, ...(caption ? { caption } : {}), ...(prev.noteId ? { noteId: prev.noteId } : {}) };
       lastIndex = cursor;
       cursor++;
     }
@@ -3504,15 +3625,21 @@ export class EditorStore {
       return;
     }
     const toItems = this.galleryItems(toNodeId);
+    // Across boards a slot's note stays with the SLOT: a note names its chart
+    // (`Style.chartNote`), so one carried to another board would be orphaned.
+    const card = (it: GalleryItem, noteId?: string): GalleryItem => {
+      const { noteId: _drop, ...rest } = it;
+      return noteId ? { ...rest, noteId } : rest;
+    };
     let displaced: GalleryItem | null = null;
     if (toChart) {
       const k = Math.max(0, Math.min(toItems.length - 1, toIndex));
-      displaced = toItems[k].id ? toItems[k] : null;
-      toItems[k] = { ...moved };
+      displaced = toItems[k].id ? card(toItems[k]) : null;
+      toItems[k] = card(moved, toItems[k].noteId);
     } else {
-      toItems.splice(Math.max(0, Math.min(toItems.length, toIndex)), 0, moved);
+      toItems.splice(Math.max(0, Math.min(toItems.length, toIndex)), 0, card(moved));
     }
-    if (fromChart) fromItems[fromIndex] = displaced ?? { id: "" };
+    if (fromChart) fromItems[fromIndex] = card(displaced ?? { id: "" }, fromItems[fromIndex].noteId);
     else if (displaced) fromItems[fromIndex] = displaced;
     else fromItems.splice(fromIndex, 1);
 
