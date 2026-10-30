@@ -38,7 +38,11 @@ describe("sanitizeHtml — theme text colour is not a chosen colour", () => {
     // What Chromium puts on the clipboard when text is copied off a dark map.
     expect(htmlToRuns(sanitizeHtml('<span style="color: rgb(230, 232, 238)">grey</span>'))).toEqual([{ text: "grey" }]);
     expect(htmlToRuns(sanitizeHtml('<span style="color: #111827">ink</span>'))).toEqual([{ text: "ink" }]);
+    // Other sites' dark-page greys, with a faint hue, are the same leak.
+    expect(htmlToRuns(sanitizeHtml('<span style="color: #e7ebf1">a</span><span style="color: #9aa5b4">b</span>'))).toEqual([{ text: "ab" }]);
     expect(htmlToRuns(sanitizeHtml('<span style="color: #d43a3a">red</span>'))).toEqual([{ text: "red", color: "#d43a3a" }]);
+    // Deliberate pure white/black (white on a vivid fill) stays.
+    expect(htmlToRuns(sanitizeHtml('<span style="color: #ffffff">w</span>'))).toEqual([{ text: "w", color: "#ffffff" }]);
   });
 });
 

@@ -191,17 +191,25 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
   },
 };
 
-const THEME_TEXT_COLORS = new Set(
-  Object.values(THEMES).flatMap((t) => [t.text, t.rootText]).map((c) => c.toLowerCase()),
-);
-
 /**
- * Whether `color` is exactly what some theme paints its text with. A run
- * colour like that is the theme leaking into the document, not a choice: text
- * copied out of the editor on a dark map carries its computed `#e6e8ee`, and
- * stored as a run colour it stays near-white after the theme goes back to
- * light. Text with no colour follows the theme, so these are dropped.
+ * Whether a run colour is a theme's text leaking into the document rather than
+ * a choice: a near-white or near-black grey with no hue. Text copied off a dark
+ * page (this editor's `#e6e8ee`, another site's `#e7ebf1`) carries that
+ * colour, and stored as a run colour it stays near-white after the map goes
+ * back to light. Such a grey reads on only one kind of background, so the
+ * theme should decide: text with no colour follows it.
+ *
+ * Pure white and pure black are kept: they are what a person picks on purpose,
+ * e.g. white on a vivid fill. Anything with a hue passes.
  */
-export function isThemeTextColor(color: string): boolean {
-  return THEME_TEXT_COLORS.has(color.trim().toLowerCase());
+export function isThemeDependentColor(color: string): boolean {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(color.trim());
+  if (!m) return false;
+  const h = m[1].length === 3 ? m[1].replace(/./g, (c) => c + c) : m[1].slice(0, 6);
+  if (h === "ffffff" || h === "000000") return false;
+  const n = parseInt(h, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  if (Math.max(r, g, b) - Math.min(r, g, b) > 32) return false;
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  return lum >= 150 || lum <= 70;
 }
