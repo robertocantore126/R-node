@@ -190,3 +190,18 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     shadow: "rgba(91,74,55,0.22)",
   },
 };
+
+const THEME_TEXT_COLORS = new Set(
+  Object.values(THEMES).flatMap((t) => [t.text, t.rootText]).map((c) => c.toLowerCase()),
+);
+
+/**
+ * Whether `color` is exactly what some theme paints its text with. A run
+ * colour like that is the theme leaking into the document, not a choice: text
+ * copied out of the editor on a dark map carries its computed `#e6e8ee`, and
+ * stored as a run colour it stays near-white after the theme goes back to
+ * light. Text with no colour follows the theme, so these are dropped.
+ */
+export function isThemeTextColor(color: string): boolean {
+  return THEME_TEXT_COLORS.has(color.trim().toLowerCase());
+}

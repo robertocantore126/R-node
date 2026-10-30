@@ -33,6 +33,15 @@ describe("sanitizeHtml — Word / Google Docs emphasis via CSS", () => {
   });
 });
 
+describe("sanitizeHtml — theme text colour is not a chosen colour", () => {
+  it("drops the text colour every theme paints with, keeps a real one", () => {
+    // What Chromium puts on the clipboard when text is copied off a dark map.
+    expect(htmlToRuns(sanitizeHtml('<span style="color: rgb(230, 232, 238)">grey</span>'))).toEqual([{ text: "grey" }]);
+    expect(htmlToRuns(sanitizeHtml('<span style="color: #111827">ink</span>'))).toEqual([{ text: "ink" }]);
+    expect(htmlToRuns(sanitizeHtml('<span style="color: #d43a3a">red</span>'))).toEqual([{ text: "red", color: "#d43a3a" }]);
+  });
+});
+
 describe("sanitizeHtml — Word lists (MsoListParagraph / margin-left)", () => {
   it("rebuilds a flat Word list as <ul><li>", () => {
     const out = sanitizeHtml(
