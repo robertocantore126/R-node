@@ -33,7 +33,7 @@ import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPla
 import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
 import { CHART_COLS, CHART_MAX_SIDE, CHART_ROWS, createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
-import { asThemeName, THEME_ORDER, THEMES, type ThemeName } from "../render/theme";
+import { asThemeName, isThemeTextColor, THEME_ORDER, THEMES, type ThemeName } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, readForOverwrite, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../persist/assets";
@@ -171,7 +171,9 @@ function sanitizeTitleRuns(raw: unknown): TextRun[] | undefined {
     if ((r as { italic?: unknown }).italic === true) run.italic = true;
     if ((r as { underline?: unknown }).underline === true) run.underline = true;
     const color = (r as { color?: unknown }).color;
-    if (typeof color === "string" && /^#[0-9a-fA-F]{3,8}$/.test(color)) run.color = color;
+    // A theme's own text colour is a leaked paste, not a choice (see
+    // isThemeTextColor): dropping it heals maps saved with one.
+    if (typeof color === "string" && /^#[0-9a-fA-F]{3,8}$/.test(color) && !isThemeTextColor(color)) run.color = color;
     // A size the layout can divide by: NaN, Infinity or anything <= 0 would
     // propagate through the line box into every measurement downstream.
     const fontSize = (r as { fontSize?: unknown }).fontSize;

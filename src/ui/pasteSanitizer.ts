@@ -15,6 +15,7 @@
  */
 import type { TextRun } from "../core/types";
 import { normalizeRuns } from "../core/text";
+import { isThemeTextColor } from "../render/theme";
 
 const COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
 
@@ -167,11 +168,10 @@ function applyInline(el: HTMLElement, ctx: Ctx): Ctx {
   // sanitizeHtml() re-emits colors as <span data-rnode-color="#hex"> — read
   // that marker here so htmlToRuns() keeps them (style is stripped by then).
   const marker = el.getAttribute("data-rnode-color");
-  if (marker && COLOR_RE.test(marker)) next.color = marker.toLowerCase();
-  else {
-    const c = cssColor(s.color);
-    if (c) next.color = c;
-  }
+  const c = marker && COLOR_RE.test(marker) ? marker.toLowerCase() : cssColor(s.color);
+  // The theme's own text colour is inherited styling, not a colour the author
+  // chose: keeping it would pin one theme's text colour into the run.
+  if (c && !isThemeTextColor(c)) next.color = c;
   return next;
 }
 
