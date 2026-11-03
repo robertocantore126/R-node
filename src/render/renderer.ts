@@ -1,6 +1,6 @@
 import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
 import { quizMistakeNodeIds } from "../core/quiz";
-import { chartSlotNote, isChartNote, openChartNote } from "../core/chartNotes";
+import { chartNoteRoot, chartSlotNote, isChartNote, openChartNote } from "../core/chartNotes";
 import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
 /**
  * Canvas renderer — one <canvas>, no DOM/SVG nodes per topic.
@@ -10,14 +10,15 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
  * HTML overlay (allowed by the architecture) — the renderer skips the title
  * of the node being edited so the overlay doesn't double-paint.
  */
-import type { Group, ImageSlot, MindNode, ResolvedBorder, Sheet, ConnectorStyle, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
+import type { Group, ImageSlot, MindNode, RelAnchor, Relationship, ResolvedBorder, Sheet, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
+import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, type HeadShape, type RelRoute } from "../layout/relationship";
 import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
 import { groupBoxes, groupRadius, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
-import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, ARROW_HALF_ANGLE, ARROW_LEN, bezierEnterRect, bezierExitRect, bezierSlice, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, segmentExitRect, TEXT_INSET, wrapRunLines, type Bezier3, type TextMeasurer } from "../layout/measure";
+import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, chartGrowPitch, CHART_COLS, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, readableOn, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
@@ -71,6 +72,15 @@ export interface RenderState {
    * DOM overlay; this is the live "what will be selected" feedback).
    */
   marqueeSel?: Set<string> | null;
+  /**
+   * A relationship being drawn from a connection arrow, or an end of the
+   * selected one being dragged to another topic. An empty `fromId`/`toId`
+   * is the end that follows the pointer; `replaces` hides the original while
+   * its end is in flight; `target` wears a ring.
+   */
+  relDraft?: { rel: Relationship; pointer: { x: number; y: number }; replaces?: string; target?: string | null } | null;
+  /** A chart grow slider in flight: how far it moved (world) and what it adds. */
+  chartGrow?: { id: string; grow: "row" | "col"; offset: number; delta: number } | null;
   /**
    * In-map search (Ctrl+F): ids of topics whose title/notes match the query —
    * each wears a dashed ring — and the one currently walked to, which wears a
@@ -231,11 +241,15 @@ export class Renderer {
     return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}|${this.openNote(state) ?? ""}`;
   }
 
-  /** The chart note on screen. None while a picture is being dragged (a
-   *  box's, or one from outside over a grid): the note would cover the boxes
-   *  the user is aiming at. */
+  /** The chart note on screen. None while a picture is aimed at a chart (a
+   *  box being dragged, or a picture over a grid): the note would cover the
+   *  boxes the user is aiming at. Anywhere else it stays open, so a picture
+   *  can be dropped on the note or on one of its subtopics. */
   private openNote(state: RenderState): string | null {
-    return state.ghostImage || state.galleryDrop ? null : openChartNote(state.sheet, state);
+    if (state.galleryDrop) return null;
+    const ghost = state.ghostImage;
+    if (ghost && state.sheet.nodes[ghost.nodeId]?.style.gallery?.chart) return null;
+    return openChartNote(state.sheet, state);
   }
 
   private placedNodes(state: RenderState): Placed[] {
@@ -295,6 +309,18 @@ export class Renderer {
       if (n.type !== "floating" || seen.has(n.id)) continue;
       if (isChartNote(n) && n.id !== openNote) { closedNotes++; continue; }
       add(n);
+      // An open note brings its subtopics along (the layout put them in a
+      // column beside it); a closed one hides them with it.
+      if (isChartNote(n) && (state.showHidden === true || !n.collapsed)) {
+        const stack = [...n.childrenIds];
+        while (stack.length > 0) {
+          const k = sheet.nodes[stack.shift()!];
+          if (!k || seen.has(k.id)) continue;
+          seen.add(k.id);
+          add(k);
+          if (state.showHidden === true || !k.collapsed) stack.push(...k.childrenIds);
+        }
+      }
     }
     if (closedNotes > 0) trace.mark("render", "render:chart-notes", { closed: closedNotes, open: openNote ? 1 : 0 });
     return out;
@@ -362,15 +388,20 @@ export class Renderer {
       rels++;
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
+      if (state.relDraft?.replaces === rel.id) continue;
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
-        this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional, state.relSel === rel.id, rel.connector);
+        this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id);
       }
     }
 
     // 2) connectors
     let links = 0;
     let linksDrawn = 0;
+    // An open chart note's branch floats over the map (over its own chart,
+    // first of all): its connectors are painted with it, in step 3, or the
+    // chart box would cover the stretch next to the note.
+    const noteLinks: [Placed, Placed][] = [];
     for (const p of placed) {
       if (!p.node.parentId) continue;
       const parent = byId.get(p.node.parentId);
@@ -378,6 +409,10 @@ export class Renderer {
       links++;
       if (!linkVisible(parent, p)) continue;
       linksDrawn++;
+      if (chartNoteRoot(state.sheet, parent.node.id)) {
+        noteLinks.push([parent, p]);
+        continue;
+      }
       this.drawConnector(
         parent,
         p,
@@ -389,6 +424,14 @@ export class Renderer {
 
     // 3) nodes
     for (const p of placed) {
+      if (noteLinks.length > 0 && isChartNote(p.node)) {
+        for (const [parent, kid] of noteLinks) {
+          // Mind-map style whatever the sheet's structure: the branch runs
+          // to the right of the note, which is what the layout placed.
+          this.drawConnector(parent, kid, "mindmap", "horizontal", this.branchColor(theme, kid.node, state.sheet));
+        }
+        noteLinks.length = 0;
+      }
       if (!p.visible) continue;
       this.drawNode(theme, p, state, false);
     }
@@ -436,6 +479,14 @@ export class Renderer {
     // on top of everything, centered on the cursor, before the drop lands.
     if (state.galleryDrop) this.drawGalleryDrop(theme, state);
     if (state.ghostImage) this.drawGhostImage(theme, state, state.ghostImage);
+
+    // 7) relationship editing: connection arrows, endpoint handles, the line
+    // being drawn, and the chart slider's preview.
+    this.drawRelEditing(theme, state, byId);
+    if (state.chartGrow) {
+      const p = byId.get(state.chartGrow.id);
+      if (p) this.drawChartGrowPreview(theme, p, state.chartGrow);
+    }
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
 
@@ -837,24 +888,51 @@ export class Renderer {
       // to the right (a column) and underneath (a row). Same outline style as
       // the width handles; the rects come from chartGrowHandles, which the hit
       // test reads too.
+      // They are sliders: the one being dragged rides along with the pointer.
       for (const hnd of chartGrowHandles(p, this.curScale)) {
+        const live = state.chartGrow?.id === n.id && state.chartGrow.grow === hnd.grow ? state.chartGrow : null;
+        const off = live?.offset ?? 0;
+        const x = hnd.x + (hnd.grow === "col" ? off : 0);
+        const y = hnd.y + (hnd.grow === "row" ? off : 0);
+        const thick = Math.min(hnd.w, hnd.h);
         ctx.beginPath();
-        this.roundRect(ctx, hnd.x, hnd.y, hnd.w, hnd.h, hnd.w / 4);
-        ctx.fillStyle = theme.background;
+        this.roundRect(ctx, x, y, hnd.w, hnd.h, thick / 2);
+        ctx.fillStyle = live ? theme.selection : theme.background;
         ctx.fill();
         ctx.strokeStyle = theme.selection;
-        ctx.lineWidth = hnd.w / 12;
+        ctx.lineWidth = thick / 12;
         ctx.stroke();
-        const cx = hnd.x + hnd.w / 2;
-        const cy = hnd.y + hnd.h / 2;
-        const arm = hnd.w / 4;
+        const fg = live ? theme.background : theme.selection;
+        const cx = x + hnd.w / 2;
+        const cy = y + hnd.h / 2;
+        const arm = thick / 4.5;
+        // Along = the axis it slides on; across = the other one.
+        const ax = hnd.grow === "col" ? 1 : 0;
+        const ay = 1 - ax;
+        ctx.strokeStyle = fg;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.lineWidth = thick / 10;
         ctx.beginPath();
         ctx.moveTo(cx - arm, cy);
         ctx.lineTo(cx + arm, cy);
         ctx.moveTo(cx, cy - arm);
         ctx.lineTo(cx, cy + arm);
-        ctx.lineWidth = hnd.w / 10;
         ctx.stroke();
+        // Two chevrons at the ends: "slide me either way".
+        const reach = Math.max(hnd.w, hnd.h) / 2 - thick * 0.32;
+        const chev = thick * 0.16;
+        ctx.lineWidth = thick / 13;
+        ctx.beginPath();
+        for (const sgn of [-1, 1]) {
+          const tx = cx + ax * sgn * reach;
+          const ty = cy + ay * sgn * reach;
+          ctx.moveTo(tx - ax * sgn * chev + ay * chev, ty - ay * sgn * chev + ax * chev);
+          ctx.lineTo(tx, ty);
+          ctx.lineTo(tx - ax * sgn * chev - ay * chev, ty - ay * sgn * chev - ax * chev);
+        }
+        ctx.stroke();
+        ctx.lineCap = "butt";
       }
     }
     // Image resize handle (T14): bottom-right corner of the image, same
@@ -1601,80 +1679,30 @@ export class Renderer {
     return { canvas, w: p.w, h: p.h };
   }
 
-  private drawRelationship(theme: RenderTheme, a: Placed, b: Placed, color: string, style: string, label?: string, bidirectional?: boolean, selected?: boolean, connector?: ConnectorStyle): void {
+  private drawRelationship(theme: RenderTheme, a: Box, b: Box, rel: Relationship, color: string, selected?: boolean): void {
     const ctx = this.ctx;
-    const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
-    const bx = b.x + b.w / 2, by = b.y + b.h / 2;
-    const curve: Bezier3 = {
-      p0: { x: ax, y: ay },
-      p1: { x: ax + (bx - ax) * 0.35, y: ay },
-      p2: { x: bx - (bx - ax) * 0.35, y: by },
-      p3: { x: bx, y: by },
-    };
-    // Truncate the curve exactly where it crosses each node's box, so the
-    // visible line ends where the arrowhead sits. The old full curve ran on
-    // under the head toward the centre, and the head's angle — computed on
-    // the straight line to the centre — disagreed with the curve's real
-    // tangent at the border on pronounced curves.
-    // A straight relationship (T24, and what a saved structure asks for) is the
-    // same drawing with the control points collapsed onto the border crossings:
-    // the arrowhead code below then reads its angle off p2→p3 and gets the
-    // segment's direction for free, instead of needing a second path.
-    const straight = connector === "straight";
-    const s0 = straight ? segmentExitRect(a, b) : null;
-    const s1 = straight ? segmentExitRect(b, a) : null;
-    const t0 = straight ? 0 : bezierExitRect(curve, a.x, a.y, a.w, a.h);
-    const t1 = straight ? 1 : bezierEnterRect(curve, b.x, b.y, b.w, b.h);
-    const drawn =
-      straight && s0 && s1
-        ? { p0: s0, p1: s0, p2: s1, p3: s1 }
-        : t1 - t0 > 1e-6
-          ? bezierSlice(curve, t0, t1)
-          : curve;
+    // The route (curve or polyline, cut at the borders or pinned to anchors)
+    // is shared with both exports — see layout/relationship.ts.
+    const route = relationshipRoute(rel, a, b);
+    const style = rel.lineStyle ?? "dashed";
+    const width = relWidth(rel);
     ctx.strokeStyle = color;
-    ctx.lineWidth = selected ? 2.5 : 1.5;
+    ctx.lineWidth = width + (selected ? 1 : 0);
+    ctx.lineJoin = "round";
     ctx.setLineDash(style === "dashed" ? [7, 5] : style === "dotted" ? [2, 4] : []);
-    ctx.beginPath();
-    ctx.moveTo(drawn.p0.x, drawn.p0.y);
-    if (straight) ctx.lineTo(drawn.p3.x, drawn.p3.y);
-    else ctx.bezierCurveTo(drawn.p1.x, drawn.p1.y, drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
+    this.traceRoute(route);
     ctx.stroke();
     ctx.setLineDash([]);
-    // Arrowheads: at the target, and at the source when bidirectional. The
-    // head used to be painted at the node CENTRE and then covered by the
-    // node's fill (nodes paint over relationships), so only the stub stuck
-    // out. The tip now sits on the border crossing, and its angle is the
-    // curve's exact tangent there — the slice's end segment.
-    const arrow = (fromX: number, fromY: number, toX: number, toY: number): void => {
-      const ang = Math.atan2(toY - fromY, toX - fromX);
-      // Scale-compensated, like the groups and the drop indicator: the head
-      // keeps its screen size at any zoom. Uncompensated it is 9 world units
-      // — at scale 0.4 that is ~4 screen px, effectively invisible.
-      const len = ARROW_LEN / this.curScale;
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.moveTo(toX, toY);
-      ctx.lineTo(toX - len * Math.cos(ang - ARROW_HALF_ANGLE), toY - len * Math.sin(ang - ARROW_HALF_ANGLE));
-      ctx.lineTo(toX - len * Math.cos(ang + ARROW_HALF_ANGLE), toY - len * Math.sin(ang + ARROW_HALF_ANGLE));
-      ctx.closePath();
-      ctx.fill();
-    };
-    if (straight) {
-      // The whole segment IS the tangent, so the head reads its angle from the
-      // two endpoints. Using p2→p3 here would be atan2(0, 0): the collapsed
-      // control points coincide with the end.
-      arrow(drawn.p0.x, drawn.p0.y, drawn.p3.x, drawn.p3.y);
-      if (bidirectional) arrow(drawn.p3.x, drawn.p3.y, drawn.p0.x, drawn.p0.y);
-    } else {
-      arrow(drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y);
-      if (bidirectional) {
-        // Source head: tip at the exit crossing, pointing back INTO node a
-        // (opposite of the start tangent).
-        arrow(drawn.p1.x, drawn.p1.y, drawn.p0.x, drawn.p0.y);
-      }
-    }
+    // Heads: the tip sits on the border and the angle is the line's real
+    // direction there. Scale-compensated, like the groups and the drop
+    // indicator: the head keeps its screen size at any zoom.
+    const heads = relHeads(rel);
+    const len = headLen(width) / this.curScale;
+    this.drawHead(headShape(heads.end, route.end.from, route.end.tip, len), color, width);
+    this.drawHead(headShape(heads.start, route.start.from, route.start.tip, len), color, width);
+    const label = rel.label;
     if (label) {
-      const mx = (ax + bx) / 2, my = (ay + by) / 2;
+      const mx = route.mid.x, my = route.mid.y;
       ctx.font = `600 12px system-ui, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -1683,6 +1711,166 @@ export class Renderer {
       ctx.fillRect(mx - w / 2, my - 10, w, 20);
       ctx.fillStyle = color;
       ctx.fillText(label, mx, my + 0.5);
+    }
+  }
+
+  /**
+   * Editing affordances for relationships, over everything else: the four
+   * connection arrows of a selected freeform item, the two end handles of the
+   * selected relationship, and the line being dragged out (with a ring on
+   * the topic it would land on).
+   */
+  private drawRelEditing(theme: RenderTheme, state: RenderState, byId: Map<string, Placed>): void {
+    const ctx = this.ctx;
+    const k = 1 / this.curScale;
+    const draft = state.relDraft;
+    if (draft) {
+      const pt = { x: draft.pointer.x, y: draft.pointer.y, w: 0, h: 0 };
+      const a = draft.rel.fromId ? byId.get(draft.rel.fromId) : undefined;
+      const b = draft.rel.toId ? byId.get(draft.rel.toId) : undefined;
+      const target = draft.target ? byId.get(draft.target) : undefined;
+      if (target) {
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 2 * k;
+        ctx.strokeRect(target.x - RING_PAD * k, target.y - RING_PAD * k, target.w + 2 * RING_PAD * k, target.h + 2 * RING_PAD * k);
+      }
+      this.drawRelationship(theme, a ?? pt, b ?? pt, draft.rel, theme.selection, true);
+      return;
+    }
+    if (state.relSel) {
+      const rel = state.sheet.relationships.find((r) => r.id === state.relSel);
+      const a = rel && byId.get(rel.fromId);
+      const b = rel && byId.get(rel.toId);
+      if (rel && a && b) {
+        const route = relationshipRoute(rel, a, b);
+        for (const p of [route.start.tip, route.end.tip]) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, REL_END_R * k, 0, Math.PI * 2);
+          ctx.fillStyle = theme.background;
+          ctx.fill();
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 2 * k;
+          ctx.stroke();
+        }
+      }
+      return;
+    }
+    if (state.selection.size !== 1 || state.editingId) return;
+    const [id] = state.selection;
+    const p = byId.get(id);
+    if (!p || !freeformOwner(state.sheet, id)) return;
+    for (const h of connectHandles(p, this.curScale)) {
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2);
+      ctx.fillStyle = theme.selection;
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // A small arrow pointing away from the box.
+      const L = h.r * 0.55;
+      const px = -h.dir.y;
+      const py = h.dir.x;
+      ctx.beginPath();
+      ctx.moveTo(h.x - h.dir.x * L, h.y - h.dir.y * L);
+      ctx.lineTo(h.x + h.dir.x * L, h.y + h.dir.y * L);
+      ctx.moveTo(h.x + h.dir.x * L - h.dir.x * L * 0.7 + px * L * 0.6, h.y + h.dir.y * L - h.dir.y * L * 0.7 + py * L * 0.6);
+      ctx.lineTo(h.x + h.dir.x * L, h.y + h.dir.y * L);
+      ctx.lineTo(h.x + h.dir.x * L - h.dir.x * L * 0.7 - px * L * 0.6, h.y + h.dir.y * L - h.dir.y * L * 0.7 - py * L * 0.6);
+      ctx.strokeStyle = theme.background;
+      ctx.lineWidth = 1.8 * k;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.lineCap = "butt";
+    }
+  }
+
+  /**
+   * What a chart slider drag will do, before it is released: the board's new
+   * outline (dashed) and, when shrinking, the strip that will go tinted red,
+   * plus a chip with the resulting size.
+   */
+  private drawChartGrowPreview(theme: RenderTheme, p: Placed, live: { grow: "row" | "col"; delta: number; offset: number }): void {
+    const ctx = this.ctx;
+    const k = 1 / this.curScale;
+    const g = p.node.style.gallery;
+    if (!g?.chart) return;
+    const pitch = chartGrowPitch(p);
+    const cols = Math.max(1, Math.floor(g.cols ?? CHART_COLS));
+    const rows = Math.max(1, Math.ceil(g.items.length / cols));
+    const isCol = live.grow === "col";
+    const step = (isCol ? pitch.col : pitch.row) * live.delta;
+    const w = p.w + (isCol ? step : 0);
+    const h = p.h + (isCol ? 0 : step);
+    if (live.delta < 0) {
+      ctx.fillStyle = "rgba(220, 38, 38, 0.18)";
+      if (isCol) ctx.fillRect(p.x + w, p.y, -step, p.h);
+      else ctx.fillRect(p.x, p.y + h, p.w, -step);
+    }
+    if (live.delta !== 0) {
+      ctx.setLineDash([6 * k, 4 * k]);
+      ctx.strokeStyle = live.delta < 0 ? "#dc2626" : theme.selection;
+      ctx.lineWidth = 2 * k;
+      ctx.strokeRect(p.x, p.y, w, h);
+      ctx.setLineDash([]);
+    }
+    const label = isCol
+      ? `${cols + live.delta} cols${live.delta ? ` (${live.delta > 0 ? "+" : "−"}${Math.abs(live.delta)})` : ""}`
+      : `${rows + live.delta} rows${live.delta ? ` (${live.delta > 0 ? "+" : "−"}${Math.abs(live.delta)})` : ""}`;
+    // The chip rides with the slider: above the column one, beside the row one.
+    ctx.font = `600 ${13 * k}px system-ui, sans-serif`;
+    const tw = ctx.measureText(label).width + 14 * k;
+    const hnd = chartGrowHandles(p, this.curScale).find((x) => x.grow === live.grow);
+    if (!hnd) return;
+    const sx = hnd.x + (isCol ? live.offset : 0);
+    const sy = hnd.y + (isCol ? 0 : live.offset);
+    const bx = isCol ? sx + hnd.w / 2 - tw / 2 : sx + hnd.w + 8 * k;
+    const by = isCol ? sy - 30 * k : sy + hnd.h / 2 - 11 * k;
+    ctx.beginPath();
+    this.roundRect(ctx, bx, by, tw, 22 * k, 11 * k);
+    ctx.fillStyle = live.delta < 0 ? "#dc2626" : theme.selection;
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, bx + tw / 2, by + 11 * k);
+  }
+
+  /** Begin a path along a relationship route (the caller strokes it). */
+  private traceRoute(route: RelRoute): void {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    if (route.path.kind === "curve") {
+      const b = route.path.b;
+      ctx.moveTo(b.p0.x, b.p0.y);
+      ctx.bezierCurveTo(b.p1.x, b.p1.y, b.p2.x, b.p2.y, b.p3.x, b.p3.y);
+    } else {
+      const pts = route.path.pts;
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    }
+  }
+
+  private drawHead(shape: HeadShape | null, color: string, width: number): void {
+    if (!shape) return;
+    const ctx = this.ctx;
+    ctx.beginPath();
+    if (shape.kind === "circle") {
+      ctx.arc(shape.c.x, shape.c.y, shape.r, 0, Math.PI * 2);
+    } else {
+      ctx.moveTo(shape.pts[0].x, shape.pts[0].y);
+      for (let i = 1; i < shape.pts.length; i++) ctx.lineTo(shape.pts[i].x, shape.pts[i].y);
+      if (shape.closed) ctx.closePath();
+    }
+    if (shape.kind === "circle" || shape.fill) {
+      ctx.fillStyle = color;
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.lineCap = "round";
+      ctx.stroke();
+      ctx.lineCap = "butt";
     }
   }
 
@@ -1918,26 +2106,56 @@ export class Renderer {
   hitTestRelationship(state: RenderState, wx: number, wy: number): string | null {
     const byId = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
     const threshold = 8 / state.camera.scale;
+    let best: string | null = null;
+    let bestD = Infinity;
     for (const rel of state.sheet.relationships) {
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
       if (!a || !b) continue;
-      const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
-      const bx = b.x + b.w / 2, by = b.y + b.h / 2;
-      const c1x = ax + (bx - ax) * 0.35, c1y = ay;
-      const c2x = bx - (bx - ax) * 0.35, c2y = by;
-      let prevX = ax, prevY = ay;
-      for (let t = 0.05; t <= 1.0; t += 0.05) {
-        const mt = 1 - t;
-        const px = mt * mt * mt * ax + 3 * mt * mt * t * c1x + 3 * mt * t * t * c2x + t * t * t * bx;
-        const py = mt * mt * mt * ay + 3 * mt * mt * t * c1y + 3 * mt * t * t * c2y + t * t * t * by;
-        const dx = px - prevX, dy = py - prevY;
-        const len = Math.hypot(dx, dy) || 1e-6;
-        const dist = Math.abs((wx - prevX) * dy - (wy - prevY) * dx) / len;
-        if (dist < threshold) return rel.id;
-        prevX = px;
-        prevY = py;
+      // The drawn route, not the old centre-to-centre curve: an elbow or an
+      // anchored line runs somewhere else entirely.
+      const d = routeDistance(relationshipRoute(rel, a, b), { x: wx, y: wy }) - relWidth(rel) / 2;
+      if (d < threshold && d < bestD) {
+        bestD = d;
+        best = rel.id;
       }
+    }
+    return best;
+  }
+
+  /** World rect of a placed topic plus its route endpoints for a relationship. */
+  relationshipEnds(state: RenderState, relId: string): { from: { x: number; y: number }; to: { x: number; y: number } } | null {
+    const rel = state.sheet.relationships.find((r) => r.id === relId);
+    if (!rel) return null;
+    const a = this.nodeWorldRect(state, rel.fromId);
+    const b = this.nodeWorldRect(state, rel.toId);
+    if (!a || !b) return null;
+    const route = relationshipRoute(rel, a, b);
+    return { from: route.start.tip, to: route.end.tip };
+  }
+
+  /** The endpoint handle of the selected relationship under the pointer. */
+  hitTestRelEnd(state: RenderState, wx: number, wy: number): "from" | "to" | null {
+    if (!state.relSel) return null;
+    const ends = this.relationshipEnds(state, state.relSel);
+    if (!ends) return null;
+    const tol = REL_END_R * 2 / state.camera.scale;
+    const dTo = Math.hypot(wx - ends.to.x, wy - ends.to.y);
+    const dFrom = Math.hypot(wx - ends.from.x, wy - ends.from.y);
+    if (dTo <= tol && dTo <= dFrom) return "to";
+    if (dFrom <= tol) return "from";
+    return null;
+  }
+
+  /** The connection arrow of a selected freeform item under the pointer. */
+  hitTestConnectHandle(state: RenderState, wx: number, wy: number): { id: string; anchor: RelAnchor } | null {
+    if (state.relSel || state.selection.size !== 1) return null;
+    const [id] = state.selection;
+    if (!freeformOwner(state.sheet, id)) return null;
+    const r = this.nodeWorldRect(state, id);
+    if (!r) return null;
+    for (const h of connectHandles(r, state.camera.scale)) {
+      if (Math.hypot(wx - h.x, wy - h.y) <= h.r * 1.4) return { id, anchor: h.anchor };
     }
     return null;
   }
@@ -2409,6 +2627,12 @@ export class Renderer {
     return { x: p.x, y: p.y, w: p.w, h: p.h };
   }
 
+  /** The placed box of a topic, node included (what chart geometry reads). */
+  placedNode(state: RenderState, id: string): { x: number; y: number; w: number; h: number; node: MindNode } | null {
+    const p = this.placedNodes(state).find((p) => p.node.id === id);
+    return p ? { x: p.x, y: p.y, w: p.w, h: p.h, node: p.node } : null;
+  }
+
   /** Visible node ids whose box intersects the given world-space rectangle (marquee). */
   nodesInRect(state: RenderState, wx0: number, wy0: number, wx1: number, wy1: number): string[] {
     const minX = Math.min(wx0, wx1), maxX = Math.max(wx0, wx1);
@@ -2502,7 +2726,7 @@ export class Renderer {
     for (const rel of state.sheet.relationships) {
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
-      if (a && b) this.drawRelationship(theme, a, b, rel.color ?? theme.selection, rel.lineStyle ?? "dashed", rel.label, rel.bidirectional, false, rel.connector);
+      if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false);
     }
     for (const p of all) {
       if (p.node.parentId) {

@@ -77,6 +77,7 @@ lati, mai riscritte a mano:
 | `TEXT_INSET` (6) | misura + padding calcolato dell'editable |
 | `ARROW_LEN` (9) + `ARROW_HALF_ANGLE` (0.42) | renderer + export SVG (punte delle frecce delle relazioni) |
 | `bezierPoint` / `bezierSlice` / `bezierEnterRect` / `bezierExitRect` | renderer + export SVG (troncamento della curva al bordo e tangente esatta della punta) |
+| `relationshipRoute` / `headShape` (in `src/layout/relationship.ts`) | renderer + export SVG + export PDF (percorso delle relazioni: curva, dritta, a gomito, ancore; forma delle punte) |
 
 Se cambi una di queste, entrambi i lati devono cambiare insieme e l'harness
 deve restare a 0 divergenze.

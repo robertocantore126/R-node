@@ -73,18 +73,14 @@ import { unzlibSync, zlibSync } from "fflate";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
+import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeYRange, type HeadShape } from "../layout/relationship";
 import {
-  ARROW_HALF_ANGLE,
-  ARROW_LEN,
   FONT_STACK,
   GALLERY_CAPTION_LINE_H,
   GALLERY_CAPTION_SIZE,
   CHART_SLOT_ALPHA,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
-  bezierEnterRect,
-  bezierExitRect,
-  bezierSlice,
   captionLines,
   imageResolver,
   measureNode,
@@ -485,17 +481,6 @@ function connectorCurve(parent: Placed, child: Placed, sheet: Sheet): Bezier3 {
   };
 }
 
-/** The relationship curve, before it is trimmed at the two box borders. */
-function relationshipCurve(a: Placed, b: Placed): Bezier3 {
-  const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
-  const bx = b.x + b.w / 2, by = b.y + b.h / 2;
-  return {
-    p0: { x: ax, y: ay },
-    p1: { x: ax + (bx - ax) * 0.35, y: ay },
-    p2: { x: bx - (bx - ax) * 0.35, y: by },
-    p3: { x: bx, y: by },
-  };
-}
 
 /** Per-page coordinate transform: world down-positive to PDF up-positive. */
 interface Frame {
@@ -1001,22 +986,24 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     `${f(fr.X(b.p0.x))} ${f(fr.Y(b.p0.y))} m ${f(fr.X(b.p1.x))} ${f(fr.Y(b.p1.y))} ` +
     `${f(fr.X(b.p2.x))} ${f(fr.Y(b.p2.y))} ${f(fr.X(b.p3.x))} ${f(fr.Y(b.p3.y))} c S`;
 
-  /** One arrowhead, tip at `to`, flaring back along the curve — the same
-   *  geometry the canvas and the SVG paint (ARROW_LEN / ARROW_HALF_ANGLE). */
-  const arrowHead = (
-    cmds: string[],
-    from: { x: number; y: number },
-    to: { x: number; y: number },
-    fr: Frame,
-  ): void => {
-    const ang = Math.atan2(to.y - from.y, to.x - from.x);
-    const ax = to.x - ARROW_LEN * Math.cos(ang - ARROW_HALF_ANGLE);
-    const ay = to.y - ARROW_LEN * Math.sin(ang - ARROW_HALF_ANGLE);
-    const bx = to.x - ARROW_LEN * Math.cos(ang + ARROW_HALF_ANGLE);
-    const by = to.y - ARROW_LEN * Math.sin(ang + ARROW_HALF_ANGLE);
-    cmds.push(
-      `${f(fr.X(to.x))} ${f(fr.Y(to.y))} m ${f(fr.X(ax))} ${f(fr.Y(ay))} l ${f(fr.X(bx))} ${f(fr.Y(by))} l f`,
-    );
+  /** One head — the shape the canvas and the SVG paint (layout/relationship.ts). */
+  const arrowHead = (cmds: string[], shape: HeadShape | null, fr: Frame): void => {
+    if (!shape) return;
+    if (shape.kind === "circle") {
+      // Four quarter arcs, the usual 0.5523 kappa approximation.
+      const { c, r } = shape;
+      const kk = 0.5523 * r;
+      const P = (x: number, y: number): string => `${f(fr.X(x))} ${f(fr.Y(y))}`;
+      cmds.push(
+        `${P(c.x + r, c.y)} m ${P(c.x + r, c.y + kk)} ${P(c.x + kk, c.y + r)} ${P(c.x, c.y + r)} c ` +
+          `${P(c.x - kk, c.y + r)} ${P(c.x - r, c.y + kk)} ${P(c.x - r, c.y)} c ` +
+          `${P(c.x - r, c.y - kk)} ${P(c.x - kk, c.y - r)} ${P(c.x, c.y - r)} c ` +
+          `${P(c.x + kk, c.y - r)} ${P(c.x + r, c.y - kk)} ${P(c.x + r, c.y)} c f`,
+      );
+    } else {
+      const path = shape.pts.map((p, i) => `${f(fr.X(p.x))} ${f(fr.Y(p.y))} ${i ? "l" : "m"}`).join(" ");
+      cmds.push(`${path} ${shape.fill ? "h f" : "S"}`);
+    }
     ops += 1;
   };
 
@@ -1043,22 +1030,28 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     b: Placed,
     color: string,
     fr: Frame,
-  ): Bezier3 | null => {
-    const curve = relationshipCurve(a, b);
-    const t0r = bezierExitRect(curve, a.x, a.y, a.w, a.h);
-    const t1r = bezierEnterRect(curve, b.x, b.y, b.w, b.h);
-    const drawn = t1r - t0r > 1e-6 ? bezierSlice(curve, t0r, t1r) : curve;
+  ): void => {
+    const route = relationshipRoute(rel, a, b);
+    const width = relWidth(rel);
+    const line =
+      route.path.kind === "curve"
+        ? curveCmd(route.path.b, fr)
+        : route.path.pts.map((p, i) => `${f(fr.X(p.x))} ${f(fr.Y(p.y))} ${i ? "l" : "m"}`).join(" ") + " S";
     cmds.push(
+      `${f(Math.max(0.05, width * fr.s))} w`,
+      "1 j",
       `${rgb(color)} RG`,
       rel.lineStyle === "dashed" ? "[7 5] 0 d" : rel.lineStyle === "dotted" ? "[2 4] 0 d" : "[] 0 d",
-      curveCmd(drawn, fr),
+      line,
       "[] 0 d",
     );
     ops += 2;
     cmds.push(`${rgb(color)} rg`);
-    arrowHead(cmds, drawn.p2, drawn.p3, fr);
-    if (rel.bidirectional) arrowHead(cmds, drawn.p1, drawn.p0, fr);
-    return drawn;
+    const heads = relHeads(rel);
+    const len = headLen(width);
+    arrowHead(cmds, headShape(heads.end, route.end.from, route.end.tip, len), fr);
+    arrowHead(cmds, headShape(heads.start, route.start.from, route.start.tip, len), fr);
+    cmds.push("0 j");
   };
 
   // -------------------------------------------------------------------------
@@ -1125,9 +1118,9 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       const a = byId.get(rel.fromId);
       const b = byId.get(rel.toId);
       if (!a || !b) continue;
-      if (!curveTouches(relationshipCurve(a, b), pg.top, pg.height)) continue;
+      const span = routeYRange(relationshipRoute(rel, a, b));
+      if (span.lo >= pg.top + pg.height || span.hi <= pg.top) continue;
       const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
-      cmds.push(`${f(Math.max(0.05, 1.5 * s))} w`);
       drawRelationship(cmds, rel, a, b, color, fr);
       cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
     }

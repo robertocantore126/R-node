@@ -34,9 +34,24 @@ export function chartNoteSlot(sheet: Sheet, noteId: string): { chartId: string; 
 }
 
 /**
+ * The note a topic belongs to: itself when it is a note, else the note at the
+ * top of its branch. A note can have subtopics (and they can have theirs);
+ * they open, close and travel with the note.
+ */
+export function chartNoteRoot(sheet: Sheet, id: string | null | undefined): string | null {
+  let cur = id ? sheet.nodes[id] : undefined;
+  for (let hops = 0; cur && hops < 256; hops++) {
+    if (isChartNote(cur)) return cur.id;
+    cur = cur.parentId ? sheet.nodes[cur.parentId] : undefined;
+  }
+  return null;
+}
+
+/**
  * The one note on screen, derived from the selection — so there is no
  * "open" flag to save, undo or forget to clear. A selected slot opens its
- * note; the note stays open while it is itself selected or being edited.
+ * note; the note stays open while it, or any topic in its branch, is
+ * selected or being edited.
  */
 export function openChartNote(
   sheet: Sheet,
@@ -46,10 +61,11 @@ export function openChartNote(
     const n = chartSlotNote(sheet, sel.gallerySel.nodeId, sel.gallerySel.index);
     if (n) return n.id;
   }
-  if (sel.editingId && isChartNote(sheet.nodes[sel.editingId])) return sel.editingId;
+  const editing = chartNoteRoot(sheet, sel.editingId);
+  if (editing) return editing;
   let last: string | null = null;
   for (const id of sel.selection) last = id;
-  return last && isChartNote(sheet.nodes[last]) ? last : null;
+  return chartNoteRoot(sheet, last);
 }
 
 /** Every note owned by a chart, valid links only. */

@@ -474,7 +474,28 @@ export interface Relationship {
    */
   connector?: ConnectorStyle;
   bidirectional?: boolean;
+  /**
+   * Where the line meets each box, as a fraction of the box (0..1 on both
+   * axes, always on the border). Absent = floating: the line aims at the
+   * centre and is cut at the border, the look every older document has.
+   */
+  fromAnchor?: RelAnchor;
+  toAnchor?: RelAnchor;
+  /** Head at the target. Absent = "triangle". */
+  endArrow?: ArrowHead;
+  /** Head at the source. Absent = "triangle" if `bidirectional`, else none. */
+  startArrow?: ArrowHead;
+  /** Stroke width in world units. Absent = 1.5 (REL_WIDTH). */
+  width?: number;
 }
+
+/** A point on a box border, as fractions of the box's width and height. */
+export interface RelAnchor {
+  x: number;
+  y: number;
+}
+
+export type ArrowHead = "none" | "triangle" | "open" | "diamond" | "circle";
 
 // ---------------------------------------------------------------------------
 // Groups & summaries (drawn over the map, derived from member geometry)

@@ -908,17 +908,18 @@ export function galleryInsertIndex(
   return wx > c.x + c.w / 2 ? best + 1 : best;
 }
 
-/** Side of a chart's "+" grow pill and its distance outside the box, in
- *  SCREEN px at zooms below 100% (see `chartGrowHandles`). */
-export const CHART_GROW_SIZE = 20;
-export const CHART_GROW_GAP = 8;
+/** Thickness and length of a chart's grow slider and its distance outside
+ *  the box, in SCREEN px at zooms below 100% (see `chartGrowHandles`). */
+export const CHART_GROW_SIZE = 30;
+export const CHART_GROW_LEN = 64;
+export const CHART_GROW_GAP = 10;
 
 /**
- * The two "+" pills a selected chart shows: one past the right edge, level
- * with the middle of the board (a column grows there), one under the bottom
- * edge, centred on the board (a row grows there). Empty for any other topic.
- * One function for the painter and the hit test, so the pill a user sees is
- * the pill a click finds.
+ * The two grow sliders a selected chart shows: one past the right edge, level
+ * with the middle of the board (columns), one under the bottom edge, centred
+ * on the board (rows). A click adds one; dragging outward adds, inward
+ * removes (`chartGrowDelta`). Empty for any other topic. One function for the
+ * painter and the hit test, so the slider a user sees is the one a click finds.
  */
 export function chartGrowHandles(
   box: { x: number; y: number; w: number; h: number; node: MindNode },
@@ -932,15 +933,42 @@ export function chartGrowHandles(
   const bottom = last.y + last.h;
   const left = cells[0].x;
   const right = Math.max(...cells.map((c) => c.x + c.w));
-  // Sized in screen px: zoomed out, the pill grows in world units so it stays
-  // clickable; zoomed in, it keeps its 100% size rather than ballooning.
+  // Sized in screen px: zoomed out, the slider grows in world units so it
+  // stays grabbable; zoomed in, it keeps its 100% size rather than ballooning.
   const k = 1 / Math.min(1, Math.max(0.05, scale));
   const s = CHART_GROW_SIZE * k;
+  const len = CHART_GROW_LEN * k;
   const gap = CHART_GROW_GAP * k;
   return [
-    { grow: "col", x: box.x + box.w + gap, y: (top + bottom) / 2 - s / 2, w: s, h: s },
-    { grow: "row", x: (left + right) / 2 - s / 2, y: box.y + box.h + gap, w: s, h: s },
+    // Each slider is long along the axis it slides on: the column one sticks
+    // out sideways, the row one downward.
+    { grow: "col", x: box.x + box.w + gap, y: (top + bottom) / 2 - s / 2, w: len, h: s },
+    { grow: "row", x: (left + right) / 2 - s / 2, y: box.y + box.h + gap, w: s, h: len },
   ];
+}
+
+/** World distance between one column (row) of a chart and the next. */
+export function chartGrowPitch(box: { x: number; y: number; w: number; h: number; node: MindNode }): { col: number; row: number } {
+  const g = box.node.style.gallery;
+  const { cells } = positionedImageSlots(box, box.node);
+  if (!g || cells.length === 0) return { col: 1, row: 1 };
+  const cols = Math.max(1, Math.floor(g.cols ?? CHART_COLS));
+  const rows = Math.max(1, Math.ceil(cells.length / cols));
+  const left = cells[0].x;
+  const right = Math.max(...cells.map((c) => c.x + c.w));
+  const top = cells[0].y;
+  const bottom = Math.max(...cells.map((c) => c.y + c.h));
+  return { col: (right - left + GALLERY_GAP) / cols, row: (bottom - top + GALLERY_GAP) / rows };
+}
+
+/**
+ * Columns (rows) a slider drag adds — negative removes. `dist` is how far the
+ * slider moved outward, in world units; half a pitch is enough to take the
+ * next one, and the result never leaves 1..CHART_MAX_SIDE.
+ */
+export function chartGrowDelta(dist: number, pitch: number, current: number): number {
+  const d = Math.round(dist / Math.max(1e-6, pitch));
+  return Math.max(1 - current, Math.min(CHART_MAX_SIDE - current, d)) || 0;
 }
 
 /**

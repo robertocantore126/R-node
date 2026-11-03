@@ -1,5 +1,5 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
-import { chartNoteIds, chartSlotNote, isChartNote } from "../core/chartNotes";
+import { chartNoteIds, chartSlotNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
 import { resolveWebItem, webCaption, type WebItem } from "./webSearch";
@@ -24,7 +24,7 @@ import { History } from "../core/history";
 import { applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
-import { SCHEMA_VERSION, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { SCHEMA_VERSION, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type RelAnchor, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { parseQuiz, quizTopicOutline, type QuizSeed } from "../core/quiz";
 import { parseFlashcards, type FlashcardSeed } from "../core/flashcards";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
@@ -2157,7 +2157,6 @@ export class EditorStore {
 
   createChild(): void {
     const node = this.selectionNode ?? this.model.rootNode;
-    if (isChartNote(node)) return void trace.ignored("create:child", "a chart note has no subtopics", { nodeId: node.id });
     const type: NodeType = node.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(node);
@@ -2178,10 +2177,6 @@ export class EditorStore {
   createChildOf(parentId: string): string | null {
     const parent = this.model.node(parentId);
     if (!parent) return null;
-    if (isChartNote(parent)) {
-      trace.ignored("create:child", "a chart note has no subtopics", { nodeId: parentId });
-      return null;
-    }
     const type: NodeType = parent.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(parent);
@@ -3531,8 +3526,11 @@ export class EditorStore {
     if (!it.id && !it.caption && !note) return void trace.ignored("chart:clear", "box is already empty", { nodeId: chartId, index });
     const ops: Op[] = [];
     if (note) {
-      const removedRelationships = this.sheet.relationships.filter((r) => r.fromId === note.id || r.toId === note.id);
-      ops.push(makeOp<Op & { type: "deleteNode" }>("deleteNode", { id: note.id, parentId: null, index: 0, subtree: [note], removedRelationships }));
+      // The note goes with its whole branch: subtopics hang off it.
+      const subtree = this.model.subtreeIds(note.id).map((sid) => this.model.node(sid)!).filter(Boolean);
+      const ids = new Set(subtree.map((n) => n.id));
+      const removedRelationships = this.sheet.relationships.filter((r) => ids.has(r.fromId) || ids.has(r.toId));
+      ops.push(makeOp<Op & { type: "deleteNode" }>("deleteNode", { id: note.id, parentId: null, index: 0, subtree, removedRelationships }));
     }
     const items = g.items.map((x, k) => (k === index ? { id: "" } : { ...x }));
     ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chartId, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
@@ -4829,18 +4827,42 @@ export class EditorStore {
     this.notify();
   }
 
-  createRelationship(fromId: string, toId: string): void {
-    if (fromId === toId) return;
+  /**
+   * Link two topics. With `opts` (an arrow dragged out of a connection
+   * handle, draw.io style) a second line between the same pair is allowed —
+   * A→B and B→A, or two sides of a box, are ordinary diagram content; the
+   * "already exists" guard only protects the Link… command from double clicks.
+   * Returns the new relationship's id.
+   */
+  createRelationship(fromId: string, toId: string, opts?: Omit<Relationship, "id" | "fromId" | "toId">): string | null {
+    if (fromId === toId) return null;
     const exists = this.sheet.relationships.some((r) => (r.fromId === fromId && r.toId === toId) || (r.fromId === toId && r.toId === fromId));
-    if (exists) {
+    if (exists && !opts) {
       this.toast("Relationship already exists");
-      return;
+      return null;
     }
+    const id = uid("rel");
     this.execOps([
       makeOp<Op & { type: "createRelationship" }>("createRelationship", {
-        relationship: { id: uid("rel"), fromId, toId },
+        relationship: { ...opts, id, fromId, toId },
       }),
     ]);
+    trace.applied("rel:create", { id, fromId, toId, anchored: !!(opts?.fromAnchor || opts?.toAnchor) });
+    return id;
+  }
+
+  /**
+   * Move one end of a relationship onto `nodeId` (possibly the same topic,
+   * to another side). One op, so one undo restores the old end.
+   */
+  reconnectRelationship(id: string, end: "from" | "to", nodeId: string, anchor: RelAnchor | undefined): void {
+    const rel = this.sheet.relationships.find((r) => r.id === id);
+    if (!rel) return;
+    const other = end === "from" ? rel.toId : rel.fromId;
+    if (nodeId === other) return void trace.ignored("rel:reconnect", "both ends on one topic", { id, end, nodeId });
+    const patch: Partial<Relationship> = end === "from" ? { fromId: nodeId, fromAnchor: anchor } : { toId: nodeId, toAnchor: anchor };
+    this.setRelationship(id, patch);
+    trace.applied("rel:reconnect", { id, end, nodeId, anchored: !!anchor });
   }
 
   // -------------------------------------------------------------------------

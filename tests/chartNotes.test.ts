@@ -137,14 +137,55 @@ describe("box notes", () => {
     expect(chartSlotNote(store.sheet, id, 0)?.id).toBe(noteId);
   });
 
-  it("refuses subtopics, which a floating note could never draw", () => {
+  it("takes subtopics, laid out beside it and open while any of them is selected", () => {
     const { store, id } = seeded();
     const noteId = store.addChartNote(id, 0)!;
     store.commitEdit();
     store.select(noteId);
     store.createChild();
-    expect(store.createChildOf(noteId)).toBeNull();
-    expect(store.doc.node(noteId)!.childrenIds).toEqual([]);
+    const child = store.doc.node(noteId)!.childrenIds[0];
+    expect(child).toBeTruthy();
+    const grand = store.createChildOf(child)!;
+    store.commitEdit();
+    expect(store.doc.node(child)!.childrenIds).toEqual([grand]);
+    applyLayout(store.sheet, false);
+    // The branch runs to the right of the note, which stays on its slot.
+    const note = store.doc.node(noteId)!;
+    const kid = store.doc.node(child)!;
+    expect(kid.position.x).toBeGreaterThan(note.position.x + measureNode(note).w);
+    expect(store.doc.node(grand)!.position.x).toBeGreaterThan(kid.position.x);
+    // Selecting a subtopic (or a sub-subtopic) keeps the note open.
+    store.select(grand);
+    expect(openChartNote(store.sheet, { selection: [grand] })).toBe(noteId);
+    expect(openChartNote(store.sheet, { selection: [], editingId: child })).toBe(noteId);
+  });
+
+  it("clears its box with the whole branch, and one undo brings it all back", () => {
+    const { store, id } = seeded();
+    const noteId = store.addChartNote(id, 0)!;
+    store.commitEdit();
+    const child = store.createChildOf(noteId)!;
+    store.commitEdit();
+    const grand = store.createChildOf(child)!;
+    store.commitEdit();
+    store.clearChartBox(id, 0);
+    for (const x of [noteId, child, grand]) expect(store.doc.node(x)).toBeUndefined();
+    store.undo();
+    expect(store.doc.node(noteId)!.childrenIds).toEqual([child]);
+    expect(store.doc.node(child)!.childrenIds).toEqual([grand]);
+  });
+
+  it("lets the note and its subtopics hold pictures", async () => {
+    const { store, id } = seeded();
+    const noteId = store.addChartNote(id, 0)!;
+    store.commitEdit();
+    const child = store.createChildOf(noteId)!;
+    store.commitEdit();
+    const card = (n: string): AttachmentInfo => ({ id: `id:${n}`, mime: "image/png", w: 100, h: 80, bytes: 1, name: n });
+    store.attachImage(noteId, card("a.png"));
+    store.attachImage(child, card("b.png"), "left");
+    expect(store.doc.node(noteId)!.style.image).toBe("id:a.png");
+    expect(store.doc.node(child)!.style.imageLeft).toBe("id:b.png");
   });
 
   it("survives the slot's picture being removed, swapped or the board resized", async () => {

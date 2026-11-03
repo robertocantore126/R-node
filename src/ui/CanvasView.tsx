@@ -12,14 +12,15 @@ import { editorMapToPdf } from "../export/editorPdf";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
-import { createCanvasTextMeasurer, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
+import { anchorAt } from "../layout/relationship";
+import { createCanvasTextMeasurer, chartGrowDelta, chartGrowPitch, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
 import { SHAPE_DRAG_TYPE } from "./ShapeLibrary";
 import { WEB_ITEM_DRAG_TYPE, type WebItem } from "../editor/webSearch";
 import { listShapes } from "../editor/shapeLibrary";
-import type { ImageSlot, MindNode, Sheet } from "../core/types";
+import type { ImageSlot, MindNode, RelAnchor, Relationship, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
 import { TouchGestures } from "./touchGestures";
@@ -115,7 +116,16 @@ interface DragState {
   marqueeStartX: number | null;
   marqueeStartY: number | null;
   marqueeActive: boolean;
+  /** A relationship in hand: a new one out of a connection arrow, or one end
+   *  of the selected one being moved. */
+  connect: { kind: "new"; fromId: string; fromAnchor: RelAnchor } | { kind: "end"; relId: string; end: "from" | "to" } | null;
+  /** A chart grow slider in hand. */
+  chartGrow: { id: string; grow: "row" | "col"; startWorld: number; pitch: number; current: number } | null;
 }
+
+/** What an arrow dragged out of a connection handle looks like: draw.io's
+ *  default edge — solid, straight, one head at the target. */
+const NEW_ARROW: Pick<Relationship, "connector" | "lineStyle" | "endArrow"> = { connector: "straight", lineStyle: "solid", endArrow: "triangle" };
 
 /** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
 function shapeWidthAllowance(n: MindNode): number {
@@ -180,6 +190,8 @@ export function CanvasView(): JSX.Element {
     marqueeStartX: null,
     marqueeStartY: null,
     marqueeActive: false,
+    connect: null,
+    chartGrow: null,
   });
   // Right/middle-drag pan started over the Lexical overlay (the overlay is a
   // sibling of the canvas, so the canvas pointer handlers never see it).
@@ -225,6 +237,11 @@ export function CanvasView(): JSX.Element {
   const extDropSideRef = useRef<ImageSlot | null>(null);
   /** Live insertion caret for a gallery cell drag (T25) — see RenderState. */
   const galleryDropRef = useRef<{ nodeId: string; index: number } | null>(null);
+  /** Live previews of a relationship / chart slider drag — see RenderState. */
+  const relDraftRef = useRef<RenderState["relDraft"]>(null);
+  const chartGrowRef = useRef<RenderState["chartGrow"]>(null);
+  /** Cursor over a relationship handle or a chart slider (null = none). */
+  const [handleCursor, setHandleCursor] = useState<string | null>(null);
   const [extGhostSrc, setExtGhostSrc] = useState<string | null>(null);
 
   const paint = useCallback(() => {
@@ -253,6 +270,8 @@ export function CanvasView(): JSX.Element {
       ghostImage: ghostRef.current,
       galleryDrop: galleryDropRef.current,
       marqueeSel: marqueeSelRef.current,
+      relDraft: relDraftRef.current,
+      chartGrow: chartGrowRef.current,
       searchMatches: s.searchOpen && s.search ? new Set(s.searchResults) : null,
       searchCurrent: s.searchOpen && s.searchResults.length > 0 ? s.searchResults[s.searchIndex] : null,
     };
@@ -661,6 +680,27 @@ export function CanvasView(): JSX.Element {
         return;
       }
     }
+    // Relationship editing (draw.io style), before anything else on the map:
+    // the handles sit outside or on the border of a box and nothing else
+    // claims those points. An end of the selected relationship is grabbed to
+    // move it; a connection arrow of a selected freeform item starts a new one.
+    if (!s.relFrom) {
+      const end = renderer.hitTestRelEnd(rs, world.x, world.y);
+      if (end && s.relSel) {
+        drag.connect = { kind: "end", relId: s.relSel, end };
+        drag.marqueeStartX = null;
+        trace.applied("pointerdown:rel-end", { id: s.relSel, end });
+        return;
+      }
+      const con = s.editingId ? null : renderer.hitTestConnectHandle(rs, world.x, world.y);
+      if (con) {
+        drag.connect = { kind: "new", fromId: con.id, fromAnchor: con.anchor };
+        drag.marqueeStartX = null;
+        trace.applied("pointerdown:connect", { id: con.id, anchor: `${con.anchor.x},${con.anchor.y}` });
+        return;
+      }
+    }
+
     // Image resize (T14): grab the corner handle on the node's image. Same
     // precedence as the width handle — before the body hit test.
     const imgResizeHit = s.relFrom ? null : renderer.hitTestImageResize(rs, world.x, world.y);
@@ -688,11 +728,23 @@ export function CanvasView(): JSX.Element {
     // Xmind-style width resize: grab the handle on the selected node's edge.
     // Checked BEFORE the body hit test so the handle wins on the edge line
     // (skipped while a relationship target is being picked).
-    // A selected chart's "+" pills grow it by a column (right) or a row
-    // (below). They sit OUTSIDE the box, so nothing else claims the point.
+    // A selected chart's grow sliders: right of the box (columns) and below it
+    // (rows). They sit OUTSIDE the box, so nothing else claims the point. The
+    // change happens on release: a click adds one, a drag outward adds, a
+    // drag inward removes (see onPointerUp).
     const growHit = s.relFrom ? null : renderer.hitTestChartGrow(rs, world.x, world.y);
-    if (growHit) {
-      store.resizeChart(growHit.id, growHit.grow === "row" ? 1 : 0, growHit.grow === "col" ? 1 : 0);
+    const growBox = growHit ? renderer.placedNode(rs, growHit.id) : null;
+    const shape = growHit ? store.chartShape(growHit.id) : null;
+    if (growHit && growBox && shape) {
+      const pitch = chartGrowPitch(growBox);
+      drag.chartGrow = {
+        id: growHit.id,
+        grow: growHit.grow,
+        startWorld: growHit.grow === "col" ? world.x : world.y,
+        pitch: growHit.grow === "col" ? pitch.col : pitch.row,
+        current: growHit.grow === "col" ? shape.cols : shape.rows,
+      };
+      drag.marqueeStartX = null;
       trace.applied("pointerdown:chart-grow", { id: growHit.id, grow: growHit.grow, wasEditing });
       return;
     }
@@ -863,6 +915,46 @@ export function CanvasView(): JSX.Element {
     drag.lastX = x;
     drag.lastY = y;
 
+    // A relationship in hand: the free end follows the pointer, or snaps to
+    // the topic under it (an anchor on its border, or floating in its middle).
+    if (drag.connect) {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const renderer = rendererRef.current!;
+      const rs = currentRenderState();
+      const c = drag.connect;
+      const base: Relationship | undefined =
+        c.kind === "new"
+          ? { id: "draft", fromId: c.fromId, toId: "", fromAnchor: c.fromAnchor, ...NEW_ARROW }
+          : store.sheet.relationships.find((r) => r.id === c.relId);
+      if (!base) return;
+      const fixed = c.kind === "new" ? c.fromId : c.end === "to" ? base.fromId : base.toId;
+      // A freeform board is the surface, not something to link to; the end
+      // that stays put cannot be the other end too.
+      const target = renderer.hitTest(rs, world.x, world.y, (id) => id === fixed || !!store.doc.node(id)?.style.freeform);
+      const rect = target ? renderer.nodeWorldRect(rs, target) : null;
+      const anchor = rect ? anchorAt(rect, world, 8 / s.camera.scale) : undefined;
+      const moving = c.kind === "new" || c.end === "to" ? "to" : "from";
+      const rel: Relationship =
+        moving === "to" ? { ...base, toId: target ?? "", toAnchor: anchor } : { ...base, fromId: target ?? "", fromAnchor: anchor };
+      relDraftRef.current = { rel, pointer: world, replaces: c.kind === "end" ? c.relId : undefined, target };
+      schedule();
+      return;
+    }
+    if (drag.chartGrow) {
+      const g = drag.chartGrow;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const dist = (g.grow === "col" ? world.x : world.y) - g.startWorld;
+      if (!drag.moved && Math.abs(dist) * s.camera.scale < 4) return;
+      drag.moved = true;
+      chartGrowRef.current = { id: g.id, grow: g.grow, offset: dist, delta: chartGrowDelta(dist, g.pitch, g.current) };
+      schedule();
+      return;
+    }
+
     if (drag.imgResizing) {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
@@ -997,6 +1089,9 @@ export function CanvasView(): JSX.Element {
         return !!r && Math.abs(w.x - r.x - r.w) < 12 / s0.camera.scale && Math.abs(w.y - r.y - r.h) < 12 / s0.camera.scale;
       });
       setResizeHover(!!rh || canvasCorner);
+      const onRelHandle = !!renderer && (!!renderer.hitTestConnectHandle(rs, w.x, w.y) || !!renderer.hitTestRelEnd(rs, w.x, w.y));
+      const slider = renderer?.hitTestChartGrow(rs, w.x, w.y) ?? null;
+      setHandleCursor(onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null);
       setImgResizeHover(!!ih);
       store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
     }
@@ -1060,6 +1155,42 @@ export function CanvasView(): JSX.Element {
   const onPointerUp = (e: RPointerEvent): void => {
     if (e.pointerType === "touch") return touchRef.current.up(e.pointerId);
     const drag = dragRef.current;
+    if (drag.connect) {
+      const c = drag.connect;
+      const draft = relDraftRef.current;
+      drag.connect = null;
+      relDraftRef.current = null;
+      if (drag.moved && draft?.target) {
+        if (c.kind === "new") {
+          const id = store.createRelationship(c.fromId, draft.target, {
+            fromAnchor: c.fromAnchor,
+            toAnchor: draft.rel.toAnchor,
+            ...NEW_ARROW,
+          });
+          if (id) store.selectRelationship(id);
+        } else {
+          store.reconnectRelationship(c.relId, c.end, draft.target, c.end === "to" ? draft.rel.toAnchor : draft.rel.fromAnchor);
+        }
+      } else if (drag.moved) {
+        trace.ignored("pointerup:connect", "released on no topic", { kind: c.kind });
+      }
+      drag.moved = false;
+      schedule();
+      return;
+    }
+    if (drag.chartGrow) {
+      const g = drag.chartGrow;
+      const live = chartGrowRef.current;
+      drag.chartGrow = null;
+      chartGrowRef.current = null;
+      // A click without a drag keeps the old "+": one more.
+      const delta = drag.moved ? (live?.delta ?? 0) : 1;
+      if (delta !== 0) store.resizeChart(g.id, g.grow === "row" ? delta : 0, g.grow === "col" ? delta : 0);
+      else trace.ignored("pointerup:chart-grow", "slider back where it started", { id: g.id });
+      drag.moved = false;
+      schedule();
+      return;
+    }
     // A plain click on empty canvas (marquee never activated): just reset.
     if (drag.marqueeStartX !== null && !drag.marqueeActive) {
       drag.marqueeStartX = null;
@@ -1387,6 +1518,8 @@ export function CanvasView(): JSX.Element {
       ghostImage: ghostRef.current,
       galleryDrop: galleryDropRef.current,
       marqueeSel: marqueeSelRef.current,
+      relDraft: relDraftRef.current,
+      chartGrow: chartGrowRef.current,
     };
   };
 
@@ -1488,7 +1621,10 @@ export function CanvasView(): JSX.Element {
         className="canvas"
         style={{
           cursor:
-            imgResizeHover || dragRef.current.imgResizing
+            dragRef.current.connect ? "crosshair"
+            : dragRef.current.chartGrow ? (dragRef.current.chartGrow.grow === "col" ? "ew-resize" : "ns-resize")
+            : handleCursor ? handleCursor
+            : imgResizeHover || dragRef.current.imgResizing
               ? "nwse-resize"
               : resizing || resizeHover
                 ? "ew-resize"

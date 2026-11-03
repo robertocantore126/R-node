@@ -227,7 +227,15 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       const { cells } = positionedImageSlots({ x: at.x, y: at.y, w, h }, chart, resolveImage);
       cells.forEach((c, i) => {
         const note = chartSlotNote(sheet, chart.id, i);
-        if (note) positions.set(note.id, { x: c.x + c.w + CHART_NOTE_GAP, y: c.y });
+        if (!note) return;
+        const at = { x: c.x + c.w + CHART_NOTE_GAP, y: c.y };
+        positions.set(note.id, at);
+        // Its subtopics branch to the right of it, like any non-root branch.
+        // The note itself stays pinned to the slot whatever its stored
+        // position says, so the column is laid out from `at`.
+        const { w: nw, h: nh } = size(note);
+        if (note.childrenIds.length > 0) placeMindmap(note.id, at.x + nw / 2, at.y + nh / 2, 1);
+        positions.set(note.id, at);
       });
     }
   }
