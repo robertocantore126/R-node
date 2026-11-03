@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../editor/context";
-import type { Group, GroupShape, Relationship, Style, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
+import type { ArrowHead, ConnectorStyle, Group, GroupShape, Relationship, Style, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
+import { relHeads, relWidth } from "../layout/relationship";
 import { BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_SHAPES } from "../core/types";
 import { BorderPicker } from "./BorderPicker";
 import { THEMES } from "../render/theme";
@@ -8,6 +9,7 @@ import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
 import { plainToRuns } from "../core/text";
 import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
+const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
@@ -605,6 +607,7 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
   useEffect(() => setLabel(rel.label ?? ""), [rel.id, rel.label]); // eslint-disable-line react-hooks/exhaustive-deps
   const a = store.doc.node(rel.fromId);
   const b = store.doc.node(rel.toId);
+  const heads = relHeads(rel);
   return (
     <div className="inspector-section">
       <div className="inspector-label">Relationship</div>
@@ -619,10 +622,14 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
         />
       </div>
-      <label className="field">
-        <span>Bidirectional arrows</span>
-        <input type="checkbox" checked={!!rel.bidirectional} onChange={(e) => store.setRelationship(rel.id, { bidirectional: e.target.checked })} />
-      </label>
+      <div className="field">
+        <span>Line</span>
+        <select value={rel.connector ?? "curved"} onChange={(e) => store.setRelationship(rel.id, { connector: e.target.value as ConnectorStyle })}>
+          <option value="curved">curved</option>
+          <option value="straight">straight</option>
+          <option value="elbow">elbow</option>
+        </select>
+      </div>
       <div className="field">
         <span>Line style</span>
         <select value={rel.lineStyle ?? "dashed"} onChange={(e) => store.setRelationship(rel.id, { lineStyle: e.target.value as Relationship["lineStyle"] })}>
@@ -631,6 +638,34 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
           <option value="dotted">dotted</option>
         </select>
       </div>
+      <div className="field">
+        <span>Width</span>
+        <input type="number" min={0.5} max={12} step={0.5} value={relWidth(rel)}
+          onChange={(e) => { const v = Number(e.target.value); if (v > 0) store.setRelationship(rel.id, { width: Math.min(12, v) }); }} />
+      </div>
+      {/* Heads: picking one writes start/endArrow; `bidirectional` stays only
+          as the fallback older documents are read with (relHeads). */}
+      <div className="field">
+        <span>Start</span>
+        <select value={heads.start} onChange={(e) => store.setRelationship(rel.id, { startArrow: e.target.value as ArrowHead, bidirectional: undefined })}>
+          {HEADS.map((h) => <option key={h} value={h}>{h}</option>)}
+        </select>
+      </div>
+      <div className="field">
+        <span>End</span>
+        <select value={heads.end} onChange={(e) => store.setRelationship(rel.id, { endArrow: e.target.value as ArrowHead, startArrow: heads.start, bidirectional: undefined })}>
+          {HEADS.map((h) => <option key={h} value={h}>{h}</option>)}
+        </select>
+      </div>
+      <div className="inspector-actions">
+        <button className="btn small" title="Swap source and target" onClick={() => store.setRelationship(rel.id, {
+          fromId: rel.toId, toId: rel.fromId, fromAnchor: rel.toAnchor, toAnchor: rel.fromAnchor, startArrow: heads.end, endArrow: heads.start, bidirectional: undefined,
+        })}>⇄ Reverse</button>
+        {(rel.fromAnchor || rel.toAnchor) && (
+          <button className="btn small" title="Let both ends float to the nearest side again" onClick={() => store.setRelationship(rel.id, { fromAnchor: undefined, toAnchor: undefined })}>Unpin ends</button>
+        )}
+      </div>
+      <p className="muted">Drag an end of the selected line onto another topic, or onto another side of the same one, to move it.</p>
       <button className="btn small danger" onClick={() => store.deleteSelectedRelationship()}>Delete relationship</button>
     </div>
   );

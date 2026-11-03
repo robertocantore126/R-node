@@ -27,24 +27,19 @@ import { nodeRuns } from "../core/text";
 import { positionedImageSlots } from "../layout/measure";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import {
-  ARROW_HALF_ANGLE,
-  ARROW_LEN,
   CHART_SLOT_ALPHA,
   FONT_STACK,
   GALLERY_CAPTION_LINE_H,
   GALLERY_CAPTION_SIZE,
   LINE_HEIGHT_FACTOR,
   TEXT_INSET,
-  bezierEnterRect,
-  bezierExitRect,
-  bezierSlice,
   captionLines,
   imageResolver,
   measureNode,
   wrapRunLines,
-  type Bezier3,
   type TextMeasurer,
 } from "../layout/measure";
+import { headLen, headShape, relationshipRoute, relHeads, relWidth, type HeadShape } from "../layout/relationship";
 
 export interface SvgExportOptions {
   measurer: TextMeasurer;
@@ -195,52 +190,44 @@ function connector(parent: Placed, child: Placed, sheet: Sheet, color: string): 
   return `<path d="M${n3(sx)},${n3(sy)}C${n3(cp1x)},${n3(sy)} ${n3(cp2x)},${n3(ey)} ${n3(ex)},${n3(ey)}" fill="none" stroke="${esc(color)}" stroke-width="1.7"/>`;
 }
 
-/** One arrowhead, tip at (toX, toY), flaring back toward the curve — the
- *  same geometry the canvas paints (ARROW_LEN / ARROW_HALF_ANGLE are shared
- *  in measure.ts, I9). */
-function arrowHead(fromX: number, fromY: number, toX: number, toY: number, color: string): string {
-  const ang = Math.atan2(toY - fromY, toX - fromX);
-  return (
-    `<polygon points="${n3(toX)},${n3(toY)} ` +
-    `${n3(toX - ARROW_LEN * Math.cos(ang - ARROW_HALF_ANGLE))},${n3(toY - ARROW_LEN * Math.sin(ang - ARROW_HALF_ANGLE))} ` +
-    `${n3(toX - ARROW_LEN * Math.cos(ang + ARROW_HALF_ANGLE))},${n3(toY - ARROW_LEN * Math.sin(ang + ARROW_HALF_ANGLE))}" ` +
-    `fill="${esc(color)}"/>`
-  );
+/** One head — the shape the canvas paints (layout/relationship.ts, I9). */
+function arrowHead(shape: HeadShape | null, color: string, width: number): string {
+  if (!shape) return "";
+  if (shape.kind === "circle") return `<circle cx="${n3(shape.c.x)}" cy="${n3(shape.c.y)}" r="${n3(shape.r)}" fill="${esc(color)}"/>`;
+  const pts = shape.pts.map((p) => `${n3(p.x)},${n3(p.y)}`).join(" ");
+  return shape.fill
+    ? `<polygon points="${pts}" fill="${esc(color)}"/>`
+    : `<polyline points="${pts}" fill="none" stroke="${esc(color)}" stroke-width="${n3(width)}" stroke-linecap="round" stroke-linejoin="round"/>`;
 }
 
 /**
- * A relationship, mirroring the renderer's drawRelationship: the same Bezier,
- * truncated at exactly the two box borders, with arrowheads whose tip sits on
- * the crossing and whose angle is the curve's real tangent there. A head that
- * merely points at the centre would disagree with the line the moment the
- * curve bends; and both exports must compute the same tip or they diverge.
+ * A relationship, mirroring the renderer's drawRelationship: the same route
+ * (layout/relationship.ts — curve cut at the borders, straight, elbow, or
+ * pinned to anchors) and the same heads, tip on the border and angled along
+ * the line's real direction there.
  */
 function relationship(rel: Relationship, byId: Map<string, Placed>, color: string): string {
   const a = byId.get(rel.fromId);
   const b = byId.get(rel.toId);
   if (!a || !b) return "";
-  const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
-  const bx = b.x + b.w / 2, by = b.y + b.h / 2;
-  const curve: Bezier3 = {
-    p0: { x: ax, y: ay },
-    p1: { x: ax + (bx - ax) * 0.35, y: ay },
-    p2: { x: bx - (bx - ax) * 0.35, y: by },
-    p3: { x: bx, y: by },
-  };
-  const t0 = bezierExitRect(curve, a.x, a.y, a.w, a.h);
-  const t1 = bezierEnterRect(curve, b.x, b.y, b.w, b.h);
-  const drawn = t1 - t0 > 1e-6 ? bezierSlice(curve, t0, t1) : curve;
+  const route = relationshipRoute(rel, a, b);
+  const width = relWidth(rel);
   const dash =
     rel.lineStyle === "dashed" ? ` stroke-dasharray="7 5"` : rel.lineStyle === "dotted" ? ` stroke-dasharray="2 4"` : "";
-  const parts = [
-    `<path d="M${n3(drawn.p0.x)},${n3(drawn.p0.y)}C${n3(drawn.p1.x)},${n3(drawn.p1.y)} ${n3(drawn.p2.x)},${n3(drawn.p2.y)} ${n3(drawn.p3.x)},${n3(drawn.p3.y)}" fill="none" stroke="${esc(color)}" stroke-width="1.5"${dash}/>`,
-  ];
-  parts.push(arrowHead(drawn.p2.x, drawn.p2.y, drawn.p3.x, drawn.p3.y, color));
-  if (rel.bidirectional) {
-    parts.push(arrowHead(drawn.p1.x, drawn.p1.y, drawn.p0.x, drawn.p0.y, color));
+  let d: string;
+  if (route.path.kind === "curve") {
+    const c = route.path.b;
+    d = `M${n3(c.p0.x)},${n3(c.p0.y)}C${n3(c.p1.x)},${n3(c.p1.y)} ${n3(c.p2.x)},${n3(c.p2.y)} ${n3(c.p3.x)},${n3(c.p3.y)}`;
+  } else {
+    d = route.path.pts.map((p, i) => `${i ? "L" : "M"}${n3(p.x)},${n3(p.y)}`).join("");
   }
+  const parts = [`<path d="${d}" fill="none" stroke="${esc(color)}" stroke-width="${n3(width)}" stroke-linejoin="round"${dash}/>`];
+  const heads = relHeads(rel);
+  const len = headLen(width);
+  parts.push(arrowHead(headShape(heads.end, route.end.from, route.end.tip, len), color, width));
+  parts.push(arrowHead(headShape(heads.start, route.start.from, route.start.tip, len), color, width));
   if (rel.label) {
-    const mx = (ax + bx) / 2, my = (ay + by) / 2;
+    const mx = route.mid.x, my = route.mid.y;
     // Width is estimated (the canvas measures it); close enough for a chip.
     const w = rel.label.length * 7 + 10;
     parts.push(`<rect x="${n3(mx - w / 2)}" y="${n3(my - 10)}" width="${n3(w)}" height="20" fill="#ffffff"/>`);
