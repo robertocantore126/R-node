@@ -8,6 +8,9 @@ export const AI_EXPAND_PROMPT = `Expand the mind-map branch in the outline above
 
 Rules:
 - The first line of the outline is the root topic; indentation shows children.
+- Lines starting with (note), (labels), (cell N), (picture N), (chart note),
+  (arrow ...), (group) or (summary) are NOT topics: they describe the topic
+  above them. Use them as context only - never output them as topics.
 - Write in the SAME language as the outline.
 - Keep every existing topic, with its text EXACTLY as written, in its place.
 - Add new subtopics where they help: deeper detail, missing aspects, examples.

@@ -18,6 +18,7 @@ import { guessCodeLang } from "../core/codeHighlight";
 import type { ShapeTemplate } from "./shapeLibrary";
 import { addRecentColor } from "./recentColors";
 import { quizClipText } from "./quizPrompts";
+import { studyOutline } from "../core/studyOutline";
 import { flashcardsClipText } from "./flashcardPrompts";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
@@ -4398,7 +4399,7 @@ export class EditorStore {
   async copyFlashcardsPrompt(nodeId: string): Promise<void> {
     if (!this.model.node(nodeId)) return;
     this.commitEdit();
-    const text = flashcardsClipText(this.outlineText([nodeId]));
+    const text = flashcardsClipText(studyOutline(this.sheet, [nodeId], "plain"));
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -4428,7 +4429,7 @@ export class EditorStore {
   async copyAiExpandPrompt(nodeId: string): Promise<void> {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const text = aiExpandClipText(this.outlineText([nodeId]));
+    const text = aiExpandClipText(studyOutline(this.sheet, [nodeId], "ai"));
     try {
       await navigator.clipboard.writeText(text);
     } catch {
