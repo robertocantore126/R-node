@@ -12,7 +12,7 @@ import { useStore } from "../editor/context";
  */
 export function SearchBar(): JSX.Element | null {
   const store = useStore();
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {

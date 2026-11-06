@@ -23,7 +23,7 @@ export function Outliner(): JSX.Element {
 
 function OutlinerRow({ node, depth }: { node: MindNode; depth: number }): JSX.Element {
   const store = useStore();
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
   const [text, setText] = useState(node.title);
   const selected = state.selection.includes(node.id);
   const hasChildren = node.childrenIds.length > 0;

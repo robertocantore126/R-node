@@ -40,7 +40,7 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
   const store = useStore();
   // The quiz strip lives in this menu and changes while it is open (each "+"
   // appends a quiz), so the menu must re-render on store changes.
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
   const [recent, setRecent] = useState<string[]>(() => getRecentColors());
   const [pos, setPos] = useState({ x: menu.x, y: menu.y });
   const [outlineOpen, setOutlineOpen] = useState(false);
