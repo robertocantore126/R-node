@@ -149,3 +149,37 @@ export function parseQuiz(text: string): QuizSeed | null {
   }
   return normalizeQuiz(raw);
 }
+
+/**
+ * Candidate queries for the quiz's "Find in map" button, as tiers for
+ * `EditorStore.searchBest` (first tier with a match wins, fewest matches inside
+ * it). Plain substring search, nothing smarter:
+ *   1. the correct answer as a whole (only once answered — no spoilers);
+ *   2. "technical" words: acronyms, CamelCase, digits, capitalised words that
+ *      do not start the sentence (RDS, Multi-AZ, DynamoDB, S3, Aurora);
+ *   3. any other word of 6+ letters (failover, standby, endpoint).
+ * The question's words come before the answer's in each tier.
+ */
+export function quizSearchTiers(question: QuizQuestion, answered: boolean): string[][] {
+  const texts = [question.q];
+  const answer = question.answers[question.correct] ?? "";
+  if (answered && answer) texts.push(answer);
+  const technical: string[] = [];
+  const plain: string[] = [];
+  const seen = new Set<string>();
+  for (const text of texts) {
+    const words = text.replace(/['’`]/g, " ").match(/[\p{L}\p{N}](?:[\p{L}\p{N}.\-/]*[\p{L}\p{N}])?/gu) ?? [];
+    words.forEach((w, i) => {
+      const key = w.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      const capsInside = /\p{Lu}/u.test(w.slice(1));
+      const digit = /\p{N}/u.test(w);
+      const capitalised = i > 0 && /^\p{Lu}/u.test(w);
+      if (w.length >= 2 && (capsInside || digit || capitalised)) technical.push(w);
+      else if (w.length >= 6) plain.push(w);
+    });
+  }
+  const whole = answered && answer.trim() ? [answer.trim()] : [];
+  return [whole, technical, plain];
+}

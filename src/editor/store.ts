@@ -5053,7 +5053,18 @@ export class EditorStore {
     if (!node) return;
     const m = measureNode(node, this.measurer);
     this.state.camera = centerOn(this.state.camera, node.position.x + m.w / 2, node.position.y + m.h / 2);
+    if (this.centerOffset.dx || this.centerOffset.dy) {
+      this.state.camera = panBy(this.state.camera, this.centerOffset.dx, this.centerOffset.dy);
+    }
     this.notify();
+  }
+
+  /** Screen-px shift applied when a node is centred, so it lands beside a
+   *  floating window (the quiz) instead of under it. 0,0 = true centre. */
+  private centerOffset = { dx: 0, dy: 0 };
+
+  setCenterOffset(dx: number, dy: number): void {
+    this.centerOffset = { dx, dy };
   }
 
   zoomStep(factor: number, vw: number, vh: number): void {
@@ -5196,16 +5207,45 @@ export class EditorStore {
     if (ops.length) this.execOps(ops);
   }
 
+  /** Ids whose title or notes contain `q` (case-insensitive) — the same test
+   *  the search bar runs, without touching the search state. */
+  searchMatches(q: string): string[] {
+    const query = q.trim().toLowerCase();
+    if (!query) return [];
+    return this.searchableNodeIds().filter((id) => {
+      const n = this.model.node(id);
+      return !!n && (n.title.toLowerCase().includes(query) || n.notes.toLowerCase().includes(query));
+    });
+  }
+
+  /**
+   * Open the search bar on the best of some candidate queries, given as tiers
+   * from most to least preferred: the first tier with any match wins, and
+   * within it the candidate with the fewest matches (the most specific), the
+   * earlier one on a tie. With nothing matching, the first candidate is typed
+   * in anyway so the user can edit it. Plain search — the quiz's "Find in map"
+   * uses it; returns the query it chose.
+   */
+  searchBest(tiers: string[][]): string {
+    let best: string | null = null;
+    for (const tier of tiers) {
+      let bestCount = Infinity;
+      for (const c of tier) {
+        const n = this.searchMatches(c).length;
+        if (n > 0 && n < bestCount) { best = c; bestCount = n; }
+      }
+      if (best !== null) break;
+    }
+    best ??= tiers.find((t) => t.length > 0)?.[0] ?? "";
+    this.state.searchOpen = true;
+    this.setSearch(best);
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("r-node:focus-map-search"));
+    return best;
+  }
+
   setSearch(q: string): void {
     this.state.search = q;
-    const query = q.trim().toLowerCase();
-    let results: string[] = [];
-    if (query) {
-      results = this.searchableNodeIds().filter((id) => {
-        const n = this.model.node(id);
-        return !!n && (n.title.toLowerCase().includes(query) || n.notes.toLowerCase().includes(query));
-      });
-    }
+    const results = this.searchMatches(q);
     this.state.searchResults = results;
     this.state.searchIndex = 0;
     this.notify();
@@ -5237,7 +5277,7 @@ export class EditorStore {
   }
 
   // -------------------------------------------------------------------------
-  // Quiz (opens a modal window; the quiz itself is never drawn)
+  // Quiz (opens a floating, non-modal window; the quiz itself is never drawn)
   // -------------------------------------------------------------------------
 
   openQuiz(nodeId: string, quizId: string): void {

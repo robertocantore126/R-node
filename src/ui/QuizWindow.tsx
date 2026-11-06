@@ -1,6 +1,9 @@
 /**
- * The quiz window — a modal over the app, opened from a topic's right-click
- * menu ("Start quiz"). It is DOM chrome, not canvas: the single-<canvas>
+ * The quiz window — a floating, draggable, NON-modal window over the app
+ * (the map stays usable behind it, so the notes for a question can be looked
+ * up mid-quiz), opened from a topic's right-click menu ("Start quiz").
+ * "Find in map" runs the plain map search on the question's words (and the
+ * answer's, once answered) — see `quizSearchTiers`. It is DOM chrome, not canvas: the single-<canvas>
  * invariant (I1) governs the map, and a quiz is not part of the map.
  *
  * One question at a time, immediate right/wrong feedback, then a final score.
@@ -11,9 +14,48 @@
  * (`studyProgress`); "Question 1" starts the run over.
  */
 import { useEffect, useRef, useState } from "react";
-import { useSyncExternalStore } from "react";
+import { useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { clearStudyProgress, loadStudyProgress, saveStudyProgress, validQuizProgress } from "./studyProgress";
+import { quizSearchTiers } from "../core/quiz";
+
+let lastPos: { x: number; y: number } | null = null;
+
+/** Keep at least the head on screen so the window can always be grabbed back. */
+function clampPos(x: number, y: number, win: HTMLElement): { x: number; y: number } {
+  const w = win.offsetWidth;
+  const keep = 80;
+  return {
+    x: Math.min(Math.max(x, keep - w), window.innerWidth - keep),
+    y: Math.min(Math.max(y, 0), window.innerHeight - 44),
+  };
+}
+
+/**
+ * Shift (screen px from the canvas centre) that puts a centred node in the
+ * widest free strip beside the window — left/right first, above/below when
+ * the sides are too narrow. 0,0 when the window does not cover the centre.
+ */
+export function centerOffsetBeside(canvas: DOMRect, win: DOMRect): { dx: number; dy: number } {
+  const cx = (canvas.left + canvas.right) / 2;
+  const cy = (canvas.top + canvas.bottom) / 2;
+  const margin = 60;
+  const covers = win.left - margin < cx && win.right + margin > cx && win.top - margin < cy && win.bottom + margin > cy;
+  if (!covers) return { dx: 0, dy: 0 };
+  const left = win.left - canvas.left;
+  const right = canvas.right - win.right;
+  const top = win.top - canvas.top;
+  const bottom = canvas.bottom - win.bottom;
+  if (Math.max(left, right) >= 160) {
+    const mid = left >= right ? canvas.left + left / 2 : win.right + right / 2;
+    return { dx: mid - cx, dy: 0 };
+  }
+  if (Math.max(top, bottom) >= 80) {
+    const mid = top >= bottom ? canvas.top + top / 2 : win.bottom + bottom / 2;
+    return { dx: 0, dy: mid - cy };
+  }
+  return { dx: 0, dy: 0 };
+}
 
 export function QuizWindow(): JSX.Element | null {
   const store = useStore();
@@ -32,10 +74,45 @@ export function QuizWindow(): JSX.Element | null {
   const [done, setDone] = useState(false);
   const submitted = useRef(false);
 
-  // Escape closes the window (capture so it beats the map's own Escape).
+  // Where the window sits (null = centred by CSS until first dragged). Kept in
+  // the module so the next quiz opens where the user left the last one.
+  const [pos, setPosState] = useState<{ x: number; y: number } | null>(lastPos);
+  const setPos = (p: { x: number; y: number }): void => {
+    lastPos = p;
+    setPosState(p);
+  };
+  const winRef = useRef<HTMLDivElement>(null);
+
+  // A remembered spot may be off-screen after a window resize: pull it back.
+  useEffect(() => {
+    const fit = (): void => {
+      if (lastPos && winRef.current) setPos(clampPos(lastPos.x, lastPos.y, winRef.current));
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, []);
+
+  // Search jumps centre the match on the map — aim them at the free part of
+  // the canvas, not under this window. Cheap, so re-measured on every render.
+  useEffect(() => {
+    const win = winRef.current;
+    const canvas = document.querySelector(".canvas-area");
+    if (win && canvas) {
+      const o = centerOffsetBeside(canvas.getBoundingClientRect(), win.getBoundingClientRect());
+      store.setCenterOffset(o.dx, o.dy);
+    }
+  });
+  useEffect(() => () => store.setCenterOffset(0, 0), [store]);
+
+  // The window is not modal: the map stays live behind it. Escape closes it
+  // only while focus is inside it, so the map's and the search bar's own
+  // Escape keep working.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
+      if (e.key !== "Escape") return;
+      const target = e.target as Node | null;
+      if (target && winRef.current?.contains(target)) {
         e.preventDefault();
         store.closeQuiz();
       }
@@ -70,6 +147,7 @@ export function QuizWindow(): JSX.Element | null {
   const answer = (choice: number): void => {
     if (answered) return;
     setPicked(choice);
+    winRef.current?.focus(); // the button is about to be disabled and drop focus; keep Escape working
     setResults((r) => [...r, choice]);
   };
   const next = (): void => {
@@ -90,15 +168,46 @@ export function QuizWindow(): JSX.Element | null {
   const pct = questions.length > 0 ? Math.round((correctCount / questions.length) * 100) : 0;
   const score = quiz.score;
 
+  const onHeadPointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+    const win = winRef.current;
+    if (!win) return;
+    e.preventDefault();
+    const rect = win.getBoundingClientRect();
+    const dx = e.clientX - rect.left;
+    const dy = e.clientY - rect.top;
+    const head = e.currentTarget;
+    head.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent): void => setPos(clampPos(ev.clientX - dx, ev.clientY - dy, win));
+    const up = (): void => {
+      head.removeEventListener("pointermove", move);
+      head.removeEventListener("pointerup", up);
+      head.removeEventListener("pointercancel", up);
+    };
+    head.addEventListener("pointermove", move);
+    head.addEventListener("pointerup", up);
+    head.addEventListener("pointercancel", up);
+  };
+
+  const findInMap = (): void => {
+    store.searchBest(quizSearchTiers(q, answered));
+  };
+
   return (
-    <div
-      className="quiz-overlay"
-      onPointerDown={(e) => {
-        if (e.target === e.currentTarget) store.closeQuiz();
-      }}
-    >
-      <div className="quiz-window" role="dialog" aria-modal="true" aria-label={quiz.name ?? node.title}>
-        <div className="quiz-head">
+    <div className={`quiz-float${pos ? " placed" : ""}`} style={pos ? { left: pos.x, top: pos.y } : undefined}>
+      <div
+        ref={winRef}
+        className="quiz-window"
+        role="dialog"
+        aria-modal="false"
+        aria-label={quiz.name ?? node.title}
+        tabIndex={-1}
+        onPointerDown={(e) => {
+          // A click on the window body focuses it, so Escape closes the quiz.
+          if (!(e.target as HTMLElement).closest("button, input, textarea")) e.currentTarget.focus();
+        }}
+      >
+        <div className="quiz-head" onPointerDown={onHeadPointerDown} title="Drag to move">
           <span className="quiz-title">{quiz.name ?? node.title ?? "Quiz"}</span>
           <span className="quiz-progress">
             {done ? "Result" : `Question ${index + 1} / ${questions.length}`}
@@ -132,6 +241,15 @@ export function QuizWindow(): JSX.Element | null {
             </div>
             {answered && q.explain && <p className="quiz-explain">{q.explain}</p>}
             <div className="quiz-actions">
+              <button
+                className="btn quiz-find"
+                title={answered
+                  ? "Search the map for the answer (plain search on the answer's words)"
+                  : "Search the map for this question's topic (plain search, the answer is not used until you answer)"}
+                onClick={findInMap}
+              >
+                ⌕ Find in map
+              </button>
               {answered && (
                 <button className="btn primary" onClick={next}>
                   {isLast ? "See result" : "Next"}

@@ -1743,6 +1743,41 @@ textarea:focus {
   overflow: hidden;
 }
 
+/* The quiz floats over a live map (no backdrop): centred until dragged by its
+   head, then placed by inline left/top. The flashcard deck keeps the modal
+   .quiz-overlay above. */
+.quiz-float {
+  position: fixed;
+  z-index: 50;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 32px));
+}
+
+.quiz-float.placed {
+  transform: none;
+}
+
+.quiz-float .quiz-window {
+  width: 100%;
+  max-height: min(640px, calc(100vh - 24px));
+}
+
+.quiz-float .quiz-window:focus {
+  outline: none;
+}
+
+.quiz-float .quiz-head {
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+
+.quiz-actions .quiz-find {
+  margin-right: auto;
+}
+
 .quiz-head {
   display: flex;
   align-items: center;
@@ -2243,6 +2278,23 @@ textarea:focus {
 
   .quiz-overlay {
     padding: 0;
+  }
+
+  /* Phones: no room to float, the quiz fills the screen as before. */
+  .quiz-float,
+  .quiz-float.placed {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100%;
+    transform: none;
+  }
+
+  .quiz-float .quiz-window {
+    max-height: none;
+  }
+
+  .quiz-float .quiz-head {
+    cursor: default;
   }
 
   .quiz-window {
