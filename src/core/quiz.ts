@@ -12,7 +12,7 @@
  * runtime has already fixed the shape by the time this returns non-null.
  */
 import type { QuizInfo, QuizQuestion, Sheet } from "./types";
-import { nodeRuns, runsToPlain } from "./text";
+import { studyBranchIds, studyOutline } from "./studyOutline";
 
 /**
  * A parsed quiz BEFORE it is attached to a topic: the LLM supplies a name and
@@ -57,28 +57,15 @@ function normalizeQuestion(value: unknown): QuizQuestion | null {
 }
 
 /** Direct traversal also works for a selected floating topic or a freeform. */
+/** Topics a quiz on this branch may cite: the subtree plus its charts' slot notes. */
 export function quizBranchIds(sheet: Sheet, rootId: string): Set<string> {
-  const seen = new Set<string>(), stack = [rootId];
-  while (stack.length) {
-    const id = stack.pop()!, node = sheet.nodes[id];
-    if (!node || seen.has(id)) continue;
-    seen.add(id); stack.push(...node.childrenIds.slice().reverse());
-  }
-  return seen;
+  return studyBranchIds(sheet, rootId);
 }
 
+/** The outline "Copy as quiz prompt" sends: topics with ids, plus notes,
+ *  captions, chart notes, arrows, labels, groups — see studyOutline. */
 export function quizTopicOutline(sheet: Sheet, rootId: string): string {
-  const lines: string[] = [], seen = new Set<string>();
-  const stack = [{ id: rootId, depth: 0 }];
-  while (stack.length) {
-    const { id, depth } = stack.pop()!, node = sheet.nodes[id];
-    if (!node || seen.has(id)) continue;
-    seen.add(id);
-    // JSON strings keep newlines and bracket-like text from impersonating another source.
-    lines.push(`${"  ".repeat(depth)}[topic ${JSON.stringify(id)}] ${JSON.stringify(runsToPlain(nodeRuns(node.title,node.titleRuns)))}`);
-    stack.push(...node.childrenIds.slice().reverse().map(id => ({ id, depth: depth + 1 })));
-  }
-  return lines.join("\n");
+  return studyOutline(sheet, [rootId], "quiz");
 }
 
 export function quizHasMistakes(quiz: QuizInfo): boolean {

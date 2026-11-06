@@ -17,6 +17,10 @@ Rules:
   - "definition": the back of the card - its definition or answer, in one to
     three sentences.
 - One idea per card. Do not put the answer in the term.
+- Lines starting with (note), (labels), (cell N), (picture N), (arrow ...),
+  (group) or (summary) are not topics: they are the content of the topic above
+  them (its notes, a chart cell's caption, an arrow and its label, ...). Make
+  cards from that content too.
 - Only use material that is IN the outline; do not invent facts.
 - Reply with the JSON object ONLY - no prose, no markdown fence. Any sentence
   before or after it is a parse error when this is pasted back into R-node.

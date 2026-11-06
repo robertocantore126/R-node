@@ -21,6 +21,10 @@ Rules:
   "sourceNodeIds": an array of the exact topic identifiers whose text supports
   the question. Include at least one, use only identifiers from this outline,
   and choose the most specific topics. Do not use titles as identifiers.
+- Lines tagged [note], [labels], [cell N], [picture N], [arrow ...], [group]
+  or [summary] are NOT topics: they are the content of the topic line above
+  them (its notes, a chart cell's caption, an arrow and its label, ...). Ask
+  about that content too, and cite the topic they belong to.
 - Reply with the JSON object ONLY - no prose, no markdown fence. Any sentence
   before or after it is a parse error when this is pasted back into R-node.
 
