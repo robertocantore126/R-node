@@ -1,6 +1,26 @@
-import type { MindNode, Sheet } from "./types";
+import type { MindNode, Sheet, TopicShape } from "./types";
 export const FREEFORM_HEADER = 36;
 export const FREEFORM_PADDING = 16;
+
+/** The base shapes the double-click picker offers in a canvas (draw.io style). */
+export type FreeformShape = Extract<TopicShape, "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon">;
+export const FREEFORM_SHAPES: { shape: FreeformShape; label: string }[] = [
+  { shape: "rect", label: "Rectangle" },
+  { shape: "rounded", label: "Rounded" },
+  { shape: "capsule", label: "Capsule" },
+  { shape: "circle", label: "Circle" },
+  { shape: "diamond", label: "Diamond" },
+  { shape: "hexagon", label: "Hexagon" },
+];
+/** Starting box of each shape; the user resizes it like any item. */
+export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number }> = {
+  rect: { w: 120, h: 60 },
+  rounded: { w: 120, h: 60 },
+  capsule: { w: 120, h: 48 },
+  circle: { w: 80, h: 80 },
+  diamond: { w: 120, h: 80 },
+  hexagon: { w: 120, h: 70 },
+};
 /** Nearest enclosing canvas, excluding the topic itself. */
 export function freeformOwner(sheet: Sheet, id: string): string | null {
   let parentId = sheet.nodes[id]?.parentId;

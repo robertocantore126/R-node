@@ -1,4 +1,4 @@
-import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING } from "../core/freeform";
+import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, type FreeformShape } from "../core/freeform";
 import { chartNoteIds, chartSlotNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
@@ -2205,17 +2205,32 @@ export class EditorStore {
     this.select(id);
   }
 
-  /** Real document nodes share editing, links, copy, undo and persistence. */
-  createFreeformItem(parentId: string, x?: number, y?: number, text = "", imageId?: string): string | null {
+  /**
+   * Real document nodes share editing, links, copy, undo and persistence.
+   *
+   * `shape` (the double-click picker, draw.io style) makes a box of a fixed
+   * starting size CENTRED on the point, outlined in its branch colour with no
+   * fill, so it reads on the grid in every theme; without it the item is plain
+   * left-aligned text with its top-left at the point, as before.
+   */
+  createFreeformItem(parentId: string, x?: number, y?: number, text = "", imageId?: string, shape?: FreeformShape): string | null {
     const parent = this.model.node(parentId);
     if (!parent?.style.freeform) return null;
     const id = uid("n"), offset = parent.childrenIds.length * 24;
-    const px = Math.max(FREEFORM_PADDING, (x ?? parent.position.x + FREEFORM_PADDING + offset) - parent.position.x);
-    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, (y ?? parent.position.y + FREEFORM_HEADER + FREEFORM_PADDING + offset) - parent.position.y);
+    const size = shape ? FREEFORM_SHAPE_SIZES[shape] : null;
+    const cx = x === undefined || !size ? x : x - size.w / 2;
+    const cy = y === undefined || !size ? y : y - size.h / 2;
+    const px = Math.max(FREEFORM_PADDING, (cx ?? parent.position.x + FREEFORM_PADDING + offset) - parent.position.x);
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, (cy ?? parent.position.y + FREEFORM_HEADER + FREEFORM_PADDING + offset) - parent.position.y);
+    const look: Partial<Style> = imageId
+      ? { image: imageId, imageWidth: 180 }
+      : size && shape
+        ? { shape, width: size.w, height: size.h, borderWidth: 1.5 }
+        : { shape: "none", align: "left" };
     this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
       id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
       title: text, titleRuns: [{ text }],
-      style: { freeformPosition: { x: px, y: py }, ...(imageId ? { image: imageId, imageWidth: 180 } : { shape: "none", align: "left" }) },
+      style: { freeformPosition: { x: px, y: py }, ...look },
       position: { x: parent.position.x + px, y: parent.position.y + py, manual: false },
     })]);
     this.settleLayoutNow();

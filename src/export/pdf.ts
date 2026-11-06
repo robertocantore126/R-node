@@ -729,7 +729,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     for(let y=p.y+FREEFORM_HEADER+Math.max(0,Math.floor(((activePage?.top??p.y)-p.y-FREEFORM_HEADER)/20))*20;y<Math.min(p.y+p.h,activePage ? activePage.top+activePage.height : Infinity);y+=20) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(y))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(y))} l`);
     cmds.push("S","Q");
     plainText(cmds,p.node.title||"Freeform",p.x+14,p.y+FREEFORM_HEADER/2+4.5,13,theme.text,fr,true,p.w-28);
-    if(!p.node.childrenIds.length) plainText(cmds,"Double-click to add text. Drop nodes, text or images here.",p.x+18,p.y+FREEFORM_HEADER+32.5,13,theme.textMuted,fr,false,p.w-36);
+    if(!p.node.childrenIds.length) plainText(cmds,"Double-click to add text or a shape. Drop nodes, text or images here.",p.x+18,p.y+FREEFORM_HEADER+32.5,13,theme.textMuted,fr,false,p.w-36);
     ops+=12;
   };
 

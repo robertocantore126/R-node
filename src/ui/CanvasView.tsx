@@ -18,6 +18,7 @@ import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
 import { SHAPE_DRAG_TYPE } from "./ShapeLibrary";
+import { FreeformInsertMenu, type FreeformInsertAt } from "./FreeformInsertMenu";
 import { WEB_ITEM_DRAG_TYPE, type WebItem } from "../editor/webSearch";
 import { listShapes } from "../editor/shapeLibrary";
 import type { ImageSlot, MindNode, RelAnchor, Relationship, Sheet } from "../core/types";
@@ -208,6 +209,9 @@ export function CanvasView(): JSX.Element {
   // Right-click context menu: null = closed, otherwise the wrap-space cursor
   // position and the right-clicked topic (see onContextMenu).
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  /** The double-click picker over a freeform canvas (text or a shape). */
+  const [ffInsert, setFfInsert] = useState<FreeformInsertAt | null>(null);
+  const closeFfInsert = useCallback(() => setFfInsert(null), []);
   // Inline caption field of a gallery / chart cell (double click on a cell):
   // which cell it is editing. A plain <input> over the title band — not the
   // Lexical overlay — so it owns none of the §3 parity contract.
@@ -1297,7 +1301,9 @@ export function CanvasView(): JSX.Element {
     const hit = renderer.hitTest(currentRenderState(), world.x, world.y);
     if (hit) {
       if (store.doc.node(hit)?.style.freeform) {
-        store.createFreeformItem(hit, world.x, world.y);
+        // Empty part of a canvas: offer text or a shape, draw.io style.
+        trace.applied("dblclick:freeform-insert", { id: hit });
+        setFfInsert({ parentId: hit, world, screen: { x, y } });
         return;
       }
       // A code topic is read-only (T22) and a gallery topic's body is
@@ -1894,6 +1900,7 @@ export function CanvasView(): JSX.Element {
           colors={editColors}
         />
       )}
+      {ffInsert && <FreeformInsertMenu at={ffInsert} bounds={sizeRef.current} onClose={closeFfInsert} />}
       {ctxMenu && <NodeContextMenu key={`${ctxMenu.nodeId}:${ctxMenu.cell ?? ""}`} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
       {captionField}
     </div>
