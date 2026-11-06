@@ -66,7 +66,9 @@ export function createCanvasTextMeasurer(): TextMeasurer {
       if (hit !== undefined) return { width: hit };
       ctx.font = fontOf(s);
       const width = ctx.measureText(text).width;
-      if (cache.size > 20_000) cache.clear();
+      // 200k, not 20k: one width per distinct line, and a 20k cap cleared itself
+      // several times per layout of a 20k+ topic map (each entry is one number).
+      if (cache.size > 200_000) cache.clear();
       cache.set(key, width);
       return { width };
     },
@@ -1303,6 +1305,21 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
 const extentCaches = new WeakMap<TextMeasurer, Map<string, Extent>>();
 const EXTENT_CACHE_MAX = 20_000;
 
+/**
+ * The FIRST tier: each node's last key and extent, held by the node object
+ * itself (a WeakMap, so it has no cap and dies with the node).
+ *
+ * Why the capped map above is not enough on its own: the layout visits every
+ * node in the same order on every run, and a FIFO cap smaller than the map
+ * evicts each entry just before it is needed again — at 21,000 topics the hit
+ * rate fell to zero, a no-change layout went from 61 to 291 ms (800+ ms in the
+ * app) and every pan frame re-measured the whole sheet. A slot per node cannot
+ * thrash: the cost is one entry per live node, whatever the map's size. The
+ * content-keyed map stays behind it for nodes whose object is new (undo,
+ * paste, a reloaded document) but whose content was measured before.
+ */
+const nodeExtents = new WeakMap<TextMeasurer, WeakMap<MindNode, { key: string; extent: Extent }>>();
+
 export function measureTopic(
   n: MindNode,
   measurer: TextMeasurer = HEURISTIC_MEASURER,
@@ -1310,19 +1327,28 @@ export function measureTopic(
 ): Extent {
   const slots = slotSizes(n, resolveImage);
   const key = extentKey(n, slots);
+  let perNode = nodeExtents.get(measurer);
+  if (!perNode) {
+    perNode = new WeakMap();
+    nodeExtents.set(measurer, perNode);
+  }
+  const own = perNode.get(n);
+  if (own && own.key === key) return own.extent;
   let cache = extentCaches.get(measurer);
   if (!cache) {
     cache = new Map();
     extentCaches.set(measurer, cache);
   }
-  const hit = cache.get(key);
-  if (hit) return hit;
-  const out = measureTopicUncached(n, measurer, resolveImage, slots);
-  if (cache.size >= EXTENT_CACHE_MAX) {
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
+  let out = cache.get(key);
+  if (!out) {
+    out = measureTopicUncached(n, measurer, resolveImage, slots);
+    if (cache.size >= EXTENT_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(key, out);
   }
-  cache.set(key, out);
+  perNode.set(n, { key, extent: out });
   return out;
 }
 

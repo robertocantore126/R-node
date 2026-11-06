@@ -14,7 +14,7 @@ interface PaletteItem {
 
 export function Palette(): JSX.Element | null {
   const store = useStore();
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);

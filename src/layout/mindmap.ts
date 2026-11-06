@@ -455,24 +455,34 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
 
       for (const group of groups) {
         for (let pass = 0; pass < group.length * 3; pass++) {
-          group.sort((a, b) => branchBounds(a.id).minY - branchBounds(b.id).minY);
+          // branchBounds walks a whole branch. It used to run inside the sort
+          // comparator (k·log k walks per pass) and twice per neighbour pair;
+          // now each branch is walked once to sort and once per pair, and
+          // again only after it moved. Same results: a branch's bounds depend
+          // on its own subtree alone, and shifting one branch leaves every
+          // other branch's bounds as they were.
+          const bounds = new Map(group.map((m) => [m.id, branchBounds(m.id)]));
+          group.sort((a, b) => bounds.get(a.id)!.minY - bounds.get(b.id)!.minY);
           let changed = false;
+          let previousBounds = bounds.get(group[0].id)!;
           for (let i = 1; i < group.length; i++) {
             const previous = group[i - 1];
             const current = group[i];
-            const previousBounds = branchBounds(previous.id);
-            const currentBounds = branchBounds(current.id);
+            let currentBounds = bounds.get(current.id)!;
             const overlap = previousBounds.maxY + gap - currentBounds.minY;
-            if (overlap <= 0) continue;
-            const currentCenter = (currentBounds.minY + currentBounds.maxY) / 2;
-            if (isAuto(current.id)) {
-              shiftAutoSubtree(current.id, currentCenter < parentCenterY ? -overlap : overlap);
-              changed = true;
-            } else if (isAuto(previous.id)) {
-              const previousCenter = (previousBounds.minY + previousBounds.maxY) / 2;
-              shiftAutoSubtree(previous.id, previousCenter < parentCenterY ? -overlap : overlap);
-              changed = true;
+            if (overlap > 0) {
+              const currentCenter = (currentBounds.minY + currentBounds.maxY) / 2;
+              if (isAuto(current.id)) {
+                shiftAutoSubtree(current.id, currentCenter < parentCenterY ? -overlap : overlap);
+                currentBounds = branchBounds(current.id);
+                changed = true;
+              } else if (isAuto(previous.id)) {
+                const previousCenter = (previousBounds.minY + previousBounds.maxY) / 2;
+                shiftAutoSubtree(previous.id, previousCenter < parentCenterY ? -overlap : overlap);
+                changed = true;
+              }
             }
+            previousBounds = currentBounds;
           }
           if (!changed) break;
         }

@@ -17,7 +17,7 @@ import { FlashcardWindow } from "./ui/FlashcardWindow";
 
 export function App(): JSX.Element {
   const store = useStore();
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
 
   useEffect(() => {
     document.documentElement.dataset.theme = state.theme;

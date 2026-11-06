@@ -351,6 +351,7 @@ export class EditorStore {
     this.model = new DocumentModel(DocumentModel.sample());
     this.state = this.makeState();
     this.snap = this.state;
+    this.uiSnap = this.state;
     this.normalizeBranchColors(this.model.sheet);
     this.dropGroupPlaceholders(this.model.sheet);
   }
@@ -365,6 +366,19 @@ export class EditorStore {
   };
 
   getSnapshot = (): EditorState => this.snap;
+
+  /**
+   * The snapshot for the app CHROME (App and everything it renders): the same
+   * as `getSnapshot`, except that pure view moves — pan, zoom, hover — do not
+   * give it a new identity. Those used to re-render the whole React tree on
+   * every wheel step (5–10 ms at 5k topics) for nothing: only the canvas, the
+   * zoom readouts and the overlays that subscribe with `getSnapshot` follow
+   * the camera. Children such as the Inspector read `getSnapshot()` during
+   * render without subscribing and rely on App re-rendering — still true for
+   * every notify() that is not a view move.
+   */
+  getUiSnapshot = (): EditorState => this.uiSnap;
+  private uiSnap!: EditorState;
 
   get doc(): DocumentModel {
     return this.model;
@@ -448,6 +462,18 @@ export class EditorStore {
       structureType: d.sheets[0].structure.structureType,
     };
     this.snap = { ...this.state, selection: [...this.state.selection], searchResults: [...this.state.searchResults] };
+    this.uiSnap = this.snap;
+    for (const l of this.listeners) l();
+  }
+
+  /**
+   * notify() for a change that moves the VIEW only (camera, hover): no box
+   * moved, so the revision stays put — the renderer's placement cache is keyed
+   * on it, and bumping it on every pan step re-placed (and re-measured) the
+   * whole sheet per frame — and the chrome snapshot keeps its identity.
+   */
+  private notifyView(): void {
+    this.snap = { ...this.snap, camera: this.state.camera, hoverId: this.state.hoverId };
     for (const l of this.listeners) l();
   }
 
@@ -2631,7 +2657,7 @@ export class EditorStore {
   setHover(id: string | null): void {
     if (this.state.hoverId === id) return;
     this.state.hoverId = id;
-    this.notify();
+    this.notifyView();
   }
 
   /** Reparenting hands the topic back to the automatic layout engine. */
@@ -5014,12 +5040,12 @@ export class EditorStore {
 
   zoomAt(sx: number, sy: number, factor: number, vw: number, vh: number): void {
     this.state.camera = zoomAt(this.state.camera, vw, vh, sx, sy, factor);
-    this.notify();
+    this.notifyView();
   }
 
   panBy(dx: number, dy: number): void {
     this.state.camera = panBy(this.state.camera, dx, dy);
-    this.notify();
+    this.notifyView();
   }
 
   fitView(vw: number, vh: number): void {

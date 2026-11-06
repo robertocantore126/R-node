@@ -26,7 +26,7 @@ const RATINGS: { rating: FlashcardRating; label: string; key: string }[] = [
 
 export function FlashcardWindow(): JSX.Element | null {
   const store = useStore();
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
   const nodeId = state.flashcardsOpen?.nodeId ?? null;
   const deckId = state.flashcardsOpen?.deckId ?? null;
   const node = nodeId ? store.doc.node(nodeId) : null;

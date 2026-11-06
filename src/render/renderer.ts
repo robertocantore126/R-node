@@ -229,16 +229,53 @@ export class Renderer {
    */
   private placedCache: {
     key: string;
+    sheet: Sheet;
     value: Placed[];
+    /** The same placements by id — kept with them so it is one Map per
+     *  placement, not one per frame (groupGeometry caches on its identity). */
+    byId: Map<string, Placed>;
+    /** Camera + viewport the `visible` flags were computed for. */
+    viewKey: string;
     resolveImage: (id: string) => { w: number; h: number } | null;
   } | null = null;
 
+  /**
+   * What the BOXES depend on. The camera is deliberately absent: it used to be
+   * in this key, so every pan frame re-walked and re-measured the whole sheet
+   * (10–18 ms at 5k topics with one node on screen, 400+ ms past 20k). A pan
+   * changes only which boxes are visible — `viewKey` — and that is refreshed
+   * in place by `refreshVisibility`. The open chart note follows the
+   * selection, not the revision.
+   */
   private placementKey(state: RenderState): string | null {
     if (state.rev === undefined) return null; // caller opted out
-    // Visibility depends on the camera, so it belongs in the key alongside the
-    // revision: a pan changes which nodes are visible without changing any box.
-    // The open chart note follows the selection, not the revision.
-    return `${state.rev}|${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}|${state.showHidden === true ? 1 : 0}|${this.openNote(state) ?? ""}`;
+    return `${state.rev}|${state.showHidden === true ? 1 : 0}|${this.openNote(state) ?? ""}`;
+  }
+
+  private viewKey(state: RenderState): string {
+    return `${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}`;
+  }
+
+  /** Recompute `visible` on cached placements for the current camera. Same
+   *  test and 40px margin as computePlacement; no measuring, no allocation. */
+  private refreshVisibility(state: RenderState, placed: Placed[]): void {
+    const { camera } = state;
+    const vw = state.viewW / camera.scale;
+    const vh = state.viewH / camera.scale;
+    const minX = camera.x - vw / 2 - 40, maxX = camera.x + vw / 2 + 40;
+    const minY = camera.y - vh / 2 - 40, maxY = camera.y + vh / 2 + 40;
+    const all = state.showHidden === true;
+    for (const p of placed) {
+      p.visible = all || (p.x + p.w >= minX && p.x <= maxX && p.y + p.h >= minY && p.y <= maxY);
+    }
+  }
+
+  /** Placements by id for this turn (cached with the placement). */
+  private placedById(state: RenderState): Map<string, Placed> {
+    const placed = this.placedNodes(state);
+    const c = this.placedCache;
+    if (c && c.value === placed) return c.byId;
+    return new Map(placed.map((p) => [p.node.id, p]));
   }
 
   /** The chart note on screen. None while a picture is aimed at a chart (a
@@ -254,18 +291,31 @@ export class Renderer {
 
   private placedNodes(state: RenderState): Placed[] {
     const key = this.placementKey(state);
-    if (key !== null && this.placedCache?.key === key) {
+    const c = this.placedCache;
+    if (key !== null && c?.key === key && c.sheet === state.sheet) {
       // resolveImage is per-sheet state that callers read AFTER placing (every
       // image rect comes from it), so a cache hit has to restore it — but from
       // the entry, not by rebuilding: it walks every attachment, and rebuilding
       // it here would put an O(attachments) pass back on the path this cache
       // exists to empty.
-      this.resolveImage = this.placedCache.resolveImage;
-      return this.placedCache.value;
+      this.resolveImage = c.resolveImage;
+      const vk = this.viewKey(state);
+      if (c.viewKey !== vk) {
+        this.refreshVisibility(state, c.value);
+        c.viewKey = vk;
+      }
+      return c.value;
     }
     const out = this.computePlacement(state);
     if (key !== null && this.resolveImage) {
-      this.placedCache = { key, value: out, resolveImage: this.resolveImage };
+      this.placedCache = {
+        key,
+        sheet: state.sheet,
+        value: out,
+        byId: new Map(out.map((p) => [p.node.id, p])),
+        viewKey: this.viewKey(state),
+        resolveImage: this.resolveImage,
+      };
     }
     return out;
   }
@@ -354,7 +404,7 @@ export class Renderer {
     // A node counts as "has an image" when ANY of its four slots is set — a
     // node with only side images must keep its decodes like the top one does.
     this.visibleImageNodes = new Set(placed.filter((p) => p.visible && nodeImageIds(p.node).length > 0).map((p) => p.node.id));
-    const byId = new Map(placed.map((p) => [p.node.id, p]));
+    const byId = this.placedById(state);
 
     // Viewport in world units, with the same 40px margin placedNodes uses.
     const vw = state.viewW / s;
@@ -1880,7 +1930,7 @@ export class Renderer {
 
   /** Union rect (padded) of the member topics, in world coords. */
   private membersBounds(state: RenderState, memberIds: string[], byId?: Map<string, Placed>): { x: number; y: number; w: number; h: number } | null {
-    const placed = byId ?? new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const placed = byId ?? this.placedById(state);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     let found = false;
     for (const m of memberIds) {
@@ -2104,7 +2154,7 @@ export class Renderer {
 
   /** Distance from a point to the relationship bezier, in world units. */
   hitTestRelationship(state: RenderState, wx: number, wy: number): string | null {
-    const byId = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const byId = this.placedById(state);
     const threshold = 8 / state.camera.scale;
     let best: string | null = null;
     let bestD = Infinity;
@@ -2168,7 +2218,7 @@ export class Renderer {
    * box wins: a click on a nested group's line means that group.
    */
   hitTestGroup(state: RenderState, wx: number, wy: number): string | null {
-    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const placed = this.placedById(state);
     const geo = groupBoxes(state.sheet, placed);
     const s = state.camera.scale;
     let best: string | null = null;
@@ -2192,7 +2242,7 @@ export class Renderer {
     return best;
   }
   hitTestSummary(state: RenderState, wx: number, wy: number): string | null {
-    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const placed = this.placedById(state);
     for (const sum of state.sheet.summaries) {
       const b = this.membersBounds(state, sum.memberIds, placed);
       if (!b) continue;
@@ -2439,7 +2489,7 @@ export class Renderer {
     // and re-measured every node in the sheet each time, and this runs on
     // pointermove: with a large selection the cost was the selection size
     // times the map size, on every mouse move.
-    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const placed = this.placedById(state);
     for (const id of ids) {
       if (state.editingId === id) continue;
       const p = placed.get(id);
@@ -2591,7 +2641,7 @@ export class Renderer {
   /** The "+ column" / "+ row" pill of a selected chart under the point, or null. */
   hitTestChartGrow(state: RenderState, worldX: number, worldY: number): { id: string; grow: "row" | "col" } | null {
     if (state.selection.size !== 1) return null;
-    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const placed = this.placedById(state);
     for (const id of state.selection) {
       if (state.editingId === id) continue;
       const p = placed.get(id);
@@ -2606,7 +2656,7 @@ export class Renderer {
   hitTestResize(state: RenderState, worldX: number, worldY: number): { id: string; side: "left" | "right" } | null {
     const hs = 12; // grab box slightly larger than the drawn 9px handle
     // Placed once, for the same reason as hitTestImageResize above.
-    const placed = new Map(this.placedNodes(state).map((p) => [p.node.id, p]));
+    const placed = this.placedById(state);
     for (const id of state.selection) {
       if (state.editingId === id) continue;
       const p = placed.get(id);

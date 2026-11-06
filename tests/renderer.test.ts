@@ -225,10 +225,18 @@ describe("placement cache", () => {
     expect(after.find((p) => p.node.id === "a")?.x).toBe(999);
   });
 
-  it("recomputes when the camera moves, since visibility is part of the answer", () => {
+  it("a camera move keeps the boxes but refreshes which are visible", () => {
+    // Re-placing on every pan frame re-measured the whole sheet (400+ ms past
+    // 20k topics). A pan changes visibility only, so the same placements come
+    // back with their `visible` flags recomputed for the new camera.
     const { place, state } = setup();
+    const vis = (p: unknown) => (p as { node: MindNode; visible: boolean }[]).map((x) => x.visible);
     const first = place(state(1));
-    expect(place(state(1, 5000))).not.toBe(first);
+    expect(vis(first)).toEqual([true, true]);
+    const away = place(state(1, 5000));
+    expect(away).toBe(first);
+    expect(vis(away)).toEqual([false, false]);
+    expect(vis(place(state(1)))).toEqual([true, true]);
   });
 
   it("caches nothing when the caller omits the revision", () => {

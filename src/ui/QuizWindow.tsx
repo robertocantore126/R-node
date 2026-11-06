@@ -59,7 +59,7 @@ export function centerOffsetBeside(canvas: DOMRect, win: DOMRect): { dx: number;
 
 export function QuizWindow(): JSX.Element | null {
   const store = useStore();
-  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
   const nodeId = state.quizOpen?.nodeId ?? null;
   const quizId = state.quizOpen?.quizId ?? null;
   const node = nodeId ? store.doc.node(nodeId) : null;
