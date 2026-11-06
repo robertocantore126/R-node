@@ -825,7 +825,7 @@ export class Renderer {
     ctx.fillText(p.node.title || "Freeform", p.x + 14, p.y + FREEFORM_HEADER / 2, p.w - 28);
     if (p.node.childrenIds.length === 0) {
       ctx.fillStyle = theme.textMuted; ctx.font = `13px ${FONT_STACK}`;
-      ctx.fillText("Double-click to add text. Drop nodes, text or images here.", p.x + 18, p.y + FREEFORM_HEADER + 28, p.w - 36);
+      ctx.fillText("Double-click to add text or a shape. Drop nodes, text or images here.", p.x + 18, p.y + FREEFORM_HEADER + 28, p.w - 36);
     }
     ctx.restore();
   }

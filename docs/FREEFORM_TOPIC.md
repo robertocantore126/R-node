@@ -4,7 +4,7 @@ Freeform is merged into `main`. AVIF and clipboard fixes: `fix/freeform-clipboar
 
 Right-click a topic and choose **New freeform topic**, immediately below **New code topic**. This creates a connected 720 x 480 canvas with a grid.
 
-- Double-click an empty part of the canvas to create and edit a text item. The context menu also offers **Add text / node**. Use the usual Inspector to give an item a box/shape, colour and text formatting.
+- Double-click an empty part of the canvas to open a draw.io-style picker: plain text, or a base shape (rectangle, rounded, capsule, circle, diamond, hexagon), then any shape saved in the library. Text appears with its top-left at the point; a shape is centred on it at a starting size, outlined in its branch colour, and opens the editor so you can type its label. Escape or a click elsewhere closes the picker. The context menu also offers **Add text / node**. Use the usual Inspector to give an item a box/shape, colour and text formatting.
 - Drag existing topics into the canvas. Their subtrees and relative geometry are preserved. Drag the items inside to reposition them.
 - Ctrl+C / Ctrl+V copies selected images, side-image slots, gallery cells, individual topics or multiple selected branches. Pasted items remain separate items in their canvas, offset from the source; rich text, sizes, internal links and image references are preserved. Browser clipboard restrictions have a session fallback, and native paste events handle images copied as files.
 - Drop plain text, image files or browser images into the canvas. AVIF is accepted alongside PNG/JPEG/GIF/WebP, including typeless `.avif` files. Images become independent movable items. Existing image attachments can also be dragged into it.
