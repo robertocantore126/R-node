@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { EditorStore } from "./editor/store";
 import { StoreContext } from "./editor/context";
+import { installCloseGuard } from "./editor/closeGuard";
 import { LocalStorageAdapter, TauriStorageAdapter } from "./persist/storage";
 import { generateStressMap, type StressOptions } from "./dev/stress";
 import "./styles.css";
@@ -27,6 +28,7 @@ const store = new EditorStore(adapter);
 };
 
 void store.init().then(() => {
+  installCloseGuard(store);
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <StoreContext.Provider value={store}>

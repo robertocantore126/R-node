@@ -301,6 +301,18 @@ export class EditorStore {
    * first save is a "Save as…".
    */
   private docFilePaths = new Map<string, string>();
+  /**
+   * Unsaved changes, per document. `editRev` counts the changes made to a
+   * document; `savedRev` holds the count a save actually wrote. The two
+   * differ exactly when the document has changes that are not on disk.
+   *
+   * A single "dirty" flag for the whole app was not enough: switching
+   * documents reset it to "saved", so an edited map read as saved once you
+   * came back to it, and an edit made while a save was writing was marked
+   * saved although the write had already taken the older content.
+   */
+  private editRev = new Map<string, number>();
+  private savedRev = new Map<string, number>();
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -620,6 +632,42 @@ export class EditorStore {
   // Op execution
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Unsaved-change tracking (per document)
+  // -------------------------------------------------------------------------
+
+  private revOf(id: string): number {
+    return this.editRev.get(id) ?? 0;
+  }
+
+  private isDocDirty(id: string): boolean {
+    return this.revOf(id) !== (this.savedRev.get(id) ?? 0);
+  }
+
+  /** Record a change to document `id` (default: the active one). */
+  private markDirty(id: string = this.state.activeDocId): void {
+    this.editRev.set(id, this.revOf(id) + 1);
+    this.refreshSync();
+  }
+
+  /** A save wrote document `id` as it was at change count `rev`. Changes
+   *  made after that count stay unsaved. */
+  private markSaved(id: string, rev: number): void {
+    this.savedRev.set(id, rev);
+  }
+
+  /** The status indicator shows the ACTIVE document. */
+  private refreshSync(): void {
+    this.state.sync = this.isDocDirty(this.state.activeDocId) ? "dirty" : "saved";
+  }
+
+  /** Whether any open document has changes that are not on disk — what the
+   *  close guard asks before the window or tab goes away. */
+  hasUnsavedChanges(): boolean {
+    if (this.isDocDirty(this.model.doc.documentId)) return true;
+    return this.state.docs.some((d) => this.isDocDirty(d.documentId));
+  }
+
   /** Apply ops, record them in history, mark dirty, schedule layout. */
   execOps(ops: Op[], opts?: { skipHistory?: boolean }): void {
     if (ops.length === 0) return;
@@ -704,7 +752,7 @@ export class EditorStore {
   private touch(): void {
     this.model.doc.updatedAt = nowIso();
     this.scheduleLayout(false);
-    this.state.sync = "dirty";
+    this.markDirty(this.model.doc.documentId);
     trace.mark("state", "state:sync", { status: "dirty" });
     this.notify();
   }
@@ -807,6 +855,9 @@ export class EditorStore {
   }
 
   private async performSave(): Promise<void> {
+    // Only the save that copies images sets this; a later plain save must not
+    // repeat an earlier Save as's "N images could not be copied".
+    this.lastSaveSkipped = 0;
     try {
       if (this.adapter instanceof TauriStorageAdapter) {
         // Desktop: the document IS a single .rnode file — save writes the
@@ -850,34 +901,40 @@ export class EditorStore {
               }
             }
             this.setOpProgress("Writing document…", 0.9);
-            await this.adapter.save([this.model.doc]);
+            await this.writeActiveDocDesktop();
           }
         } finally {
           this.endLongOp();
         }
-        this.state.sync = "saved";
-        trace.mark("state", "state:sync", { status: "saved", via: this.adapter.label });
+        this.refreshSync();
+        trace.mark("state", "state:sync", { status: this.state.sync, via: this.adapter.label });
         this.toast(
           this.lastSaveSkipped > 0
             ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be copied (missing from the source file)`
-            : "Saved"
+            : this.savedNote()
         );
         return;
       }
+      // Change counts as they are NOW, before anything is serialized: the
+      // adapter takes the documents synchronously, the portable file later.
+      // Anything changed after this point stays unsaved, which can only
+      // over-report — never call an unwritten edit saved.
+      const revs = this.state.docs.map((d) => [d.documentId, this.revOf(d.documentId)] as const);
       await this.adapter.save(this.state.docs);
       // The web saves the same `.rnode` file the desktop does — one SQLite
       // database with the document and its images — so a map moves between
       // the two without an export. `.rnode.json` / `.rnode.zip` stay as
       // explicit exports and are still opened.
       const fileWritten = await this.writePortableRnode();
-      this.state.sync = "saved";
-      trace.mark("state", "state:sync", { status: "saved", via: this.adapter.label });
+      for (const [id, rev] of revs) this.markSaved(id, rev);
+      this.refreshSync();
+      trace.mark("state", "state:sync", { status: this.state.sync, via: this.adapter.label });
       this.toast(
         !fileWritten
           ? "Saved locally (no file chosen)"
           : this.lastSaveSkipped > 0
             ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be written (missing from storage)`
-            : "Saved"
+            : this.savedNote()
       );
     } catch (e) {
       this.state.sync = "dirty";
@@ -891,6 +948,25 @@ export class EditorStore {
         this.toast("Save failed — check storage");
       }
     }
+  }
+
+  /**
+   * Write the active document into the adapter's file and record what was
+   * written. The change count is read right before the call, and the adapter
+   * serializes the document synchronously, before its first await — so the
+   * count matches the bytes on their way to disk. An edit made while the
+   * write is in flight bumps the count past it and stays unsaved.
+   */
+  private async writeActiveDocDesktop(): Promise<void> {
+    const doc = this.model.doc;
+    const rev = this.revOf(doc.documentId);
+    await this.adapter.save([doc]);
+    this.markSaved(doc.documentId, rev);
+  }
+
+  /** The success toast; says so when the map changed while it was saving. */
+  private savedNote(): string {
+    return this.state.sync === "dirty" ? "Saved — changes made during the save are not saved yet" : "Saved";
   }
 
   /**
@@ -950,7 +1026,7 @@ export class EditorStore {
     // The ACTIVE document is saved, not docs[0]: on desktop the sidebar may
     // still carry the never-saved sample, and saving it over the chosen file
     // would corrupt the document on disk.
-    await this.adapter.save([this.model.doc]);
+    await this.writeActiveDocDesktop();
     return true;
   }
 
@@ -1107,7 +1183,8 @@ export class EditorStore {
     // on disk — the title simply stops disagreeing with the file it came from.
     this.adoptFileTitle(file);
     // The adapter now reads and writes this very file: nothing to save yet.
-    this.state.sync = "saved";
+    this.markSaved(doc.documentId, this.revOf(doc.documentId));
+    this.refreshSync();
     trace.mark("state", "state:sync", { status: "saved", via: "open" });
     this.notify();
     this.toast(`Opened "${titleFromDocPath(file)}"`);
@@ -1456,14 +1533,16 @@ export class EditorStore {
    * while the copy runs, or a storage failure, leaves it dirty.
    */
   private async settleOpenedDocument(): Promise<void> {
-    const stamp = this.model.doc.updatedAt;
+    const id = this.model.doc.documentId;
+    const rev = this.revOf(id);
     try {
       await this.adapter.save(this.state.docs);
     } catch {
       return;
     }
-    if (this.model.doc.updatedAt !== stamp) return;
-    this.state.sync = "saved";
+    this.markSaved(id, rev);
+    this.refreshSync();
+    if (this.state.sync === "dirty") return;
     trace.mark("state", "state:sync", { status: "saved", via: "open" });
     this.notify();
   }
@@ -1487,7 +1566,7 @@ export class EditorStore {
     else this.state.docs = [...this.state.docs, doc];
     trace.mark("data", "data:import", { docId: doc.documentId, nodes: Object.keys(doc.sheets[0].nodes).length });
     this.switchToDoc(doc.documentId);
-    this.state.sync = "dirty"; // loaded from disk — not yet in app storage
+    this.markDirty(doc.documentId); // loaded from disk — not yet in app storage
     this.normalizeBranchColors(this.sheet);
     this.dropGroupPlaceholders(this.sheet);
     this.notify();
@@ -5462,7 +5541,7 @@ export class EditorStore {
     doc.settings.theme = theme;
     doc.themeId = `r-node-${theme}`;
     doc.updatedAt = nowIso();
-    this.state.sync = "dirty";
+    this.markDirty(doc.documentId);
     this.notify();
   }
 
@@ -5547,7 +5626,7 @@ export class EditorStore {
     this.state.docs = [...this.state.docs, doc];
     this.state.activeDocId = doc.documentId;
     this.switchToDoc(doc.documentId);
-    this.state.sync = "dirty"; // new doc not persisted until the user saves
+    this.markDirty(doc.documentId); // new doc not persisted until the user saves
     this.notify();
     this.toast("New document created");
   }
@@ -5557,7 +5636,7 @@ export class EditorStore {
     const doc = DocumentModel.sample();
     doc.settings.theme = "light";
     this.state.docs = [...this.state.docs, doc];
-    this.state.sync = "dirty";
+    this.markDirty(doc.documentId);
     this.notify();
     return doc.documentId;
   }
@@ -5571,7 +5650,7 @@ export class EditorStore {
     copy.createdAt = nowIso();
     copy.updatedAt = nowIso();
     this.state.docs = [...this.state.docs, copy];
-    this.state.sync = "dirty";
+    this.markDirty(copy.documentId);
     this.notify();
     this.toast("Document duplicated");
   }
@@ -5592,7 +5671,7 @@ export class EditorStore {
     // outcome and must not make renaming in the GUI feel like a blocking
     // operation.
     void this.syncFileNameToTitle(doc);
-    this.state.sync = "dirty";
+    this.markDirty(id);
     this.notify();
   }
 
@@ -5600,13 +5679,17 @@ export class EditorStore {
     const doc = this.state.docs.find((d) => d.documentId === id);
     if (!doc) return;
     doc.archived = !doc.archived;
-    this.state.sync = "dirty";
+    this.markDirty(id);
     this.notify();
   }
 
   deleteDocument(id: string): void {
     this.state.docs = this.state.docs.filter((d) => d.documentId !== id);
     this.docFilePaths.delete(id);
+    // A deleted document has nothing left to save; keeping its counters
+    // would make the close guard ask about a map that no longer exists.
+    this.editRev.delete(id);
+    this.savedRev.delete(id);
     if (this.state.activeDocId === id) {
       const next = this.state.docs[0];
       if (next) this.switchToDoc(next.documentId);
@@ -5663,7 +5746,9 @@ export class EditorStore {
     this.state.searchOpen = false;
     this.state.quizOpen = null;
     this.state.flashcardsOpen = null;
-    this.state.sync = "saved"; // the loaded doc is its persisted version
+    // Each document keeps its own unsaved state: coming back to a map edited
+    // earlier must still say so (this used to reset to "saved" on every switch).
+    this.refreshSync();
     this.focusRoot();
     this.notify();
     this.scheduleLayout(false);
