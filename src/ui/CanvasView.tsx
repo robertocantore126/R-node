@@ -21,10 +21,12 @@ import { SHAPE_DRAG_TYPE } from "./ShapeLibrary";
 import { FreeformInsertMenu, type FreeformInsertAt } from "./FreeformInsertMenu";
 import { WEB_ITEM_DRAG_TYPE, type WebItem } from "../editor/webSearch";
 import { listShapes } from "../editor/shapeLibrary";
-import type { ImageSlot, MindNode, RelAnchor, Relationship, Sheet } from "../core/types";
+import type { ImageSlot, MindNode, Relationship, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
 import { TouchGestures } from "./touchGestures";
+import { createCanvasGestureMachine, gestureHoldsKeyboard, IDLE_GESTURE, isResizeGesture, type CanvasGesture } from "./canvasGesture";
+import { registerInspectable, type Machine } from "../editor/machine";
 import { CaptionField } from "./CaptionField";
 import { installTrace, trace } from "../dev/trace";
 import { fetchImageAsFile, firstImageFile, firstUriFromList, imageFiles } from "../editor/externalImage";
@@ -81,47 +83,14 @@ function schedulePaint(fn: () => void): void {
   }, 100);
 }
 
-interface DragState {
-  dragging: string | null;
-  moved: boolean;
-  panning: boolean;
+/** Where the current press started and how far it has travelled. What the
+ *  press is DOING is the gesture machine (canvasGesture.ts). */
+interface PressTrack {
   startX: number;
   startY: number;
   lastX: number;
   lastY: number;
-  grabOffsetX: number;
-  grabOffsetY: number;
-  resizing: string | null;
-  resizeSide: "left" | "right" | null;
-  resizeStartWorldX: number;
-  resizeStartWidth: number;
-  resizeStartHeight: number;
-  resizeStartWorldY: number;
-  freeformResizing: boolean;
-  resizeStartX: number;
-  /** Image resize (T14): dragging the image corner handle. */
-  imgResizing: string | null;
-  imgResizeStartWorldX: number;
-  imgResizeStartWidth: number;
-  /** Image move: dragging a selected image onto another node. */
-  imgDragging: string | null;
-  /** The slot the grabbed image lives in (removed from on drop). */
-  imgSlot: ImageSlot;
-  /** The side the drop will target ("top" while not over a node). */
-  imgDropSlot: ImageSlot;
-  /** Gallery cell move (T25): which cell of which topic is in hand. */
-  cellDragFrom: { nodeId: string; index: number } | null;
-  /** Where it would land: topic and insertion index (a gap, not a cell). */
-  cellDropTo: { nodeId: string; index: number } | null;
-  /** Marquee selection: anchor of the box drag (screen coords, null = inactive). */
-  marqueeStartX: number | null;
-  marqueeStartY: number | null;
-  marqueeActive: boolean;
-  /** A relationship in hand: a new one out of a connection arrow, or one end
-   *  of the selected one being moved. */
-  connect: { kind: "new"; fromId: string; fromAnchor: RelAnchor } | { kind: "end"; relId: string; end: "from" | "to" } | null;
-  /** A chart grow slider in hand. */
-  chartGrow: { id: string; grow: "row" | "col"; startWorld: number; pitch: number; current: number } | null;
+  moved: boolean;
 }
 
 /** What an arrow dragged out of a connection handle looks like: draw.io's
@@ -162,47 +131,22 @@ export function CanvasView(): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sizeRef = useRef({ w: viewSize.w, h: viewSize.h, left: 0, top: 0 });
-  const dragRef = useRef<DragState>({
-    dragging: null,
-    moved: false,
-    panning: false,
-    startX: 0,
-    startY: 0,
-    lastX: 0,
-    lastY: 0,
-    grabOffsetX: 0,
-    grabOffsetY: 0,
-    resizing: null,
-    resizeSide: null,
-    resizeStartWorldX: 0,
-    resizeStartWidth: 0,
-    resizeStartHeight: 0,
-    resizeStartWorldY: 0,
-    freeformResizing: false,
-    resizeStartX: 0,
-    imgResizing: null,
-    imgResizeStartWorldX: 0,
-    imgResizeStartWidth: 0,
-    imgDragging: null,
-    imgSlot: "top",
-    imgDropSlot: "top",
-    cellDragFrom: null,
-    cellDropTo: null,
-    marqueeStartX: null,
-    marqueeStartY: null,
-    marqueeActive: false,
-    connect: null,
-    chartGrow: null,
-  });
-  // Right/middle-drag pan started over the Lexical overlay (the overlay is a
-  // sibling of the canvas, so the canvas pointer handlers never see it).
-  const overlayPanRef = useRef<{ pointerId: number } | null>(null);
+  const dragRef = useRef<PressTrack>({ startX: 0, startY: 0, lastX: 0, lastY: 0, moved: false });
+  const gestureRef = useRef<Machine<CanvasGesture> | null>(null);
+  if (!gestureRef.current) gestureRef.current = createCanvasGestureMachine();
+  const gesture = gestureRef.current;
+  /** Mirrors the machine so the cursor follows a gesture as it starts and ends. */
+  const [gestureKind, setGestureKind] = useState<CanvasGesture["kind"]>("idle");
+  useEffect(() => {
+    registerInspectable(gesture);
+    return gesture.subscribe(() => setGestureKind(gesture.state.kind));
+  }, [gesture]);
   // True when an overlay pan actually moved (so a right-drag doesn't leave a
   // browser context menu behind; a plain right-click keeps the native menu).
   const panMovedRef = useRef(false);
   const [, force] = useState(0);
-  const [panning, setPanning] = useState(false);
-  const [resizing, setResizing] = useState(false);
+  const panning = gestureKind === "pan";
+  const resizing = isResizeGesture(gestureKind);
   const [resizeHover, setResizeHover] = useState(false);
   const [imgResizeHover, setImgResizeHover] = useState(false);
   const [marquee, setMarquee] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
@@ -285,6 +229,47 @@ export function CanvasView(): JSX.Element {
   const schedule = useCallback(() => {
     schedulePaint(paint);
   }, [paint]);
+
+  /** Back to idle, and drop every live preview the gesture was painting. */
+  const endGesture = useCallback((event: string): void => {
+    if (gesture.state.kind === "idle") return;
+    gesture.to(IDLE_GESTURE, event);
+    ghostRef.current = null;
+    galleryDropRef.current = null;
+    marqueeSelRef.current = null;
+    relDraftRef.current = null;
+    chartGrowRef.current = null;
+    setMarquee(null);
+    schedule();
+  }, [gesture, schedule]);
+
+  /** Abandon the gesture and undo its ephemeral edits: nothing is committed. */
+  const cancelGesture = useCallback((reason: string): void => {
+    const g = gesture.state;
+    if (g.kind === "idle") return;
+    endGesture(`cancel:${reason}`);
+    if (g.kind === "node-drag") store.cancelNodeDrag();
+    else if (g.kind === "resize-topic" || g.kind === "resize-freeform") store.cancelResize();
+    else if (g.kind === "resize-image") store.cancelImageResize();
+    else if (g.kind === "move-image") store.setDrop(null);
+    trace.applied("gesture:cancel", { kind: g.kind, reason });
+  }, [gesture, endGesture, store]);
+
+  // During a gesture with something to commit, Escape abandons it and other
+  // keys wait: Delete or undo would change the document under the drag. In
+  // capture, so App's shortcuts never see them.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const g = gesture.state;
+      if (!gestureHoldsKeyboard(g) || ["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.key === "Escape") cancelGesture("escape");
+      else trace.ignored("keydown", "gesture-in-progress", { key: e.key, gesture: g.kind });
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [gesture, cancelGesture]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -637,6 +622,8 @@ export function CanvasView(): JSX.Element {
     } catch {
       /* capture unavailable (e.g. synthetic event) */
     }
+    // A press while another gesture is open means its release never arrived.
+    cancelGesture("stale-on-pointerdown");
     const s = store.getSnapshot();
     const { x, y } = localPoint(e);
     const drag = dragRef.current;
@@ -654,14 +641,11 @@ export function CanvasView(): JSX.Element {
     // (onWrapPointerDown), which capture the pointer because the overlay is a
     // sibling of the canvas and its events never reach this handler.
     if (e.button === 2 || e.button === 1 || s.mode === "pan") {
-      drag.panning = true;
-      drag.dragging = null;
-      setPanning(true);
+      gesture.to({ kind: "pan", over: "canvas" }, "pointerdown");
       trace.applied("pointerdown:pan", { button: e.button, mode: s.mode });
       return;
     }
     if (e.button !== 0) return trace.ignored("pointerdown", `button-${e.button}`);
-    drag.panning = false;
 
     // What a click was ABOUT to disturb, sampled before anything mutates. A
     // gesture that changes none of this and still flickers is a painting bug,
@@ -677,10 +661,8 @@ export function CanvasView(): JSX.Element {
       const n = store.doc.node(id);
       const r = n?.style.freeform ? renderer.nodeWorldRect(rs, id) : null;
       if (r && Math.abs(world.x - r.x - r.w) < 12 / s.camera.scale && Math.abs(world.y - r.y - r.h) < 12 / s.camera.scale) {
-        drag.resizing = id; drag.freeformResizing = true;
-        drag.resizeStartWorldX = world.x; drag.resizeStartWorldY = world.y;
-        drag.resizeStartWidth = r.w; drag.resizeStartHeight = r.h;
-        store.beginResize(id); setResizing(true);
+        gesture.to({ kind: "resize-freeform", nodeId: id, startWorldX: world.x, startWorldY: world.y, startWidth: r.w, startHeight: r.h }, "pointerdown");
+        store.beginResize(id);
         return;
       }
     }
@@ -691,15 +673,13 @@ export function CanvasView(): JSX.Element {
     if (!s.relFrom) {
       const end = renderer.hitTestRelEnd(rs, world.x, world.y);
       if (end && s.relSel) {
-        drag.connect = { kind: "end", relId: s.relSel, end };
-        drag.marqueeStartX = null;
+        gesture.to({ kind: "connect", grip: { kind: "end", relId: s.relSel, end } }, "pointerdown");
         trace.applied("pointerdown:rel-end", { id: s.relSel, end });
         return;
       }
       const con = s.editingId ? null : renderer.hitTestConnectHandle(rs, world.x, world.y);
       if (con) {
-        drag.connect = { kind: "new", fromId: con.id, fromAnchor: con.anchor };
-        drag.marqueeStartX = null;
+        gesture.to({ kind: "connect", grip: { kind: "new", fromId: con.id, fromAnchor: con.anchor } }, "pointerdown");
         trace.applied("pointerdown:connect", { id: con.id, anchor: `${con.anchor.x},${con.anchor.y}` });
         return;
       }
@@ -717,13 +697,11 @@ export function CanvasView(): JSX.Element {
       const slotIds = [n.style[slotKey(s.imageSlot ?? "top")], n.style.image, n.style.imageBottom, n.style.imageLeft, n.style.imageRight];
       const grabbedId = slotIds.find((x): x is string => !!x);
       const att = grabbedId ? store.sheet.attachments.find((a) => a.id === grabbedId) : undefined;
-      drag.imgResizing = imgResizeHit;
-      drag.imgResizeStartWorldX = world.x;
       // imageWidth may be unset — resolve the natural width like the renderer.
-      drag.imgResizeStartWidth = n.style.imageWidth ?? (att ? Math.min(att.w, MAX_IMAGE_W) : 0);
+      const startWidth = n.style.imageWidth ?? (att ? Math.min(att.w, MAX_IMAGE_W) : 0);
+      gesture.to({ kind: "resize-image", nodeId: imgResizeHit, startWorldX: world.x, startWidth }, "pointerdown");
       store.beginImageResize(imgResizeHit);
       store.select(imgResizeHit, { additive: false });
-      setResizing(true);
       setResizeHover(false);
       trace.applied("pointerdown:image-resize", { id: imgResizeHit, wasEditing });
       return;
@@ -741,14 +719,17 @@ export function CanvasView(): JSX.Element {
     const shape = growHit ? store.chartShape(growHit.id) : null;
     if (growHit && growBox && shape) {
       const pitch = chartGrowPitch(growBox);
-      drag.chartGrow = {
-        id: growHit.id,
-        grow: growHit.grow,
-        startWorld: growHit.grow === "col" ? world.x : world.y,
-        pitch: growHit.grow === "col" ? pitch.col : pitch.row,
-        current: growHit.grow === "col" ? shape.cols : shape.rows,
-      };
-      drag.marqueeStartX = null;
+      gesture.to(
+        {
+          kind: "chart-grow",
+          id: growHit.id,
+          grow: growHit.grow,
+          startWorld: growHit.grow === "col" ? world.x : world.y,
+          pitch: growHit.grow === "col" ? pitch.col : pitch.row,
+          current: growHit.grow === "col" ? shape.cols : shape.rows,
+        },
+        "pointerdown"
+      );
       trace.applied("pointerdown:chart-grow", { id: growHit.id, grow: growHit.grow, wasEditing });
       return;
     }
@@ -757,14 +738,19 @@ export function CanvasView(): JSX.Element {
     if (resizeHit) {
       const rect = renderer.nodeWorldRect(rs, resizeHit.id)!;
       const n = store.doc.node(resizeHit.id)!;
-      drag.resizing = resizeHit.id;
-      drag.resizeSide = resizeHit.side;
-      drag.resizeStartWorldX = world.x;
-      drag.resizeStartWidth = n.style.width ?? Math.max(MIN_TOPIC_W, rect.w - shapeWidthAllowance(n));
-      drag.resizeStartX = rect.x;
+      gesture.to(
+        {
+          kind: "resize-topic",
+          nodeId: resizeHit.id,
+          side: resizeHit.side,
+          startWorldX: world.x,
+          startWidth: n.style.width ?? Math.max(MIN_TOPIC_W, rect.w - shapeWidthAllowance(n)),
+          startX: rect.x,
+        },
+        "pointerdown"
+      );
       store.beginResize(resizeHit.id);
       store.select(resizeHit.id, { additive: false });
-      setResizing(true);
       setResizeHover(false);
       trace.applied("pointerdown:resize", { id: resizeHit.id, side: resizeHit.side, wasEditing });
       return;
@@ -782,12 +768,7 @@ export function CanvasView(): JSX.Element {
     // which is what Delete and the arrow keys then act on.
     const cellHit = s.relFrom ? null : renderer.hitTestGalleryCell(rs, world.x, world.y);
     if (cellHit) {
-      drag.grabOffsetX = world.x - cellHit.rect.x;
-      drag.grabOffsetY = world.y - cellHit.rect.y;
-      drag.cellDragFrom = { nodeId: cellHit.nodeId, index: cellHit.index };
-      drag.cellDropTo = null;
-      drag.dragging = null;
-      drag.marqueeStartX = null;
+      gesture.to({ kind: "move-cell", from: { nodeId: cellHit.nodeId, index: cellHit.index }, to: null }, "pointerdown");
       // The picture and its caption band are one target: hitting either
       // selects the cell, and dragging from either drags the card. Focus
       // stays on the canvas — reaching the caption's field is what the
@@ -801,20 +782,14 @@ export function CanvasView(): JSX.Element {
     const imgHit = s.relFrom ? null : renderer.hitTestImageSlot(rs, world.x, world.y);
     if (imgHit && freeformOwner(store.sheet, imgHit.nodeId)) {
       const rect = renderer.nodeWorldRect(rs, imgHit.nodeId)!;
-      drag.grabOffsetX = world.x - rect.x; drag.grabOffsetY = world.y - rect.y;
-      drag.dragging = imgHit.nodeId; drag.marqueeStartX = null;
+      gesture.to({ kind: "node-drag", nodeId: imgHit.nodeId, grabOffsetX: world.x - rect.x, grabOffsetY: world.y - rect.y }, "pointerdown");
       store.selectImage(imgHit.nodeId, imgHit.slot);
       store.beginNodeDrag(imgHit.nodeId);
       return;
     }
     if (imgHit) {
-      drag.grabOffsetX = world.x - imgHit.rect.x;
-      drag.grabOffsetY = world.y - imgHit.rect.y;
-      drag.imgSlot = imgHit.slot;
       store.selectImage(imgHit.nodeId, imgHit.slot);
-      drag.imgDragging = imgHit.nodeId;
-      drag.dragging = null;
-      drag.marqueeStartX = null;
+      gesture.to({ kind: "move-image", nodeId: imgHit.nodeId, slot: imgHit.slot, dropSlot: "top" }, "pointerdown");
       trace.applied("pointerdown:image", {
         id: imgHit.nodeId,
         slot: imgHit.slot,
@@ -841,15 +816,13 @@ export function CanvasView(): JSX.Element {
     if (hit && store.doc.node(hit)?.style.freeform) {
       const rel = renderer.hitTestRelationship(rs, world.x, world.y);
       if (rel) {
-        store.selectRelationship(rel); drag.marqueeStartX = null;
+        store.selectRelationship(rel);
         trace.applied("pointerdown:relationship", { id: rel, insideFreeform: true });
         return;
       }
     }
     if (hit) {
       const rect = renderer.nodeWorldRect(rs, hit);
-      drag.grabOffsetX = rect ? world.x - rect.x : 0;
-      drag.grabOffsetY = rect ? world.y - rect.y : 0;
       const additive = e.shiftKey || e.ctrlKey || e.metaKey;
       // `reselect` is the one that answers the flicker question: clicking a
       // topic that is ALREADY the whole selection changes no state at all, so
@@ -862,10 +835,9 @@ export function CanvasView(): JSX.Element {
         commits: wasEditing && s.editingId !== hit,
       });
       store.select(hit, { additive });
-      drag.marqueeStartX = null;
       // A chart slot's note hangs off its slot; the layout owns its place.
       if (store.sheet.nodes[hit]?.style.chartNote) return void trace.ignored("drag:start", "chart note follows its slot", { id: hit });
-      drag.dragging = hit;
+      gesture.to({ kind: "node-drag", nodeId: hit, grabOffsetX: rect ? world.x - rect.x : 0, grabOffsetY: rect ? world.y - rect.y : 0 }, "pointerdown");
       // Capture the pre-drag position: the final op's `prev` must be this,
       // so undo restores the exact pre-drag state (see commitNodeDrag).
       store.beginNodeDrag(hit);
@@ -875,21 +847,18 @@ export function CanvasView(): JSX.Element {
       const relId = renderer.hitTestRelationship(rs, world.x, world.y);
       if (relId) {
         store.selectRelationship(relId);
-        drag.marqueeStartX = null;
         trace.applied("pointerdown:relationship", { id: relId, reselect: s.relSel === relId, wasEditing });
         return;
       }
       const grpId = renderer.hitTestGroup(rs, world.x, world.y);
       if (grpId) {
         store.selectGroup(grpId);
-        drag.marqueeStartX = null;
         trace.applied("pointerdown:group", { id: grpId, reselect: s.groupSel === grpId, wasEditing });
         return;
       }
       const sumId = renderer.hitTestSummary(rs, world.x, world.y);
       if (sumId) {
         store.selectSummary(sumId);
-        drag.marqueeStartX = null;
         trace.applied("pointerdown:summary", { id: sumId, reselect: s.summarySel === sumId, wasEditing });
         return;
       }
@@ -899,9 +868,7 @@ export function CanvasView(): JSX.Element {
       // cleared: 0 with wasEditing false means this click changed NOTHING.
       trace.applied("pointerdown:empty", { cleared: keepsSelection ? 0 : selBefore, wasEditing });
       if (!keepsSelection) store.clearSelection();
-      drag.marqueeStartX = x;
-      drag.marqueeStartY = y;
-      drag.marqueeActive = false;
+      gesture.to({ kind: "marquee", anchorX: x, anchorY: y, active: false }, "pointerdown");
     }
   };
 
@@ -918,17 +885,18 @@ export function CanvasView(): JSX.Element {
     const dy = y - drag.lastY;
     drag.lastX = x;
     drag.lastY = y;
+    const gs = gesture.state;
 
     // A relationship in hand: the free end follows the pointer, or snaps to
     // the topic under it (an anchor on its border, or floating in its middle).
-    if (drag.connect) {
+    if (gs.kind === "connect") {
       if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
       drag.moved = true;
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const renderer = rendererRef.current!;
       const rs = currentRenderState();
-      const c = drag.connect;
+      const c = gs.grip;
       const base: Relationship | undefined =
         c.kind === "new"
           ? { id: "draft", fromId: c.fromId, toId: "", fromAnchor: c.fromAnchor, ...NEW_ARROW }
@@ -947,8 +915,8 @@ export function CanvasView(): JSX.Element {
       schedule();
       return;
     }
-    if (drag.chartGrow) {
-      const g = drag.chartGrow;
+    if (gs.kind === "chart-grow") {
+      const g = gs;
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const dist = (g.grow === "col" ? world.x : world.y) - g.startWorld;
@@ -959,44 +927,44 @@ export function CanvasView(): JSX.Element {
       return;
     }
 
-    if (drag.imgResizing) {
+    if (gs.kind === "resize-image") {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-      const dx = world.x - drag.imgResizeStartWorldX;
-      store.setImageResizeDraft(drag.imgResizing, drag.imgResizeStartWidth + dx);
+      const dx = world.x - gs.startWorldX;
+      store.setImageResizeDraft(gs.nodeId, gs.startWidth + dx);
       drag.moved = true;
       return;
     }
-    if (drag.resizing) {
+    if (gs.kind === "resize-freeform" || gs.kind === "resize-topic") {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-      const dx = world.x - drag.resizeStartWorldX;
-      if (drag.freeformResizing) {
-        store.setResizeDraft(drag.resizing, drag.resizeStartWidth + dx, { height: drag.resizeStartHeight + world.y - drag.resizeStartWorldY });
-      } else if (drag.resizeSide === "left") {
+      const dx = world.x - gs.startWorldX;
+      if (gs.kind === "resize-freeform") {
+        store.setResizeDraft(gs.nodeId, gs.startWidth + dx, { height: gs.startHeight + world.y - gs.startWorldY });
+      } else if (gs.side === "left") {
         // Right edge stays anchored; the left edge (position.x) follows the cursor.
-        store.setResizeDraft(drag.resizing, drag.resizeStartWidth - dx, {
+        store.setResizeDraft(gs.nodeId, gs.startWidth - dx, {
           anchorRight: true,
-          x: drag.resizeStartX + dx,
+          x: gs.startX + dx,
         });
       } else {
-        store.setResizeDraft(drag.resizing, drag.resizeStartWidth + dx);
+        store.setResizeDraft(gs.nodeId, gs.startWidth + dx);
       }
       drag.moved = true;
       return;
     }
-    if (drag.panning) {
+    if (gs.kind === "pan") {
       store.panBy(dx, dy);
       return;
     }
     // Marquee: activate once the pointer moves 4px from the anchor, then
     // track the box in screen coords (the overlay div is positioned in
     // canvas-wrap space, same as localPoint).
-    const mx0 = drag.marqueeStartX, my0 = drag.marqueeStartY;
-    if (mx0 !== null && my0 !== null && !drag.marqueeActive) {
+    const marq = gs.kind === "marquee" ? gs : null;
+    const mx0 = marq?.anchorX ?? null, my0 = marq?.anchorY ?? null;
+    if (marq && mx0 !== null && my0 !== null && !marq.active) {
       if (Math.hypot(x - mx0, y - my0) >= 4) {
-        drag.marqueeActive = true;
-        drag.dragging = null;
+        marq.active = true;
         setMarquee({
           x: mx0,
           y: my0,
@@ -1005,7 +973,7 @@ export function CanvasView(): JSX.Element {
         });
       }
     }
-    if (drag.marqueeActive && mx0 !== null && my0 !== null) {
+    if (marq?.active && mx0 !== null && my0 !== null) {
       setMarquee({
         x: Math.min(mx0, x),
         y: Math.min(my0, y),
@@ -1032,55 +1000,56 @@ export function CanvasView(): JSX.Element {
     // marks the gap it would drop into. The target may be ANY topic — moving a
     // face from one tier to another is the same gesture as reordering inside
     // one, so both are resolved here and the store is told once, on release.
-    if (drag.cellDragFrom) {
+    if (gs.kind === "move-cell") {
       if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
       drag.moved = true;
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const rs = currentRenderState();
-      const src = store.doc.node(drag.cellDragFrom.nodeId);
-      const imageId = src?.style.gallery?.items[drag.cellDragFrom.index]?.id ?? null;
+      const src = store.doc.node(gs.from.nodeId);
+      const imageId = src?.style.gallery?.items[gs.from.index]?.id ?? null;
       const hit = rendererRef.current!.hitTest(rs, world.x, world.y);
       if (hit) {
         const rects = rendererRef.current!.galleryCellRects(rs, hit);
-        drag.cellDropTo = { nodeId: hit, index: galleryDropIndex(hit, rects, world.x, world.y) };
-        galleryDropRef.current = drag.cellDropTo;
+        gs.to = { nodeId: hit, index: galleryDropIndex(hit, rects, world.x, world.y) };
+        galleryDropRef.current = gs.to;
       } else {
-        drag.cellDropTo = null;
+        gs.to = null;
         galleryDropRef.current = null;
       }
-      ghostRef.current = imageId ? { imageId, x: world.x, y: world.y, nodeId: drag.cellDragFrom.nodeId } : null;
+      ghostRef.current = imageId ? { imageId, x: world.x, y: world.y, nodeId: gs.from.nodeId } : null;
       schedule();
       return;
     }
-    if (drag.imgDragging) {
+    if (gs.kind === "move-image") {
       if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
       drag.moved = true;
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const rs = currentRenderState();
-      const srcNode = store.doc.node(drag.imgDragging);
+      const srcNode = store.doc.node(gs.nodeId);
       // The dragged bitmap is the one from the grabbed slot — with side
       // images a node may hold several, and the ghost must follow the one
       // being moved.
-      const srcImg = srcNode?.style[slotKey(drag.imgSlot)] ?? null;
+      const srcImg = srcNode?.style[slotKey(gs.slot)] ?? null;
       const hit = rendererRef.current!.hitTest(rs, world.x, world.y);
-      if (hit && hit !== drag.imgDragging) {
+      if (hit && hit !== gs.nodeId) {
         const r = rendererRef.current!.nodeWorldRect(rs, hit);
         const side = r ? nearestImageSide(r, world.x, world.y) : "top";
-        drag.imgDropSlot = side;
+        gs.dropSlot = side;
         store.setDrop({ mode: "child", nodeId: hit });
         // Over a target the ghost SNAPS onto that slot instead of following
         // the cursor — the exact rect the image will occupy on drop.
         ghostRef.current = srcImg ? { imageId: srcImg, x: world.x, y: world.y, nodeId: hit, side } : null;
       } else {
-        drag.imgDropSlot = "top";
-        store.setDrop({ mode: "none", nodeId: drag.imgDragging });
-        ghostRef.current = srcImg ? { imageId: srcImg, x: world.x, y: world.y, nodeId: drag.imgDragging } : null;
+        gs.dropSlot = "top";
+        store.setDrop({ mode: "none", nodeId: gs.nodeId });
+        ghostRef.current = srcImg ? { imageId: srcImg, x: world.x, y: world.y, nodeId: gs.nodeId } : null;
       }
       return;
     }
-    if (!drag.dragging) {
+    // Only idle and a marquee still inside its 4px arm distance get here.
+    if (gs.kind !== "node-drag") {
       const p = localPoint(e);
       const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, p.x, p.y);
       const renderer = rendererRef.current;
@@ -1098,8 +1067,8 @@ export function CanvasView(): JSX.Element {
       setHandleCursor(onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null);
       setImgResizeHover(!!ih);
       store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
+      return;
     }
-    if (!drag.dragging) return;
     if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
     drag.moved = true;
 
@@ -1117,7 +1086,7 @@ export function CanvasView(): JSX.Element {
     // "floating", the node kept following the cursor, and it kept covering —
     // so the lower ("after") half of a topic below could never be reached and
     // the node could only ever be dropped above one.
-    const dragging = drag.dragging; // narrowed by the guard above; a closure cannot re-narrow the ref field
+    const dragging = gs.nodeId; // a closure cannot re-narrow the state
     const movesWithCursor = (id: string): boolean => id === dragging || isDescendantOf(store.doc, dragging, id);
     const hit = renderer.hitTest(rs, world.x, world.y, movesWithCursor);
 
@@ -1129,7 +1098,7 @@ export function CanvasView(): JSX.Element {
         const draggedOwner = freeformOwner(store.sheet, dragging);
         if (owner && (owner === draggedOwner || store.doc.node(hit)?.style.freeform)) {
           store.setDrop({ mode: "child", nodeId: owner });
-          if (owner === draggedOwner) store.setNodeDragDraft(dragging, world.x - drag.grabOffsetX, world.y - drag.grabOffsetY);
+          if (owner === draggedOwner) store.setNodeDragDraft(dragging, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
           else store.resetNodeDragDraft(dragging);
           return;
         }
@@ -1140,30 +1109,33 @@ export function CanvasView(): JSX.Element {
     } else {
       // Only main topics (root children) and floating topics can be pinned to
       // a free position — deeper hierarchical nodes stay in the auto layout.
-      const dragged = store.doc.node(drag.dragging);
+      const dragged = store.doc.node(dragging);
       const canFloat = !!dragged && (!dragged.parentId || dragged.parentId === store.sheet.rootNodeId);
       dropMode = canFloat ? "floating" : "none";
-      store.setDrop({ mode: dropMode, nodeId: drag.dragging });
+      store.setDrop({ mode: dropMode, nodeId: dragging });
     }
     // Live follow (fluid drag): while the node is free-floating it follows
     // the cursor and its subtree re-flows around it every move. Over a drop
     // target it returns to its slot so the reorder indicator stays usable;
     // deeper nodes never float, so nothing moves for them.
     if (dropMode === "floating") {
-      store.setNodeDragDraft(drag.dragging, world.x - drag.grabOffsetX, world.y - drag.grabOffsetY);
+      store.setNodeDragDraft(dragging, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
     } else {
-      store.resetNodeDragDraft(drag.dragging);
+      store.resetNodeDragDraft(dragging);
     }
   };
 
   const onPointerUp = (e: RPointerEvent): void => {
     if (e.pointerType === "touch") return touchRef.current.up(e.pointerId);
     const drag = dragRef.current;
-    if (drag.connect) {
-      const c = drag.connect;
-      const draft = relDraftRef.current;
-      drag.connect = null;
-      relDraftRef.current = null;
+    const gs = gesture.state;
+    if (gs.kind === "idle") return trace.ignored("pointerup", "no gesture in progress");
+    // The previews are read first: ending the gesture clears them.
+    const draft = relDraftRef.current;
+    const live = chartGrowRef.current;
+    endGesture("pointerup");
+    if (gs.kind === "connect") {
+      const c = gs.grip;
       if (drag.moved && draft?.target) {
         if (c.kind === "new") {
           const id = store.createRelationship(c.fromId, draft.target, {
@@ -1178,117 +1150,65 @@ export function CanvasView(): JSX.Element {
       } else if (drag.moved) {
         trace.ignored("pointerup:connect", "released on no topic", { kind: c.kind });
       }
-      drag.moved = false;
-      schedule();
       return;
     }
-    if (drag.chartGrow) {
-      const g = drag.chartGrow;
-      const live = chartGrowRef.current;
-      drag.chartGrow = null;
-      chartGrowRef.current = null;
+    if (gs.kind === "chart-grow") {
+      const g = gs;
       // A click without a drag keeps the old "+": one more.
       const delta = drag.moved ? (live?.delta ?? 0) : 1;
       if (delta !== 0) store.resizeChart(g.id, g.grow === "row" ? delta : 0, g.grow === "col" ? delta : 0);
       else trace.ignored("pointerup:chart-grow", "slider back where it started", { id: g.id });
-      drag.moved = false;
-      schedule();
       return;
     }
-    // A plain click on empty canvas (marquee never activated): just reset.
-    if (drag.marqueeStartX !== null && !drag.marqueeActive) {
-      drag.marqueeStartX = null;
-      drag.marqueeStartY = null;
-    }
-    if (drag.marqueeActive) {
+    if (gs.kind === "marquee") {
+      // A plain click on empty canvas never armed the box: nothing to select.
+      if (!gs.active) return;
       const s = store.getSnapshot();
       const { x, y } = localPoint(e);
-      const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, drag.marqueeStartX!, drag.marqueeStartY!);
+      const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, gs.anchorX, gs.anchorY);
       const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
       if (ids.length > 0) store.selectMany(ids, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
-      marqueeSelRef.current = null;
-      drag.marqueeActive = false;
-      drag.marqueeStartX = null;
-      drag.marqueeStartY = null;
-      setMarquee(null);
-      schedule();
       return;
     }
-    if (drag.imgResizing) {
-      store.commitImageResize();
-      drag.imgResizing = null;
-      drag.moved = false;
-      setResizing(false);
-      return;
-    }
-    if (drag.resizing) {
-      store.commitResize();
-      drag.resizing = null;
-      drag.resizeSide = null;
-      drag.freeformResizing = false;
-      drag.moved = false;
-      setResizing(false);
-      return;
-    }
-    if (drag.panning) {
-      drag.panning = false;
-      drag.dragging = null;
-      setPanning(false);
-      return;
-    }
+    if (gs.kind === "resize-image") return store.commitImageResize();
+    if (gs.kind === "resize-topic" || gs.kind === "resize-freeform") return store.commitResize();
+    if (gs.kind === "pan") return;
     // Gallery cell dropped (T25). A plain click never moves anything: the
     // threshold in pointermove is what separates "grabbed it" from "clicked
     // near it", exactly as for the slot images.
-    if (drag.cellDragFrom) {
-      const from = drag.cellDragFrom;
-      const to = drag.cellDropTo;
-      if (drag.moved && to) store.moveGalleryCellTo(from.nodeId, from.index, to.nodeId, to.index);
-      drag.cellDragFrom = null;
-      drag.cellDropTo = null;
-      drag.moved = false;
-      galleryDropRef.current = null;
-      ghostRef.current = null;
-      schedule();
+    if (gs.kind === "move-cell") {
+      if (drag.moved && gs.to) store.moveGalleryCellTo(gs.from.nodeId, gs.from.index, gs.to.nodeId, gs.to.index);
       return;
     }
     // Image move dropped: assign the image to the highlighted node. A plain
     // click (no move) only leaves the image selected — never moves it.
-    if (drag.imgDragging) {
+    if (gs.kind === "move-image") {
       if (drag.moved) {
         const drop = store.getSnapshot().drop;
-        if (drop && drop.mode !== "none" && drop.nodeId !== drag.imgDragging) {
+        if (drop && drop.mode !== "none" && drop.nodeId !== gs.nodeId) {
           if (store.doc.node(drop.nodeId)?.style.freeform) {
             const { x, y } = localPoint(e);
             const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
-            store.moveImageIntoFreeform(drag.imgDragging, drag.imgSlot, drop.nodeId, world.x, world.y);
-          } else store.assignImageToNode(drag.imgDragging, drop.nodeId, drag.imgDropSlot, drag.imgSlot);
+            store.moveImageIntoFreeform(gs.nodeId, gs.slot, drop.nodeId, world.x, world.y);
+          } else store.assignImageToNode(gs.nodeId, drop.nodeId, gs.dropSlot, gs.slot);
         }
       }
       store.setDrop(null);
-      ghostRef.current = null;
-      drag.imgDragging = null;
-      drag.moved = false;
       return;
     }
-    if (drag.dragging && drag.moved) {
-      const s = store.getSnapshot();
-      const drop = s.drop;
-      if (drop && drop.mode !== "none") {
-        const { x, y } = localPoint(e);
-        const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-        const target = drop.mode === "floating" ? null : drop.nodeId;
-        store.commitNodeDrag(
-          drag.dragging,
-          target,
-          drop.mode,
-          world.x - drag.grabOffsetX,
-          world.y - drag.grabOffsetY
-        );
-      }
+    // gs is a node drag: every other gesture has returned above.
+    const s = store.getSnapshot();
+    const drop = s.drop;
+    if (drag.moved && drop && drop.mode !== "none") {
+      const { x, y } = localPoint(e);
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const target = drop.mode === "floating" ? null : drop.nodeId;
+      store.commitNodeDrag(gs.nodeId, target, drop.mode, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+    } else {
+      // A plain click, or a release over nowhere it can land.
+      store.cancelNodeDrag();
     }
-    drag.dragging = null;
-    drag.moved = false;
   };
 
   const onDblClick = (e: RMouseEvent): void => {
@@ -1432,17 +1352,15 @@ export function CanvasView(): JSX.Element {
     if (e.button !== 2 && e.button !== 1) return; // never steal left-click
     if (!store.getSnapshot().editingId) return;
     e.preventDefault();
+    cancelGesture("stale-on-pointerdown");
     const { x, y } = localPoint(e);
     const drag = dragRef.current;
-    drag.panning = true;
-    drag.dragging = null;
     drag.startX = x;
     drag.startY = y;
     drag.lastX = x;
     drag.lastY = y;
-    overlayPanRef.current = { pointerId: e.pointerId };
+    gesture.to({ kind: "pan", over: "overlay" }, "pointerdown");
     panMovedRef.current = false;
-    setPanning(true);
     try {
       canvasRef.current!.parentElement!.setPointerCapture(e.pointerId);
     } catch {
@@ -1450,8 +1368,13 @@ export function CanvasView(): JSX.Element {
     }
   };
 
+  const overlayPanning = (): boolean => {
+    const g = gesture.state;
+    return g.kind === "pan" && g.over === "overlay";
+  };
+
   const onWrapPointerMove = (e: RPointerEvent): void => {
-    if (!overlayPanRef.current) return;
+    if (!overlayPanning()) return;
     const drag = dragRef.current;
     const { x, y } = localPoint(e);
     const dx = x - drag.lastX;
@@ -1463,11 +1386,8 @@ export function CanvasView(): JSX.Element {
   };
 
   const onWrapPointerUp = (e: RPointerEvent): void => {
-    if (!overlayPanRef.current) return;
-    const drag = dragRef.current;
-    drag.panning = false;
-    drag.dragging = null;
-    setPanning(false);
+    if (!overlayPanning()) return;
+    endGesture("pointerup");
     const wrap = canvasRef.current?.parentElement;
     if (wrap?.hasPointerCapture(e.pointerId)) {
       try {
@@ -1476,7 +1396,6 @@ export function CanvasView(): JSX.Element {
         /* already released */
       }
     }
-    overlayPanRef.current = null;
   };
 
   const onWrapContextMenu = (e: RMouseEvent): void => {
@@ -1621,16 +1540,20 @@ export function CanvasView(): JSX.Element {
       onPointerMoveCapture={onWrapPointerMove}
       onPointerUpCapture={onWrapPointerUp}
       onContextMenuCapture={onWrapContextMenu}
+      // Whatever ends a press without a release (the OS taking the pointer, a
+      // pen leaving range) ends the gesture too, or it would stay in the hand.
+      onPointerCancel={() => cancelGesture("pointercancel")}
+      onLostPointerCapture={() => cancelGesture("lost-capture")}
     >
       <canvas
         ref={canvasRef}
         className="canvas"
         style={{
           cursor:
-            dragRef.current.connect ? "crosshair"
-            : dragRef.current.chartGrow ? (dragRef.current.chartGrow.grow === "col" ? "ew-resize" : "ns-resize")
+            gesture.state.kind === "connect" ? "crosshair"
+            : gesture.state.kind === "chart-grow" ? (gesture.state.grow === "col" ? "ew-resize" : "ns-resize")
             : handleCursor ? handleCursor
-            : imgResizeHover || dragRef.current.imgResizing
+            : imgResizeHover || gesture.state.kind === "resize-image"
               ? "nwse-resize"
               : resizing || resizeHover
                 ? "ew-resize"
@@ -1750,7 +1673,7 @@ export function CanvasView(): JSX.Element {
           }
         }}
         onDragLeave={(e) => {
-          if (!dragRef.current?.dragging) store.setHover(null);
+          if (gesture.state.kind !== "node-drag") store.setHover(null);
           // The canvas has no children: relatedTarget is null only when the
           // drag actually leaves the canvas area — clear the ghost then.
           // Moving over the editing overlay (a sibling) keeps the preview.

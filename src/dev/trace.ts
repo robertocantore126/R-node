@@ -130,6 +130,7 @@ export const COVERAGE_CONTRACT: Partial<Record<Subsystem, CoverageItem[]>> = {
     { id: "derived", label: "derived state", prefixes: ["state:derived", "layout:"] },
     { id: "sync", label: "state synchronization", prefixes: ["state:sync"] },
     { id: "transaction", label: "transaction start/end", prefixes: ["state:transaction"] },
+    { id: "machine", label: "state machine transition", prefixes: ["state:machine"] },
   ],
   data: [
     { id: "idb-read", label: "IndexedDB read", prefixes: ["data:idb-read"] },

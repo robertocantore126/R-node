@@ -166,6 +166,9 @@ Non re-derivarle. Costano ore ciascuna.
 
 **Store**
 - Il draft di editing è effimero: nessun op, nessuna history, fino al commit.
+- Prima di aggiungere un flag o un campo "null = spento", leggi
+  [STATE_MACHINES.md](STATE_MACHINES.md): se gli stati si escludono a vicenda
+  serve una `Machine`. La selezione si scrive solo con `setSelectionTarget`.
 - Guidare lo store da console mentre un overlay è montato **non** funziona come
   test: il listener dell'overlay riscrive il draft con il proprio contenuto.
 
@@ -320,6 +323,8 @@ src/ui/RichEditor.tsx      overlay Lexical (unico), toolbar, tasti, paste
 src/ui/lexicalRuns.ts      bridge editor ↔ runs
 src/ui/pasteSanitizer.ts   sanitizeHtml / htmlToRuns (Word, Draw.io, web)
 src/ui/CanvasView.tsx      posizionamento overlay, pan, resize handle
+src/ui/canvasGesture.ts    cosa sta facendo il puntatore (macchina a stati)
+src/editor/machine.ts      la helper Machine e `__rnode.machines()`
 dev/parity.ts              harness di parità (§3)
 ```
 

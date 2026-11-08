@@ -87,6 +87,7 @@ prefix-based: `what === prefix` or `what.startsWith(prefix + ":")`.
 | derived state | `state:derived` / `layout:*` — the layout is derived data |
 | state synchronization | `state:sync` — `dirty` on every `touch()`, `saved` after a save |
 | transaction start/end | `state:transaction` — the heavy-operation lifecycle (`beginLongOp`/`endLongOp`) |
+| state machine transition | `state:machine` — every `Machine.to()`, with `machine`, `from`, `to`, `event` (see STATE_MACHINES.md) |
 
 ### DATA (`data`)
 

@@ -25,6 +25,8 @@ import { History } from "../core/history";
 import { applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
+import { Machine, registerInspectable } from "./machine";
+import { LongOps, SAVE_FLOW_TABLE, saveRerunAllowed, selectionFields, selectionTargetOf, type LongOpKind, type LongOpView, type SaveFlow, type SaveOutcome, type SelectionTarget } from "./editorMachines";
 import { SCHEMA_VERSION, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type RelAnchor, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { parseQuiz, quizTopicOutline, type QuizSeed } from "../core/quiz";
 import { parseFlashcards, type FlashcardSeed } from "../core/flashcards";
@@ -254,12 +256,7 @@ export interface EditorState {
   /** Heavy operation in flight (a save with images, which builds the
    *  .rnode.zip). The status bar shows a progress bar with a cancel button;
    *  null = nothing heavy running. progress is 0..1, null = indeterminate. */
-  op: {
-    kind: "save";
-    label: string;
-    progress: number | null;
-    cancellable: boolean;
-  } | null;
+  op: LongOpView | null;
 }
 
 /** Phone-sized viewport (matches the max-width breakpoint in styles.css). */
@@ -274,10 +271,8 @@ export class EditorStore {
   private model: DocumentModel;
   private history = new History();
   private adapter: StorageAdapter;
-  /** Abort controller of the running heavy operation (state.op); null when
-   *  nothing is running. Cancel aborts it; the operation rejects with an
-   *  AbortError and reports "Save cancelled". */
-  private opAbort: AbortController | null = null;
+  /** The heavy operations in flight; `state.op` shows the newest. */
+  private longOps = new LongOps();
   /**
    * File System Access handles (per document) so later saves silently
    * OVERWRITE the .rnode.json the user picked instead of re-downloading.
@@ -322,8 +317,7 @@ export class EditorStore {
    * save is re-run once when the current one finishes, with the content that
    * exists at that moment.
    */
-  private saveInFlight = false;
-  private saveQueued = false;
+  private saveFlow = new Machine<SaveFlow>("saveFlow", { kind: "idle" }, SAVE_FLOW_TABLE);
   /** Assets that could not be copied into the current file by the last save
    *  (adoptFile skips referenced-but-absent assets); the final toast reports
    *  the number instead of staying silent (T21-C). */
@@ -367,6 +361,18 @@ export class EditorStore {
     this.uiSnap = this.state;
     this.normalizeBranchColors(this.model.sheet);
     this.dropGroupPlaceholders(this.model.sheet);
+    registerInspectable(this.saveFlow);
+    registerInspectable(this.longOps);
+    registerInspectable({
+      name: "interaction",
+      inspect: () => ({
+        target: selectionTargetOf(this.state),
+        editingId: this.state.editingId,
+        hasDraft: this.editingDraftRuns !== null,
+        relFrom: this.state.relFrom,
+        mode: this.state.mode,
+      }),
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -504,17 +510,16 @@ export class EditorStore {
   // Heavy-operation feedback (progress bar + cancel in the status bar)
   // -------------------------------------------------------------------------
 
-  /** Start a heavy operation: creates a fresh AbortController and shows the
-   *  progress bar. A new op supersedes a stuck previous one. */
-  private beginLongOp(label: string, cancellable: boolean): AbortSignal {
-    this.opAbort?.abort();
-    this.opAbort = new AbortController();
-    this.state.op = { kind: "save", label, progress: 0, cancellable };
+  /** Start a heavy operation and show its progress. One already running keeps
+   *  running; the bar returns to it when this one ends. */
+  private beginLongOp(label: string, cancellable: boolean, kind: LongOpKind = "save"): AbortSignal {
+    const signal = this.longOps.begin(kind, label, cancellable);
+    this.state.op = this.longOps.current;
     // Tracer 2.0: a heavy operation IS a state transaction — begin/end marks
     // bracket it so a capture shows the whole transaction, not its pieces.
     trace.mark("state", "state:transaction", { op: "begin", label });
     this.notify();
-    return this.opAbort.signal;
+    return signal;
   }
 
   /**
@@ -525,37 +530,63 @@ export class EditorStore {
    * worse than a bar that admits it does not know.
    */
   beginExport(label: string): void {
-    this.beginLongOp(label, false);
-    this.setOpProgress(label, null);
+    this.beginLongOp(label, false, "export");
+    this.setOpProgress(label, null, "export");
   }
 
   endExport(): void {
-    this.endLongOp();
+    this.endLongOp("export");
   }
 
-  private setOpProgress(label: string, progress: number | null): void {
-    if (!this.state.op) return;
-    this.state.op = { ...this.state.op, label, progress };
+  private setOpProgress(label: string, progress: number | null, kind: LongOpKind = "save"): void {
+    if (!this.longOps.update(kind, label, progress)) return;
+    this.state.op = this.longOps.current;
     this.notify();
   }
 
-  private endLongOp(): void {
-    this.opAbort = null;
-    this.state.op = null;
+  private endLongOp(kind: LongOpKind = "save"): void {
+    this.longOps.end(kind);
+    this.state.op = this.longOps.current;
     trace.mark("state", "state:transaction", { op: "end" });
     this.notify();
   }
 
-  /** Cancel the running heavy operation (the abort controller). The operation
-   *  rejects with an AbortError and reports "Save cancelled". */
+  /** Cancel the operation the status bar is showing. It rejects with an
+   *  AbortError and reports "Save cancelled". */
   cancelLongOp(): void {
-    this.opAbort?.abort();
+    this.longOps.cancelCurrent();
     trace.mark("async", "async:cancel", { what: "long-op" });
   }
 
   // -------------------------------------------------------------------------
   // Init
   // -------------------------------------------------------------------------
+
+  /**
+   * `init`, for the app's entry point: it always resolves, so the UI always
+   * mounts. `init` handles the failures it can name; anything else used to
+   * reject past the mount and leave a blank window with no way to recover.
+   */
+  async boot(): Promise<void> {
+    try {
+      await this.init();
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      trace.error("init:unhandled", why);
+      console.error("r-node: startup failed", e);
+      // As in init's own recovery: forget the file, or the first save would
+      // write the sample map over the document that failed to load.
+      if (this.adapter instanceof TauriStorageAdapter) this.adapter.setRoot(null);
+      this.docFilePaths.clear();
+      this.model = new DocumentModel(DocumentModel.sample());
+      this.normalizeBranchColors(this.model.sheet);
+      this.dropGroupPlaceholders(this.model.sheet);
+      this.state = this.makeState();
+      this.state.sync = "dirty";
+      this.scheduleLayout(false);
+      this.toast(`Could not load your document, showing a sample map — ${why}`);
+    }
+  }
 
   async init(): Promise<void> {
     // A corrupt/unreadable stored document must never blank the app: load the
@@ -831,30 +862,32 @@ export class EditorStore {
     // user is typing: commit the draft without closing the editor, so they
     // can keep going. The later blur/Enter commit finds the title up to date.
     this.commitDraftKeepEditing();
-    if (this.saveInFlight) {
+    const running = this.saveFlow.state;
+    if (running.kind === "saving") {
       // One-position queue, deliberately NOT an early return: the second
       // Ctrl+S arrived after the running save started reading, so the content
       // changed under it. Dropping the request would show "Saved" while the
       // file on disk holds a stale version. Mark the re-run; the running
       // save re-executes exactly once when it finishes.
-      this.saveQueued = true;
+      running.queued = true;
       this.toast("Save queued — will run when the current save finishes");
       return;
     }
-    this.saveInFlight = true;
+    const flow: SaveFlow & { kind: "saving" } = { kind: "saving", queued: false };
+    this.saveFlow.to(flow, "save-requested");
+    let outcome: SaveOutcome = "failed";
     try {
-      await this.performSave();
+      outcome = await this.performSave();
     } finally {
-      this.saveInFlight = false;
+      this.saveFlow.to({ kind: "idle" }, outcome);
       trace.mark("async", "async:promise", { what: "save", done: true });
-      if (this.saveQueued) {
-        this.saveQueued = false;
+      if (flow.queued && saveRerunAllowed(outcome)) {
         void this.saveNow(); // exactly one re-run, with the content of THAT moment
       }
     }
   }
 
-  private async performSave(): Promise<void> {
+  private async performSave(): Promise<SaveOutcome> {
     // Only the save that copies images sets this; a later plain save must not
     // repeat an earlier Save as's "N images could not be copied".
     this.lastSaveSkipped = 0;
@@ -874,11 +907,11 @@ export class EditorStore {
         try {
           if (!this.adapter.hasRoot) {
           const ok = await this.saveAsDesktop();
-          if (ok === "refused") return; // refused: the toast already says why
+          if (ok === "refused") return "refused"; // the toast already says why
           if (!ok) {
             this.state.sync = "dirty";
             this.toast("Save cancelled — no file chosen");
-            return;
+            return "cancelled";
           }
         } else {
             // The GUI rename already renamed the file. This second call is the
@@ -897,7 +930,7 @@ export class EditorStore {
                 this.toast(
                   `Not saved — "${titleFromDocPath(target)}" now contains a different document; refusing to overwrite it`
                 );
-                return;
+                return "refused";
               }
             }
             this.setOpProgress("Writing document…", 0.9);
@@ -913,7 +946,7 @@ export class EditorStore {
             ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be copied (missing from the source file)`
             : this.savedNote()
         );
-        return;
+        return "saved";
       }
       // Change counts as they are NOW, before anything is serialized: the
       // adapter takes the documents synchronously, the portable file later.
@@ -936,17 +969,16 @@ export class EditorStore {
             ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be written (missing from storage)`
             : this.savedNote()
       );
+      return fileWritten ? "saved" : "cancelled";
     } catch (e) {
       this.state.sync = "dirty";
       if (e instanceof Error && e.name === "AbortError") {
-        // The user cancelled the running heavy save: a queued re-run would
-        // redo exactly the work they stopped, so the queue is dropped too.
-        this.saveQueued = false;
         trace.mark("async", "async:cancel", { what: "save", reason: "abort" });
         this.toast("Save cancelled");
-      } else {
-        this.toast("Save failed — check storage");
+        return "cancelled";
       }
+      this.toast("Save failed — check storage");
+      return "failed";
     }
   }
 
@@ -1487,14 +1519,14 @@ export class EditorStore {
    * file is remembered, so the next save overwrites it.
    */
   private async openRnodeBytes(bytes: Uint8Array, fileName: string, handle: FileSystemFileHandle | null): Promise<void> {
-    this.beginLongOp("Opening document…", false);
+    this.beginLongOp("Opening document…", false, "open");
     let result: Awaited<ReturnType<typeof readRnodeFile>>;
     try {
       result = await readRnodeFile(bytes, getAssetStore(), {
-        onProgress: (f) => this.setOpProgress("Reading images…", f),
+        onProgress: (f) => this.setOpProgress("Reading images…", f, "open"),
       });
     } finally {
-      this.endLongOp();
+      this.endLongOp("open");
     }
     if (!result.ok) {
       trace.mark("files", "files:failure", { op: "open-rnode", error: result.error });
@@ -1677,6 +1709,11 @@ export class EditorStore {
   // Selection
   // -------------------------------------------------------------------------
 
+  /** The one door to the selection fields (see SelectionTarget). */
+  private setSelectionTarget(target: SelectionTarget): void {
+    Object.assign(this.state, selectionFields(target));
+  }
+
   select(id: string, opts?: { additive?: boolean; center?: boolean }): void {
     // The canvas pointer handler runs before the textarea blur fires. Commit
     // the in-progress edit here so clicking away never loses typed text.
@@ -1689,39 +1726,27 @@ export class EditorStore {
       sel = [id];
     }
     trace.mark("ui", "ui:selection", { count: sel.length, additive });
-    this.state.selection = sel;
+    this.setSelectionTarget({ kind: "nodes", ids: sel });
     this.state.editingId = null;
     this.state.pendingInsert = null;
-    this.state.relSel = null;
-    this.state.groupSel = null;
-    this.state.summarySel = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = null;
     if (opts?.center) this.centerOnNode(id);
     this.notify();
   }
 
   selectMany(ids: string[], opts?: { additive?: boolean }): void {
     this.commitDraftOnLeave();
+    let next = [...ids];
     if (opts?.additive) {
       const set = new Set(this.state.selection);
       for (const id of ids) {
         if (set.has(id)) set.delete(id);
         else set.add(id);
       }
-      this.state.selection = [...set];
-    } else {
-      this.state.selection = [...ids];
+      next = [...set];
     }
-    trace.mark("ui", "ui:selection", { count: this.state.selection.length, additive: !!opts?.additive });
+    trace.mark("ui", "ui:selection", { count: next.length, additive: !!opts?.additive });
+    this.setSelectionTarget({ kind: "nodes", ids: next });
     this.state.editingId = null;
-    this.state.relSel = null;
-    this.state.groupSel = null;
-    this.state.summarySel = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = null;
     this.notify();
   }
 
@@ -1736,14 +1761,8 @@ export class EditorStore {
     )
       return;
     trace.mark("ui", "ui:selection", { count: 0 });
-    this.state.selection = [];
+    this.setSelectionTarget({ kind: "none" });
     this.state.editingId = null;
-    this.state.relSel = null;
-    this.state.groupSel = null;
-    this.state.summarySel = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = null;
     this.notify();
   }
 
@@ -1753,17 +1772,11 @@ export class EditorStore {
   selectImage(nodeId: string, slot: ImageSlot = "top"): void {
     this.commitDraftOnLeave();
     trace.mark("ui", "ui:selection", { image: true, slot });
-    this.state.selection = [];
-    this.state.editingId = null;
-    this.state.pendingInsert = null;
-    this.state.relSel = null;
-    this.state.groupSel = null;
-    this.state.summarySel = null;
-    this.state.imageSel = nodeId;
-    this.state.imageSlot = slot;
     // Exclusive means exclusive: a cell selection left behind here made the
     // next Delete remove that old gallery cell instead of this image.
-    this.state.gallerySel = null;
+    this.setSelectionTarget({ kind: "image", nodeId, slot });
+    this.state.editingId = null;
+    this.state.pendingInsert = null;
     this.notify();
   }
 
@@ -1781,15 +1794,9 @@ export class EditorStore {
     if (!items || index < 0 || index >= items.length) return;
     this.commitDraftOnLeave();
     trace.mark("ui", "ui:selection", { galleryCell: true, index });
-    this.state.selection = [nodeId];
+    this.setSelectionTarget({ kind: "nodes", ids: [nodeId], cell: { nodeId, index } });
     this.state.editingId = null;
     this.state.pendingInsert = null;
-    this.state.relSel = null;
-    this.state.groupSel = null;
-    this.state.summarySel = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = { nodeId, index };
     this.notify();
   }
 
@@ -1875,21 +1882,15 @@ export class EditorStore {
     // exception: its title is a heading over a fixed board, and the overlay
     // sits above the board exactly as it sits above any topic's images.
     if (node.style.code || (node.style.gallery && !node.style.gallery.chart) || node.style.freeform) {
-      this.state.selection = [id];
+      this.setSelectionTarget({ kind: "nodes", ids: [id] });
       this.state.editingId = null;
       this.state.pendingInsert = null;
-      this.state.imageSel = null;
-      this.state.imageSlot = null;
-      this.state.gallerySel = null;
       const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
       return trace.ignored("edit:start", why, { nodeId: id });
     }
-    this.state.selection = [id];
+    this.setSelectionTarget({ kind: "nodes", ids: [id] });
     this.state.editingId = id;
     this.state.pendingInsert = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = null;
     this.editOriginal = { title: node.title, titleRuns: node.titleRuns };
     // Seed the draft with the current title so layout keeps measuring the
     // node at its current size until the editor reports its first change.
@@ -2697,13 +2698,7 @@ export class EditorStore {
     }
     if (ops.length) {
       this.execOps(ops);
-      this.state.selection = [];
-      this.state.relSel = null;
-      this.state.groupSel = null;
-      this.state.summarySel = null;
-      this.state.imageSel = null;
-      this.state.imageSlot = null;
-      this.state.gallerySel = null;
+      this.setSelectionTarget({ kind: "none" });
       this.notify();
     }
   }
@@ -3006,6 +3001,28 @@ export class EditorStore {
       clearTimeout(this.layoutTimer);
       this.layoutTimer = null;
     }
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  /**
+   * The press ended without a drop: put the topic back and forget the drag.
+   * A plain click moved nothing, so it costs no layout and no repaint.
+   */
+  cancelNodeDrag(): void {
+    const d = this.nodeDragState;
+    this.nodeDragState = null;
+    if (this.state.drop) this.setDrop(null);
+    const node = d ? this.model.node(d.nodeId) : undefined;
+    if (!d || !node) return;
+    const untouched =
+      node.position.x === d.origPos.x &&
+      node.position.y === d.origPos.y &&
+      node.position.manual === d.origPos.manual &&
+      node.style.freeformPosition === d.origStyle.freeformPosition;
+    if (untouched) return;
+    node.position = { ...d.origPos };
+    node.style = { ...d.origStyle };
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
@@ -3683,8 +3700,7 @@ export class EditorStore {
     const items = this.galleryItems(chartId);
     items[index] = { ...items[index], id: res.card.id };
     this.putGallery(chartId, items, g.cellW, g.cols, g.aspect);
-    this.state.selection = [chartId];
-    this.state.gallerySel = { nodeId: chartId, index };
+    this.setSelectionTarget({ kind: "nodes", ids: [chartId], cell: { nodeId: chartId, index } });
     trace.applied("chart:placeholder", { nodeId: chartId, index });
     this.notify();
     return true;
@@ -4199,6 +4215,18 @@ export class EditorStore {
     }
   }
 
+  /** Abandon the drag (Escape, lost pointer): the exact pre-drag state, no op. */
+  cancelResize(): void {
+    const r = this.resizeState;
+    this.resizeState = null;
+    const node = r ? this.model.node(r.nodeId) : undefined;
+    if (!r || !node) return;
+    node.style = r.original;
+    node.position = { ...r.origPos };
+    this.scheduleLayout(false);
+    this.notify();
+  }
+
   // -------------------------------------------------------------------------
   // Image resize (T14) — same draft pattern as the width drag: live width is
   // an ephemeral mutation (no op), one setStyle op commits the whole gesture.
@@ -4243,6 +4271,17 @@ export class EditorStore {
       this.scheduleLayout(false);
       this.notify();
     }
+  }
+
+  /** Abandon the image resize: the pre-drag style, no op. */
+  cancelImageResize(): void {
+    const r = this.imageResizeState;
+    this.imageResizeState = null;
+    const node = r ? this.model.node(r.nodeId) : undefined;
+    if (!r || !node) return;
+    node.style = r.original;
+    this.scheduleLayout(false);
+    this.notify();
   }
 
   /** Remove the custom imageWidth (back to the natural display size). */
@@ -4991,35 +5030,17 @@ export class EditorStore {
   // -------------------------------------------------------------------------
 
   selectRelationship(id: string | null): void {
-    this.state.selection = [];
-    this.state.groupSel = null;
-    this.state.summarySel = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = null;
-    this.state.relSel = id;
+    this.setSelectionTarget(id ? { kind: "relationship", id } : { kind: "none" });
     this.notify();
   }
 
   selectGroup(id: string | null): void {
-    this.state.selection = [];
-    this.state.relSel = null;
-    this.state.summarySel = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = null;
-    this.state.groupSel = id;
+    this.setSelectionTarget(id ? { kind: "group", id } : { kind: "none" });
     this.notify();
   }
 
   selectSummary(id: string | null): void {
-    this.state.selection = [];
-    this.state.relSel = null;
-    this.state.groupSel = null;
-    this.state.imageSel = null;
-    this.state.imageSlot = null;
-    this.state.gallerySel = null;
-    this.state.summarySel = id;
+    this.setSelectionTarget(id ? { kind: "summary", id } : { kind: "none" });
     this.notify();
   }
 
@@ -5739,7 +5760,11 @@ export class EditorStore {
     // document can never write over another document's file.
     this.applyDocFile(id);
     this.state.activeDocId = id;
-    this.state.selection = [];
+    // Everything below names things in the document being left.
+    this.setSelectionTarget({ kind: "none" });
+    this.state.relFrom = null;
+    this.state.drop = null;
+    this.state.hoverId = null;
     this.state.editingId = null;
     this.state.search = "";
     this.state.searchResults = [];
