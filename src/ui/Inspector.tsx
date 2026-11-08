@@ -8,6 +8,7 @@ import { THEMES } from "../render/theme";
 import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
 import { plainToRuns } from "../core/text";
+import { chartSlotNote } from "../core/chartNotes";
 import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
 import { InkControls } from "./InkControls";
 const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
@@ -382,6 +383,11 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
   const items = gallery?.items ?? [];
   const chart = !!gallery?.chart;
   const shape = chart ? store.chartShape(nodeId) : null;
+  const gallerySel = store.getSnapshot().gallerySel;
+  // The slot's note is a floating topic of its own, open while its slot is
+  // selected. Showing its width here is what lets a note be resized from the
+  // same place the slot is edited, without first finding the note on canvas.
+  const slotNote = chart && gallerySel?.nodeId === nodeId ? chartSlotNote(store.sheet, nodeId, gallerySel.index) : null;
   const filled = chart ? items.filter((it) => it.id).length : items.length;
   const defaultCellW = chart ? CHART_CELL_W : GALLERY_CELL_W;
   // The cell selected on the canvas, so its row here says so: the ring out
@@ -422,6 +428,29 @@ function GallerySection({ nodeId }: { nodeId: string }): JSX.Element {
           <button className="btn tiny" title="Add a column on the right" onClick={() => store.resizeChart(nodeId, 0, 1)}>+ col</button>
           <button className="btn tiny" title="Remove the bottom row" disabled={shape.rows <= 1} onClick={() => store.resizeChart(nodeId, -1, 0)}>− row</button>
           <button className="btn tiny" title="Remove the right column" disabled={shape.cols <= 1} onClick={() => store.resizeChart(nodeId, 0, -1)}>− col</button>
+        </div>
+      )}
+
+      {slotNote && (
+        <div className="field">
+          <span>Note width</span>
+          <input
+            type="range"
+            min={90}
+            max={640}
+            step={5}
+            value={slotNote.style.width ?? 280}
+            onChange={(e) => store.setNodeStyle(slotNote.id, { width: Number(e.target.value) })}
+            title="Fixed width of this box's note — the text re-wraps and the height follows"
+          />
+          <span className="muted">{slotNote.style.width ? `${slotNote.style.width}px` : "auto"}</span>
+          <button
+            className="btn small"
+            title="Fit the note to its text again"
+            onClick={() => store.setNodeStyle(slotNote.id, { width: undefined })}
+          >
+            Auto
+          </button>
         </div>
       )}
 
