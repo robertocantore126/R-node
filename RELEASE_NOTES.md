@@ -1,31 +1,51 @@
-# R-node 0.1.1 — gallery build
+# R-node 0.2.0
 
-Build date: 2026-08-19 · Branch: `gallery-node` · Commit `ae4d313`
+Everything since 0.1.1. Maps saved with earlier versions open as before.
 
 ## What's new
 
-**Gallery topics**
+**Freeform topics**
 
-- Fill a topic with a grid of captioned pictures — five per row, wrapping.
-- Drop images onto a gallery topic from your desktop **or from a web browser** — several at a time, as one undo step. The drag ghost previews exactly where they will land.
-- Right-click any topic and choose **New gallery topic** to start one.
-- Click a caption to select its cell and edit the caption text in the Inspector (text is pre-selected, so typing replaces it).
-- Double-click no longer opens the text editor on a gallery topic — its body is pictures. The Inspector's title field says where to rename it.
-- You can still export a single gallery topic as a PNG or JPEG image.
+- A free canvas inside the map: double-click to add text or a shape, drop in topics and images, and draw arrows between items.
+- Write by hand with a pen or the mouse, using the pen and eraser buttons at the top left of the map. The stroke width is set in pixels, and a Wacom eraser end works too.
+- Right-click a canvas to attach a note, shown only through **Show notes**.
+
+**Charts and galleries**
+
+- Chart topics: a fixed board of titled image slots that grows with sliders.
+- Notes on chart boxes, with their own subtopics and images.
+- Web search panel for album, film and book pictures.
+
+**Study**
+
+- Quizzes and flashcard decks attached to a topic, with resume, scores, review arrows and Find in map.
+- Prompts copied for an LLM now carry notes, captions, chart notes, arrows and groups.
+
+**Map and editing**
+
+- In-map search with Ctrl+F.
+- draw.io-style arrows with anchors, reconnectable ends, line styles and heads.
+- Topic outlines, and group boxes with their own titles and styles.
+- Quick topic size controls and an AI expand round trip.
+- Dark and vanilla themes.
+- AVIF and SVG images.
+- Phone-sized PDF export, with vector text and images in every PDF.
+- Basic phone support in the web version.
 
 ## Fixes
 
-- **Open a document, and a title's formatting survives.** Headings, paragraph gaps and list indents used to be silently flattened the next time you saved. They are now kept through every open path (`.rnode.json`, `.rnode.zip`, and opening your own saved file).
-- **Gallery grids stay the right height.** Changing the cell shape in the Inspector no longer leaves dead space or paints the grid over the title, and exported maps now match what you see on screen.
-- **Image drags from a browser now work.** Cross-application drags arrive without a MIME type and used to be rejected; files with a known image extension are now accepted and still get the right format recorded (PNG keeps its alpha).
-
-## For developers
-
-- The dev server binds to IPv4 explicitly, so the Tauri desktop window and browser tabs always reach the same server.
-- Tracer 2.0 (dev-only instrumentation): every capture now reports subsystem coverage, ui→cmd→state→persist→rust transitions, and state changes that never reached storage.
+- Closing R-node with unsaved changes now asks first, and each open map tracks its own unsaved state.
+- A change made while a save is running stays marked as unsaved.
+- Starting an export no longer cancels a save in progress.
+- A drag or pan can no longer stay stuck to the pointer, and Escape now cancels a drag.
+- Headings, paragraph gaps and list indents survive opening a document.
+- Large maps pan and zoom much more smoothly.
+- A failure during startup shows a sample map and the reason instead of a blank window.
 
 ## Install
 
-Run `R-node_0.1.1_x64-setup.exe` (NSIS installer) or install the MSI. The app is currently unsigned — Windows SmartScreen may warn; choose *More info → Run anyway*.
+- `R-node_0.2.0_x64-setup.exe`: installer (NSIS).
+- `R-node_0.2.0_x64_en-US.msi`: installer (MSI).
+- `r-node.exe`: portable, runs without installing.
 
-Full build and developer docs: see `README.md` in this package or the repository.
+The app is unsigned, so Windows SmartScreen may warn. Choose *More info → Run anyway*.
