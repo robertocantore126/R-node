@@ -1,0 +1,67 @@
+/**
+ * What a mouse or pen press on the map is doing, from pointerdown to release.
+ *
+ * This replaces a bag of nullable fields where "only one of these is set" was
+ * a hope. Each gesture now carries only its own data, and a press can be
+ * exactly one of them. Fingers go through touchGestures.ts instead.
+ */
+import { Machine, type TransitionTable } from "../editor/machine";
+import type { ImageSlot, RelAnchor } from "../core/types";
+
+export type ConnectGrip =
+  | { kind: "new"; fromId: string; fromAnchor: RelAnchor }
+  | { kind: "end"; relId: string; end: "from" | "to" };
+
+export type CanvasGesture =
+  | { kind: "idle" }
+  /** Right/middle drag or pan mode, on the canvas or over the text editor. */
+  | { kind: "pan"; over: "canvas" | "overlay" }
+  /** Armed on empty canvas; `active` once the pointer has travelled 4px. */
+  | { kind: "marquee"; anchorX: number; anchorY: number; active: boolean }
+  | { kind: "node-drag"; nodeId: string; grabOffsetX: number; grabOffsetY: number }
+  | { kind: "resize-topic"; nodeId: string; side: "left" | "right"; startWorldX: number; startWidth: number; startX: number }
+  | { kind: "resize-freeform"; nodeId: string; startWorldX: number; startWorldY: number; startWidth: number; startHeight: number }
+  | { kind: "resize-image"; nodeId: string; startWorldX: number; startWidth: number }
+  /** A picture carried to another topic; `dropSlot` is the side it would take. */
+  | { kind: "move-image"; nodeId: string; slot: ImageSlot; dropSlot: ImageSlot }
+  /** A gallery cell in hand; `to` is the gap it would drop into. */
+  | { kind: "move-cell"; from: { nodeId: string; index: number }; to: { nodeId: string; index: number } | null }
+  | { kind: "connect"; grip: ConnectGrip }
+  | { kind: "chart-grow"; id: string; grow: "row" | "col"; startWorld: number; pitch: number; current: number };
+
+export const IDLE_GESTURE: CanvasGesture = { kind: "idle" };
+
+const BACK_TO_IDLE = ["idle"] as const;
+
+/** A gesture only ever starts from idle and only ever ends there. */
+export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
+  idle: ["pan", "marquee", "node-drag", "resize-topic", "resize-freeform", "resize-image", "move-image", "move-cell", "connect", "chart-grow"],
+  pan: BACK_TO_IDLE,
+  marquee: BACK_TO_IDLE,
+  "node-drag": BACK_TO_IDLE,
+  "resize-topic": BACK_TO_IDLE,
+  "resize-freeform": BACK_TO_IDLE,
+  "resize-image": BACK_TO_IDLE,
+  "move-image": BACK_TO_IDLE,
+  "move-cell": BACK_TO_IDLE,
+  connect: BACK_TO_IDLE,
+  "chart-grow": BACK_TO_IDLE,
+};
+
+export function createCanvasGestureMachine(): Machine<CanvasGesture> {
+  return new Machine<CanvasGesture>("canvasGesture", IDLE_GESTURE, CANVAS_GESTURE_TABLE);
+}
+
+/**
+ * Whether this gesture has something to commit on release. While it does, the
+ * keyboard is held off: Delete or undo would change the document underneath a
+ * drag whose release is about to write to it. A pan changes only the view, so
+ * typing carries on during one, and an editing overlay keeps working.
+ */
+export function gestureHoldsKeyboard(gesture: CanvasGesture): boolean {
+  return gesture.kind !== "idle" && gesture.kind !== "pan";
+}
+
+export function isResizeGesture(kind: CanvasGesture["kind"]): boolean {
+  return kind === "resize-topic" || kind === "resize-freeform" || kind === "resize-image";
+}

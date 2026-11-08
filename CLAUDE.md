@@ -69,6 +69,11 @@ Everything else — `theme.ts`, `shortcuts.ts`, `pasteSanitizer.ts`, `Outliner`,
   `applyLayout`); `position.manual === true` means user-placed, and layout must
   preserve it.
 
+- Drag state, "what is the mouse doing", save queue, progress bar, which thing
+  is selected -> `docs/STATE_MACHINES.md` — the catalog of every lifecycle in the
+  app and which ones are explicit machines. Live state:
+  `window.__rnode.machines()`.
+
 Paths here are checked by `npm run check:map` — a failure means this section is
 stale, not that the code is wrong.
 

@@ -42,12 +42,14 @@ export function WebSearchPanel(): JSX.Element {
   // over an older one still in flight.
   useEffect(() => {
     const q = query.trim();
+    // Taken before the empty check: clearing the box must also disown a search
+    // still in flight, or its results land in the emptied panel.
+    const mine = ++seq.current;
     if (q === "") {
       setResults([]);
       setStatus("idle");
       return;
     }
-    const mine = ++seq.current;
     const timer = window.setTimeout(async () => {
       setStatus("loading");
       try {
