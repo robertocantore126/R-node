@@ -1,5 +1,6 @@
 import { phoneMapPages } from "./pdfPhone";
 import { FREEFORM_HEADER } from "../core/freeform";
+import { inkPolyline, inkStrokes } from "../core/ink";
 import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
 import { THEMES, readableOn, type RenderTheme } from "../render/theme";
 import { groupBoxes, groupRadius, wavePoints } from "../layout/groups";
@@ -729,7 +730,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     for(let y=p.y+FREEFORM_HEADER+Math.max(0,Math.floor(((activePage?.top??p.y)-p.y-FREEFORM_HEADER)/20))*20;y<Math.min(p.y+p.h,activePage ? activePage.top+activePage.height : Infinity);y+=20) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(y))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(y))} l`);
     cmds.push("S","Q");
     plainText(cmds,p.node.title||"Freeform",p.x+14,p.y+FREEFORM_HEADER/2+4.5,13,theme.text,fr,true,p.w-28);
-    if(!p.node.childrenIds.length) plainText(cmds,"Double-click to add text or a shape. Drop nodes, text or images here.",p.x+18,p.y+FREEFORM_HEADER+32.5,13,theme.textMuted,fr,false,p.w-36);
+    if(!p.node.childrenIds.length&&!inkStrokes(p.node.style).length) plainText(cmds,"Double-click to add text or a shape. Drop nodes, text or images here.",p.x+18,p.y+FREEFORM_HEADER+32.5,13,theme.textMuted,fr,false,p.w-36);
     ops+=12;
   };
 
@@ -1132,6 +1133,18 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       drawImages(cmds, p, fr);
       drawCaptions(cmds, p, colors?.text ?? "#111111", fr);
       drawTitle(cmds, p, colors?.text ?? "#111111", fr);
+    }
+    // Handwriting over the items on its canvas, as on screen.
+    for (const p of pg.nodes) {
+      if (!p.node.style.freeform) continue;
+      for (const stroke of inkStrokes(p.node.style)) {
+        const line = inkPolyline(stroke);
+        let path = `${f(fr.X(p.x + line[0]))} ${f(fr.Y(p.y + line[1]))} m`;
+        for (let i = 2; i < line.length; i += 2) path += ` ${f(fr.X(p.x + line[i]))} ${f(fr.Y(p.y + line[i + 1]))} l`;
+        // 1 J and 1 j are round caps and joins, as on the canvas.
+        cmds.push("q", `${rgb(stroke.color ?? theme.text)} RG`, `${f(stroke.width * fr.s)} w`, "1 J 1 j", `${path} S`, "Q");
+        ops += 6;
+      }
     }
 
     if (opts.theme) for (const group of sheet.boundaries) {

@@ -19,7 +19,7 @@
  * child of the chart: there it is annotation lines too.
  */
 import { runsToPlain, nodeRuns } from "./text";
-import { chartSlotNote } from "./chartNotes";
+import { chartSlotNote, freeformNote } from "./chartNotes";
 import type { MindNode, Sheet } from "./types";
 
 export type OutlineMode = "quiz" | "plain" | "ai";
@@ -42,6 +42,8 @@ export function studyBranchIds(sheet: Sheet, rootId: string): Set<string> {
     stack.push(...n.childrenIds.slice().reverse());
     const g = n.style.gallery;
     if (g?.chart) g.items.forEach((_, i) => { const note = chartSlotNote(sheet, n.id, i); if (note) stack.push(note.id); });
+    const canvasNote = freeformNote(sheet, n.id);
+    if (canvasNote) stack.push(canvasNote.id);
   }
   return seen;
 }
@@ -105,6 +107,12 @@ export function studyOutline(sheet: Sheet, rootIds: string[], mode: OutlineMode)
       if (mode === "ai") chartNoteAsText(slot, d + 1);
       else topic(slot.id, d + 1);
     });
+    // Handwriting is not text, so a canvas reaches a quiz through its note.
+    const canvasNote = freeformNote(sheet, n.id);
+    if (canvasNote) {
+      if (mode === "ai") chartNoteAsText(canvasNote, d);
+      else topic(canvasNote.id, d);
+    }
   };
 
   const chartNoteAsText = (n: MindNode, d: number): void => {

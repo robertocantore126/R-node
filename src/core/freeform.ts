@@ -1,4 +1,5 @@
 import type { MindNode, Sheet, TopicShape } from "./types";
+import { inkBounds, inkStrokes } from "./ink";
 export const FREEFORM_HEADER = 36;
 export const FREEFORM_PADDING = 16;
 
@@ -62,5 +63,14 @@ export function freeformContentBounds(sheet: Sheet, id: string, size: (node: Min
     });
   };
   visit(id, 0, 0);
+  // Handwriting is content too: the canvas grows to hold it and cannot shrink past it.
+  const canvas = sheet.nodes[id];
+  if (canvas) {
+    for (const stroke of inkStrokes(canvas.style)) {
+      const b = inkBounds(stroke);
+      bounds.minX = Math.min(bounds.minX, b.minX); bounds.minY = Math.min(bounds.minY, b.minY);
+      bounds.maxX = Math.max(bounds.maxX, b.maxX); bounds.maxY = Math.max(bounds.maxY, b.maxY);
+    }
+  }
   return bounds;
 }

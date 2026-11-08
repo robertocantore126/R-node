@@ -1,6 +1,8 @@
 import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
+import { inkPolyline, inkStrokes } from "../core/ink";
+import type { InkStroke } from "../core/types";
 import { quizMistakeNodeIds } from "../core/quiz";
-import { chartNoteRoot, chartSlotNote, isChartNote, openChartNote } from "../core/chartNotes";
+import { chartNoteRoot, chartSlotNote, freeformNote, isChartNote, openChartNote } from "../core/chartNotes";
 import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
 /**
  * Canvas renderer — one <canvas>, no DOM/SVG nodes per topic.
@@ -81,6 +83,12 @@ export interface RenderState {
   relDraft?: { rel: Relationship; pointer: { x: number; y: number }; replaces?: string; target?: string | null } | null;
   /** A chart grow slider in flight: how far it moved (world) and what it adds. */
   chartGrow?: { id: string; grow: "row" | "col"; offset: number; delta: number } | null;
+  /** The freeform canvas whose note is on screen (Show notes), or null. */
+  shownCanvasNote?: string | null;
+  /** The pen stroke being written (not in the document until released). */
+  inkDraft?: { canvasId: string; stroke: InkStroke } | null;
+  /** Strokes the eraser has touched: hidden now, removed on release. */
+  inkErased?: ReadonlySet<InkStroke> | null;
   /**
    * In-map search (Ctrl+F): ids of topics whose title/notes match the query —
    * each wears a dashed ring — and the one currently walked to, which wears a
@@ -426,7 +434,7 @@ export class Renderer {
         Math.max(a.y + a.h, b.y + b.h) >= viewMinY &&
         Math.min(a.y, b.y) <= viewMaxY);
 
-    for (const p of placed) if (p.visible && p.node.style.freeform) this.drawFreeform(theme, p);
+    for (const p of placed) if (p.visible && p.node.style.freeform) this.drawFreeform(theme, p, state);
 
     // 0) group fills, under everything they enclose
     this.drawGroupFills(state, byId);
@@ -485,6 +493,8 @@ export class Renderer {
       if (!p.visible) continue;
       this.drawNode(theme, p, state, false);
     }
+    // Handwriting goes over the items on its canvas, to annotate them.
+    for (const p of placed) if (p.visible && p.node.style.freeform) this.drawInk(theme, p, state);
 
     // 3b) in-map search highlights. Drawn from the placed list, so only VISIBLE
     // matches are ringed — a match inside a collapsed branch is not on screen,
@@ -802,7 +812,46 @@ export class Renderer {
     ctx.strokeRect(p.x - RING_PAD, p.y - RING_PAD, p.w + RING_PAD * 2, p.h + RING_PAD * 2);
   }
 
-  private drawFreeform(theme: RenderTheme, p: Placed): void {
+  /** Built once per stroke: strokes are immutable and canvas-local, so neither
+   *  a repaint nor moving the canvas has to rebuild thousands of points. */
+  private inkPaths = new WeakMap<InkStroke, Path2D>();
+
+  private strokeInk(stroke: InkStroke, color: string): void {
+    const ctx = this.ctx;
+    let path = this.inkPaths.get(stroke);
+    if (!path) {
+      path = new Path2D();
+      const line = inkPolyline(stroke);
+      path.moveTo(line[0], line[1]);
+      for (let i = 2; i < line.length; i += 2) path.lineTo(line[i], line[i + 1]);
+      this.inkPaths.set(stroke, path);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = stroke.width;
+    ctx.stroke(path);
+  }
+
+  private drawInk(theme: RenderTheme, p: Placed, state: RenderState): void {
+    const strokes = inkStrokes(p.node.style);
+    const draft = state.inkDraft?.canvasId === p.node.id && state.inkDraft.stroke.path.length >= 2 ? state.inkDraft.stroke : null;
+    if (strokes.length === 0 && !draft) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (const stroke of strokes) {
+      if (!state.inkErased?.has(stroke)) this.strokeInk(stroke, stroke.color ?? theme.text);
+    }
+    if (draft) {
+      this.strokeInk(draft, draft.color ?? theme.text);
+      // Still growing: the path just built must not outlive this frame.
+      this.inkPaths.delete(draft);
+    }
+    ctx.restore();
+  }
+
+  private drawFreeform(theme: RenderTheme, p: Placed, state?: RenderState): void {
     const ctx = this.ctx;
     ctx.save();
     ctx.fillStyle = p.node.style.fill ?? theme.background;
@@ -823,9 +872,21 @@ export class Renderer {
     ctx.font = `600 13px ${FONT_STACK}`;
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
     ctx.fillText(p.node.title || "Freeform", p.x + 14, p.y + FREEFORM_HEADER / 2, p.w - 28);
-    if (p.node.childrenIds.length === 0) {
+    // The first pen stroke removes the hint as it is written, not when it ends.
+    const written = inkStrokes(p.node.style).length > 0 || state?.inkDraft?.canvasId === p.node.id;
+    if (p.node.childrenIds.length === 0 && !written) {
       ctx.fillStyle = theme.textMuted; ctx.font = `13px ${FONT_STACK}`;
       ctx.fillText("Double-click to add text or a shape. Drop nodes, text or images here.", p.x + 18, p.y + FREEFORM_HEADER + 28, p.w - 36);
+    }
+    // The same corner mark as a chart box that has a note.
+    if (state && freeformNote(state.sheet, p.node.id)) {
+      ctx.fillStyle = theme.selection;
+      ctx.beginPath();
+      ctx.moveTo(p.x + p.w - 26, p.y);
+      ctx.arcTo(p.x + p.w, p.y, p.x + p.w, p.y + 12, 12);
+      ctx.lineTo(p.x + p.w, p.y + 26);
+      ctx.closePath();
+      ctx.fill();
     }
     ctx.restore();
   }
@@ -2324,6 +2385,7 @@ export class Renderer {
         ghostImage: null,
         galleryDrop: null,
       });
+      if (placed.node.style.freeform) this.drawInk(THEMES[state.themeName], placed, state);
       target.restore();
     } finally {
       this.ctx = savedCtx;
@@ -2792,6 +2854,7 @@ export class Renderer {
       }
     }
     for (const p of all) this.drawNode(theme, p, { ...state, showHidden: true }, false);
+    for (const p of all) if (p.node.style.freeform) this.drawInk(theme, p, state);
     // export with a fixed 1px-ish stroke scale
     this.drawGroupsAndSummaries(theme, { ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);
   }

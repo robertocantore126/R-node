@@ -68,6 +68,8 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       store.closeSearch();
     } else if (s.relFrom) {
       store.clearRelFrom();
+    } else if (s.mode === "ink") {
+      store.setMode("select");
     } else if (s.gallerySel) {
       // Step OUT of the cell, not out of the topic (T25): the grid is inside
       // the topic, so one Escape should climb one level, and the Inspector
@@ -80,6 +82,15 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
   }
 
   const mod = e.metaKey || e.ctrlKey;
+  // P for the pen, only where typing would not mean anything else: on any
+  // other selected topic a letter starts editing it.
+  if (!mod && !e.altKey && e.key.toLowerCase() === "p") {
+    if (store.getSnapshot().mode === "ink" || store.selectionNode?.style.freeform) {
+      store.toggleInkMode();
+      return true;
+    }
+  }
+
   const parts: string[] = [];
   if (mod) parts.push("Mod");
   if (e.shiftKey && !["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) parts.push("Shift");

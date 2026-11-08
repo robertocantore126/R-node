@@ -24,6 +24,16 @@ export function chartSlotNote(sheet: Sheet, chartId: string, index: number): Min
   return note && note.style.chartNote?.chartId === chartId ? note : null;
 }
 
+/** The note of a freeform canvas, or null. A copied canvas keeps the id but
+ *  not the note, which is why both directions are checked. */
+export function freeformNote(sheet: Sheet, canvasId: string): MindNode | null {
+  const canvas = sheet.nodes[canvasId];
+  const noteId = canvas?.style.freeform ? canvas.style.canvasNote : undefined;
+  if (!noteId) return null;
+  const note = sheet.nodes[noteId];
+  return note && note.style.chartNote?.chartId === canvasId ? note : null;
+}
+
 /** Where a note hangs: its chart and the slot that names it, or null. */
 export function chartNoteSlot(sheet: Sheet, noteId: string): { chartId: string; index: number } | null {
   const chartId = sheet.nodes[noteId]?.style.chartNote?.chartId;
@@ -55,7 +65,7 @@ export function chartNoteRoot(sheet: Sheet, id: string | null | undefined): stri
  */
 export function openChartNote(
   sheet: Sheet,
-  sel: { gallerySel?: { nodeId: string; index: number } | null; editingId?: string | null; selection: Iterable<string> },
+  sel: { gallerySel?: { nodeId: string; index: number } | null; editingId?: string | null; selection: Iterable<string>; shownCanvasNote?: string | null },
 ): string | null {
   if (sel.gallerySel) {
     const n = chartSlotNote(sheet, sel.gallerySel.nodeId, sel.gallerySel.index);
@@ -65,7 +75,8 @@ export function openChartNote(
   if (editing) return editing;
   let last: string | null = null;
   for (const id of sel.selection) last = id;
-  return chartNoteRoot(sheet, last);
+  // A freeform canvas's note is shown on request (Show notes), not by clicking.
+  return chartNoteRoot(sheet, last) ?? (sel.shownCanvasNote ? freeformNote(sheet, sel.shownCanvasNote)?.id ?? null : null);
 }
 
 /** Every note owned by a chart, valid links only. */
@@ -76,5 +87,7 @@ export function chartNoteIds(sheet: Sheet, chartId: string): string[] {
     const n = chartSlotNote(sheet, chartId, i);
     if (n) out.push(n.id);
   });
+  const canvasNote = freeformNote(sheet, chartId);
+  if (canvasNote) out.push(canvasNote.id);
   return out;
 }

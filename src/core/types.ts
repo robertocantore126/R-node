@@ -215,9 +215,27 @@ export function borderDash(style: BorderStyle | undefined, width: number): { das
   }
 }
 
+/**
+ * One pen stroke on a freeform canvas. `path` is flat `[x, y, ...]` in
+ * canvas-local units; no `color` means the theme's text colour.
+ */
+export interface InkStroke {
+  path: number[];
+  /** Constant thickness, in map units (pixels at 100% zoom). */
+  width: number;
+  color?: string;
+}
+
 export interface Style {
   /** Topic containing freely positioned document nodes. */
   freeform?: boolean;
+  /** Handwriting on a freeform canvas, oldest first (see core/ink.ts). */
+  ink?: InkStroke[];
+  /**
+   * The id of a freeform canvas's note: a floating topic whose `chartNote`
+   * points back here. Valid only when both sides agree (`freeformNote`).
+   */
+  canvasNote?: string;
   /** Position relative to the parent inside a freeform topic. */
   freeformPosition?: { x: number; y: number };
   fill?: string;

@@ -39,7 +39,7 @@ A bug capture (the record button in the top bar) contains the same moves as
 
 | Name | Where | States | Guarantee |
 |---|---|---|---|
-| `canvasGesture` | `src/ui/canvasGesture.ts`, driven by `CanvasView` | `idle`, `pan`, `marquee`, `node-drag`, `resize-topic`, `resize-freeform`, `resize-image`, `move-image`, `move-cell`, `connect`, `chart-grow` | A mouse or pen press is exactly one gesture. It starts and ends at `idle`. Release commits; Escape, `pointercancel` and lost capture roll back. |
+| `canvasGesture` | `src/ui/canvasGesture.ts`, driven by `CanvasView` | `idle`, `pan`, `marquee`, `node-drag`, `resize-topic`, `resize-freeform`, `resize-image`, `move-image`, `move-cell`, `connect`, `chart-grow`, `ink-stroke`, `ink-erase` | A mouse or pen press is exactly one gesture. It starts and ends at `idle`. Release commits; Escape, `pointercancel` and lost capture roll back. |
 | `saveFlow` | `src/editor/editorMachines.ts`, driven by `EditorStore.saveNow` | `idle`, `saving` (with `queued`) | One save at a time. A request during a save re-runs once, unless the user cancelled or the target was refused. |
 | `longOps` | `LongOps` in `src/editor/editorMachines.ts` | A stack of `save`, `export` and `open` operations | Operations overlap safely. The bar shows the newest, and Cancel only reaches that one. |
 | `interaction` | Read-only view built in the `EditorStore` constructor | `target` (a `SelectionTarget`), `editingId`, `hasDraft`, `relFrom`, `mode` | `setSelectionTarget` is the only way to write the selection fields, so at most one kind of thing is selected. A gallery cell stays inside `nodes` because its topic remains selected. |
@@ -62,7 +62,7 @@ makes the current form wrong.
 |---|---|---|---|
 | Inline edit session | `state.editingId`, `editingDraftRuns`, `editOriginal`, `pendingInsert` in the store | idle → editing → committed or cancelled | Every write is in `startEdit`, `typeToEdit`, `commitEdit`, `cancelEdit` and `commitDraftOnLeave`. The fields move together, and the contract (I2, I3, I4) is covered by tests. |
 | Link mode | `state.relFrom` | off → picking a target | Null or an id says it all. Cleared on document switch. |
-| Tool mode | `state.mode` | `select` or `pan` | Already a closed union. |
+| Tool mode | `state.mode` | `select`, `pan` or `ink` | Already a closed union. |
 | Unsaved changes | `editRev`, `savedRev`, `state.sync` | Counters compared per document | Counting beats a state here: an edit during a write stays unsaved by arithmetic. See "Known wrinkle". |
 | Panels and windows | `showPalette`, `showOutliner`, `showWebSearch`, `showInspector`, `showSidebar`, `quizOpen`, `flashcardsOpen` | open or closed | Independent by design. The quiz and deck windows are non-modal. |
 | Map search | `searchOpen`, `search`, `searchResults`, `searchIndex` | closed → open | One owner, reset together in `closeSearch` and `switchToDoc`. |

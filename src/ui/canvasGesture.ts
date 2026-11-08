@@ -6,7 +6,7 @@
  * exactly one of them. Fingers go through touchGestures.ts instead.
  */
 import { Machine, type TransitionTable } from "../editor/machine";
-import type { ImageSlot, RelAnchor } from "../core/types";
+import type { ImageSlot, InkStroke, RelAnchor } from "../core/types";
 
 export type ConnectGrip =
   | { kind: "new"; fromId: string; fromAnchor: RelAnchor }
@@ -27,6 +27,10 @@ export type CanvasGesture =
   /** A gallery cell in hand; `to` is the gap it would drop into. */
   | { kind: "move-cell"; from: { nodeId: string; index: number }; to: { nodeId: string; index: number } | null }
   | { kind: "connect"; grip: ConnectGrip }
+  /** A pen stroke being written; the origin converts world points to canvas-local. */
+  | { kind: "ink-stroke"; canvasId: string; originX: number; originY: number; stroke: InkStroke }
+  /** The eraser passing over a canvas; `erased` is removed on release. */
+  | { kind: "ink-erase"; canvasId: string; originX: number; originY: number; erased: Set<InkStroke> }
   | { kind: "chart-grow"; id: string; grow: "row" | "col"; startWorld: number; pitch: number; current: number };
 
 export const IDLE_GESTURE: CanvasGesture = { kind: "idle" };
@@ -35,7 +39,7 @@ const BACK_TO_IDLE = ["idle"] as const;
 
 /** A gesture only ever starts from idle and only ever ends there. */
 export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
-  idle: ["pan", "marquee", "node-drag", "resize-topic", "resize-freeform", "resize-image", "move-image", "move-cell", "connect", "chart-grow"],
+  idle: ["pan", "marquee", "node-drag", "resize-topic", "resize-freeform", "resize-image", "move-image", "move-cell", "connect", "chart-grow", "ink-stroke", "ink-erase"],
   pan: BACK_TO_IDLE,
   marquee: BACK_TO_IDLE,
   "node-drag": BACK_TO_IDLE,
@@ -46,6 +50,8 @@ export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
   "move-cell": BACK_TO_IDLE,
   connect: BACK_TO_IDLE,
   "chart-grow": BACK_TO_IDLE,
+  "ink-stroke": BACK_TO_IDLE,
+  "ink-erase": BACK_TO_IDLE,
 };
 
 export function createCanvasGestureMachine(): Machine<CanvasGesture> {
