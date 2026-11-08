@@ -9,6 +9,7 @@ import { makeOp, type Op } from "../core/ops";
 import { runExportNodeImage } from "../editor/exportBridge";
 import { plainToRuns } from "../core/text";
 import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
+import { InkControls } from "./InkControls";
 const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
@@ -121,6 +122,7 @@ export function Inspector(): JSX.Element {
           <p className="muted">Double-click inside to add text. Drag topics, text or images into this canvas.</p>
           <div className="field"><span>Canvas width</span><input type="number" min={240} max={6000} value={node.style.width ?? 720} onChange={(e) => store.setNodeStyle(node.id, { width: Math.max(240, Math.min(6000, Number(e.target.value) || 720)) })} /></div>
           <div className="field"><span>Canvas height</span><input type="number" min={160} max={6000} value={node.style.height ?? 480} onChange={(e) => store.setNodeStyle(node.id, { height: Math.max(160, Math.min(6000, Number(e.target.value) || 480)) })} /></div>
+          <InkControls canvasId={node.id} />
         </>}
         {node.style.code ? (
           <p className="muted">

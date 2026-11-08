@@ -1,4 +1,5 @@
 import { FREEFORM_HEADER } from "../core/freeform";
+import { inkPolyline, inkStrokes } from "../core/ink";
 /**
  * SVG export — the whole map as one vector document.
  *
@@ -558,6 +559,16 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     }
     parts.push(title(p, text, pos, opts.measurer));
     parts.push(`</g>`);
+  }
+  // Handwriting last, over the items on its canvas, as on screen.
+  for (const p of placed) {
+    if (!p.node.style.freeform) continue;
+    for (const stroke of inkStrokes(p.node.style)) {
+      const line = inkPolyline(stroke);
+      let d = "";
+      for (let i = 0; i < line.length; i += 2) d += `${i === 0 ? "M" : "L"}${n3(p.x + line[i])} ${n3(p.y + line[i + 1])}`;
+      parts.push(`<path d="${d}" fill="none" stroke="${esc(stroke.color ?? "#1a1a1a")}" stroke-width="${n3(stroke.width)}" stroke-linecap="round" stroke-linejoin="round"/>`);
+    }
   }
   parts.push("</svg>");
 

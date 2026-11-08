@@ -1,5 +1,6 @@
 import { topicClipboardFromHtml } from "../editor/topicClipboard";
-import { freeformOwner } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { appendInkSample, inkStrokeHit, inkStrokes } from "../core/ink";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { viewSize } from "../editor/view";
@@ -188,6 +189,9 @@ export function CanvasView(): JSX.Element {
   /** Live previews of a relationship / chart slider drag — see RenderState. */
   const relDraftRef = useRef<RenderState["relDraft"]>(null);
   const chartGrowRef = useRef<RenderState["chartGrow"]>(null);
+  /** The stroke being written, and the strokes the eraser has touched. */
+  const inkDraftRef = useRef<RenderState["inkDraft"]>(null);
+  const inkErasedRef = useRef<RenderState["inkErased"]>(null);
   /** Cursor over a relationship handle or a chart slider (null = none). */
   const [handleCursor, setHandleCursor] = useState<string | null>(null);
   const [extGhostSrc, setExtGhostSrc] = useState<string | null>(null);
@@ -220,6 +224,9 @@ export function CanvasView(): JSX.Element {
       marqueeSel: marqueeSelRef.current,
       relDraft: relDraftRef.current,
       chartGrow: chartGrowRef.current,
+      shownCanvasNote: s.shownCanvasNote,
+      inkDraft: inkDraftRef.current,
+      inkErased: inkErasedRef.current,
       searchMatches: s.searchOpen && s.search ? new Set(s.searchResults) : null,
       searchCurrent: s.searchOpen && s.searchResults.length > 0 ? s.searchResults[s.searchIndex] : null,
     };
@@ -239,6 +246,8 @@ export function CanvasView(): JSX.Element {
     marqueeSelRef.current = null;
     relDraftRef.current = null;
     chartGrowRef.current = null;
+    inkDraftRef.current = null;
+    inkErasedRef.current = null;
     setMarquee(null);
     schedule();
   }, [gesture, schedule]);
@@ -602,6 +611,34 @@ export function CanvasView(): JSX.Element {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
+  /** The canvas whose writing area is under a world point, or null. Its title
+   *  band stays out, so a canvas can still be dragged in pen mode. */
+  const inkCanvasAt = (wx: number, wy: number): string | null => {
+    const renderer = rendererRef.current!;
+    const rs = currentRenderState();
+    const hit = renderer.hitTest(rs, wx, wy);
+    if (!hit) return null;
+    const canvasId = store.doc.node(hit)?.style.freeform ? hit : freeformOwner(store.sheet, hit);
+    const rect = canvasId ? renderer.nodeWorldRect(rs, canvasId) : null;
+    return canvasId && rect && wy >= rect.y + FREEFORM_HEADER ? canvasId : null;
+  };
+
+  const writeAt = (g: CanvasGesture & { kind: "ink-stroke" }, wx: number, wy: number): void => {
+    // Never above the title band or left of the canvas: it only grows right and down.
+    const x = Math.max(0, wx - g.originX);
+    const y = Math.max(FREEFORM_HEADER, wy - g.originY);
+    appendInkSample(g.stroke.path, x, y, 0.6 / store.getSnapshot().camera.scale);
+  };
+
+  const eraseAt = (g: CanvasGesture & { kind: "ink-erase" }, wx: number, wy: number): void => {
+    const canvas = store.doc.node(g.canvasId);
+    if (!canvas) return;
+    const tolerance = 5 / store.getSnapshot().camera.scale;
+    for (const stroke of inkStrokes(canvas.style)) {
+      if (!g.erased.has(stroke) && inkStrokeHit(stroke, wx - g.originX, wy - g.originY, tolerance)) g.erased.add(stroke);
+    }
+  };
+
   const onPointerDown = (e: RPointerEvent): void => {
     interactedRef.current = true;
     if (e.pointerType === "touch") {
@@ -645,7 +682,10 @@ export function CanvasView(): JSX.Element {
       trace.applied("pointerdown:pan", { button: e.button, mode: s.mode });
       return;
     }
-    if (e.button !== 0) return trace.ignored("pointerdown", `button-${e.button}`);
+    // A Wacom eraser end reports button 5. It always erases on a canvas; the
+    // tip only writes in pen mode, so a pen still works as a mouse elsewhere.
+    const eraserEnd = e.button === 5 || (e.buttons & 32) !== 0;
+    if (e.button !== 0 && !eraserEnd) return trace.ignored("pointerdown", `button-${e.button}`);
 
     // What a click was ABOUT to disturb, sampled before anything mutates. A
     // gesture that changes none of this and still flickers is a painting bug,
@@ -666,6 +706,29 @@ export function CanvasView(): JSX.Element {
         return;
       }
     }
+    if ((s.mode === "ink" || eraserEnd) && !s.relFrom) {
+      const canvasId = inkCanvasAt(world.x, world.y);
+      if (canvasId) {
+        const rect = renderer.nodeWorldRect(rs, canvasId)!;
+        if (s.editingId) store.commitEdit();
+        if (eraserEnd || s.ink.tool === "eraser") {
+          const g: CanvasGesture & { kind: "ink-erase" } = { kind: "ink-erase", canvasId, originX: rect.x, originY: rect.y, erased: new Set() };
+          gesture.to(g, "pointerdown");
+          inkErasedRef.current = g.erased;
+          eraseAt(g, world.x, world.y);
+        } else {
+          const stroke = { path: [] as number[], width: s.ink.width, ...(s.ink.color ? { color: s.ink.color } : {}) };
+          const g: CanvasGesture & { kind: "ink-stroke" } = { kind: "ink-stroke", canvasId, originX: rect.x, originY: rect.y, stroke };
+          gesture.to(g, "pointerdown");
+          inkDraftRef.current = { canvasId, stroke };
+          writeAt(g, world.x, world.y);
+        }
+        schedule();
+        return;
+      }
+    }
+    if (eraserEnd) return trace.ignored("pointerdown", "eraser outside a canvas");
+
     // Relationship editing (draw.io style), before anything else on the map:
     // the handles sit outside or on the border of a box and nothing else
     // claims those points. An end of the selected relationship is grabbed to
@@ -886,6 +949,21 @@ export function CanvasView(): JSX.Element {
     drag.lastX = x;
     drag.lastY = y;
     const gs = gesture.state;
+
+    if (gs.kind === "ink-stroke" || gs.kind === "ink-erase") {
+      // A tablet samples faster than the display: the browser folds the extra
+      // points into this event, and handwriting needs every one of them.
+      const coalesced = e.nativeEvent.getCoalescedEvents?.() ?? [];
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const { camera } = store.getSnapshot();
+      for (const ev of coalesced.length > 0 ? coalesced : [e.nativeEvent]) {
+        const world = screenToWorld(camera, sizeRef.current.w, sizeRef.current.h, ev.clientX - rect.left, ev.clientY - rect.top);
+        if (gs.kind === "ink-stroke") writeAt(gs, world.x, world.y);
+        else eraseAt(gs, world.x, world.y);
+      }
+      schedule();
+      return;
+    }
 
     // A relationship in hand: the free end follows the pointer, or snaps to
     // the topic under it (an anchor on its border, or floating in its middle).
@@ -1134,6 +1212,8 @@ export function CanvasView(): JSX.Element {
     const draft = relDraftRef.current;
     const live = chartGrowRef.current;
     endGesture("pointerup");
+    if (gs.kind === "ink-stroke") return store.addInkStroke(gs.canvasId, gs.stroke);
+    if (gs.kind === "ink-erase") return store.eraseInkStrokes(gs.canvasId, gs.erased);
     if (gs.kind === "connect") {
       const c = gs.grip;
       if (drag.moved && draft?.target) {
@@ -1218,6 +1298,8 @@ export function CanvasView(): JSX.Element {
     const { x, y } = localPoint(e as unknown as RPointerEvent);
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const renderer = rendererRef.current!;
+    // Two quick pen dots (a colon, an umlaut) are writing, not a double click.
+    if (s.mode === "ink" && inkCanvasAt(world.x, world.y)) return trace.ignored("dblclick", "writing with the pen");
     const hit = renderer.hitTest(currentRenderState(), world.x, world.y);
     if (hit) {
       if (store.doc.node(hit)?.style.freeform) {
@@ -1286,6 +1368,9 @@ export function CanvasView(): JSX.Element {
   /** Open the node menu for the topic under canvas point (x, y), placed at the
    *  client point — the right-click and the long press share it. */
   const openNodeMenu = (x: number, y: number, clientX: number, clientY: number): void => {
+    // No menu while the pen or eraser is in hand: Windows also turns a pen held
+    // still into a right-click, which would interrupt a slow stroke.
+    if (store.getSnapshot().mode === "ink") return trace.ignored("contextmenu", "pen or eraser active");
     if (store.getSnapshot().editingId) return; // the editor owns right-click (paste etc.)
     const s = store.getSnapshot();
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
@@ -1445,6 +1530,9 @@ export function CanvasView(): JSX.Element {
       marqueeSel: marqueeSelRef.current,
       relDraft: relDraftRef.current,
       chartGrow: chartGrowRef.current,
+      shownCanvasNote: s.shownCanvasNote,
+      inkDraft: inkDraftRef.current,
+      inkErased: inkErasedRef.current,
     };
   };
 
@@ -1561,7 +1649,9 @@ export function CanvasView(): JSX.Element {
                   ? "grabbing"
                   : state.mode === "pan"
                     ? "grab"
-                    : "default",
+                    : state.mode === "ink"
+                      ? "crosshair"
+                      : "default",
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

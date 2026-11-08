@@ -14,6 +14,7 @@ import { Palette } from "./ui/Palette";
 import { SearchBar } from "./ui/SearchBar";
 import { QuizWindow } from "./ui/QuizWindow";
 import { FlashcardWindow } from "./ui/FlashcardWindow";
+import { InkRail } from "./ui/InkRail";
 
 export function App(): JSX.Element {
   const store = useStore();
@@ -69,6 +70,7 @@ export function App(): JSX.Element {
         <div className="workspace">
           <div className="canvas-area">
             <CanvasView />
+            <InkRail />
             <SearchBar />
             {state.showOutliner && <Outliner />}
             {state.showWebSearch && <WebSearchPanel />}
@@ -138,6 +140,7 @@ function StatusBar(): JSX.Element {
       )}
       <span className="spacer" />
       {state.relFrom && <span className="status-hint">Link mode: click a target</span>}
+      {state.mode === "ink" && <span className="status-hint">Pen mode: write on a freeform canvas · P or Escape to stop</span>}
       <span className="sep">·</span>
       <span>Enter/Tab create · drag to move · right-drag to pan · Ctrl+scroll to zoom</span>
     </footer>

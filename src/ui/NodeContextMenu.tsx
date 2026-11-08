@@ -18,7 +18,7 @@ import { THEMES } from "../render/theme";
 import { quizHasMistakes } from "../core/quiz";
 import { flashcardCounts } from "../core/flashcards";
 import { NodeBorderPicker } from "./Inspector";
-import { chartSlotNote } from "../core/chartNotes";
+import { chartSlotNote, freeformNote } from "../core/chartNotes";
 
 export interface CtxMenuState {
   /** Canvas-wrap coordinates of the cursor when the menu opened. */
@@ -137,6 +137,14 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
         New chart topic
       </button>
       {node.style.freeform && <button role="menuitem" onClick={act(() => store.createFreeformItem(node.id))}>Add text / node</button>}
+      {node.style.freeform && <button role="menuitem" onClick={act(() => store.toggleInkMode())}>Write with pen</button>}
+      {node.style.freeform && (freeformNote(store.sheet, node.id) ? <>
+        <button role="menuitem" onClick={act(() => store.toggleCanvasNote(node.id))}>{state.shownCanvasNote === node.id ? "Hide notes" : "Show notes"}</button>
+        <button role="menuitem" onClick={act(() => store.addCanvasNote(node.id))}>Edit note</button>
+        <button role="menuitem" onClick={act(() => store.removeCanvasNote(node.id))}>Remove note</button>
+      </> : (
+        <button role="menuitem" onClick={act(() => store.addCanvasNote(node.id))}>Add note</button>
+      ))}
       {/* Growing a chart keeps the menu open, like the quiz "+": the point is
           to click "+ column" three times in a row. */}
       {node.style.gallery?.chart && (

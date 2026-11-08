@@ -1,5 +1,5 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, type FreeformShape } from "../core/freeform";
-import { chartNoteIds, chartSlotNote } from "../core/chartNotes";
+import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
 import { resolveWebItem, webCaption, type WebItem } from "./webSearch";
@@ -25,6 +25,8 @@ import { History } from "../core/history";
 import { applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
+import { INK_DEFAULT_WIDTH, inkStrokes } from "../core/ink";
+import type { InkStroke } from "../core/types";
 import { Machine, registerInspectable } from "./machine";
 import { LongOps, SAVE_FLOW_TABLE, saveRerunAllowed, selectionFields, selectionTargetOf, type LongOpKind, type LongOpView, type SaveFlow, type SaveOutcome, type SelectionTarget } from "./editorMachines";
 import { SCHEMA_VERSION, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type RelAnchor, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
@@ -196,6 +198,16 @@ function sanitizeTitleRuns(raw: unknown): TextRun[] | undefined {
 
 export type NavDir = "up" | "down" | "left" | "right";
 
+/** What a left press does on the map. "ink" writes on freeform canvases. */
+export type EditorMode = "select" | "pan" | "ink";
+
+export interface InkSettings {
+  tool: "pen" | "eraser";
+  /** Null follows the theme's text colour. */
+  color: string | null;
+  width: number;
+}
+
 export interface EditorState {
   docs: RnodeDocument[];
   activeDocId: string;
@@ -229,7 +241,11 @@ export interface EditorState {
   docTitle: string;
   theme: ThemeName;
   structureType: string;
-  mode: "select" | "pan";
+  mode: EditorMode;
+  /** The pen's settings: session-wide, not saved with a document. */
+  ink: InkSettings;
+  /** The freeform canvas whose note is on screen (Show notes), or null. */
+  shownCanvasNote: string | null;
   relFrom: string | null;
   /** Selected overlay object: a relationship, group or summary (not a node). */
   relSel: string | null;
@@ -439,6 +455,8 @@ export class EditorStore {
       theme: asThemeName(d.settings?.theme),
       structureType: d.sheets[0].structure.structureType,
       mode: "select",
+      ink: { tool: "pen", color: null, width: INK_DEFAULT_WIDTH },
+      shownCanvasNote: null,
       relFrom: null,
       relSel: null,
       groupSel: null,
@@ -5598,9 +5616,115 @@ export class EditorStore {
     this.notify();
   }
 
-  setMode(mode: "select" | "pan"): void {
+  setMode(mode: EditorMode): void {
     this.state.mode = mode;
     this.notify();
+  }
+
+  // -------------------------------------------------------------------------
+  // Handwriting on a freeform canvas
+  // -------------------------------------------------------------------------
+
+  toggleInkMode(): void {
+    this.setMode(this.state.mode === "ink" ? "select" : "ink");
+  }
+
+  /** The canvas rail's buttons: pick a tool, or put it down if already in hand. */
+  pickInkTool(tool: InkSettings["tool"]): void {
+    const putDown = this.state.mode === "ink" && this.state.ink.tool === tool;
+    this.state.ink = { ...this.state.ink, tool };
+    this.setMode(putDown ? "select" : "ink");
+  }
+
+  setInkSettings(patch: Partial<InkSettings>): void {
+    this.state.ink = { ...this.state.ink, ...patch };
+    this.notify();
+  }
+
+  private setCanvasInk(canvasId: string, ink: InkStroke[]): void {
+    const node = this.model.node(canvasId);
+    if (!node) return;
+    const { ink: _replaced, ...rest } = node.style;
+    const style = ink.length > 0 ? { ...rest, ink } : rest;
+    // An ordinary setStyle: one undo step, and execOps grows the canvas with it.
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: canvasId, style, prev: node.style })]);
+    this.settleLayoutNow();
+  }
+
+  addInkStroke(canvasId: string, stroke: InkStroke): void {
+    const node = this.model.node(canvasId);
+    if (!node?.style.freeform) return trace.ignored("ink:add", "not a freeform canvas", { canvasId });
+    if (stroke.path.length < 2) return trace.ignored("ink:add", "stroke has no samples", { canvasId });
+    trace.applied("ink:add", { canvasId, samples: stroke.path.length / 2 });
+    this.setCanvasInk(canvasId, [...inkStrokes(node.style), stroke]);
+  }
+
+  eraseInkStrokes(canvasId: string, erased: ReadonlySet<InkStroke>): void {
+    const node = this.model.node(canvasId);
+    if (!node?.style.freeform || erased.size === 0) return trace.ignored("ink:erase", "nothing touched", { canvasId });
+    trace.applied("ink:erase", { canvasId, strokes: erased.size });
+    this.setCanvasInk(canvasId, inkStrokes(node.style).filter((s) => !erased.has(s)));
+  }
+
+  /** Attach a note to a canvas and open it for typing; an existing one just opens. */
+  addCanvasNote(canvasId: string): string | null {
+    const canvas = this.model.node(canvasId);
+    if (!canvas?.style.freeform) {
+      trace.ignored("canvas:note-add", "not a freeform canvas", { canvasId });
+      return null;
+    }
+    this.state.shownCanvasNote = canvasId;
+    const existing = freeformNote(this.sheet, canvasId);
+    if (existing) {
+      this.startEdit(existing.id);
+      return existing.id;
+    }
+    const id = uid("n");
+    this.execOps([
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id,
+        nodeType: "floating",
+        parentId: null,
+        index: 0,
+        title: "Note",
+        titleRuns: [{ text: "Note" }],
+        style: { chartNote: { chartId: canvasId }, align: "left" },
+        position: { x: 0, y: 0, manual: false },
+      }),
+      makeOp<Op & { type: "setStyle" }>("setStyle", { id: canvasId, style: { ...canvas.style, canvasNote: id }, prev: canvas.style }),
+    ]);
+    this.settleLayoutNow();
+    this.startEdit(id);
+    trace.applied("canvas:note-add", { canvasId, noteId: id });
+    return id;
+  }
+
+  /** Show notes / Hide notes. Hiding moves off the note, which a selection inside it would keep open. */
+  toggleCanvasNote(canvasId: string): void {
+    const note = freeformNote(this.sheet, canvasId);
+    if (!note) return trace.ignored("canvas:note-toggle", "canvas has no note", { canvasId });
+    if (this.state.shownCanvasNote === canvasId) {
+      this.state.shownCanvasNote = null;
+      const last = this.state.editingId ?? this.state.selection[this.state.selection.length - 1];
+      if (chartNoteRoot(this.sheet, last) === note.id) return this.select(canvasId);
+    } else {
+      this.state.shownCanvasNote = canvasId;
+    }
+    this.notify();
+  }
+
+  removeCanvasNote(canvasId: string): void {
+    const note = freeformNote(this.sheet, canvasId);
+    if (!note) return trace.ignored("canvas:note-remove", "canvas has no note", { canvasId });
+    if (this.state.shownCanvasNote === canvasId) this.state.shownCanvasNote = null;
+    this.deleteNodes([note.id]);
+    this.select(canvasId);
+  }
+
+  clearInk(canvasId: string): void {
+    const node = this.model.node(canvasId);
+    if (!node || inkStrokes(node.style).length === 0) return trace.ignored("ink:clear", "canvas has no ink", { canvasId });
+    this.setCanvasInk(canvasId, []);
   }
 
   /**
@@ -5763,6 +5887,7 @@ export class EditorStore {
     // Everything below names things in the document being left.
     this.setSelectionTarget({ kind: "none" });
     this.state.relFrom = null;
+    this.state.shownCanvasNote = null;
     this.state.drop = null;
     this.state.hoverId = null;
     this.state.editingId = null;

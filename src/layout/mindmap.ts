@@ -26,7 +26,7 @@
 import { freeformOwner, freeformOffset } from "../core/freeform";
 import { groupLabel, groupRuns, type MindNode, type Sheet } from "../core/types";
 import { CHART_NOTE_GAP, GROUP_LABEL_H, GROUP_PAD, imageResolver, measureNode, positionedImageSlots, type TextMeasurer } from "./measure";
-import { chartSlotNote } from "../core/chartNotes";
+import { chartSlotNote, freeformNote } from "../core/chartNotes";
 
 export { imageResolver, measureNode } from "./measure";
 export type { Extent, TextMeasurer } from "./measure";
@@ -237,6 +237,17 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
         if (note.childrenIds.length > 0) placeMindmap(note.id, at.x + nw / 2, at.y + nh / 2, 1);
         positions.set(note.id, at);
       });
+    }
+    // A freeform canvas's note hangs right of the canvas, level with its top.
+    for (const canvas of Object.values(sheet.nodes)) {
+      const note = canvas.style.freeform ? freeformNote(sheet, canvas.id) : null;
+      if (!note) continue;
+      const origin = positions.get(canvas.id) ?? canvas.position;
+      const at = { x: origin.x + size(canvas).w + CHART_NOTE_GAP, y: origin.y };
+      positions.set(note.id, at);
+      const { w: nw, h: nh } = size(note);
+      if (note.childrenIds.length > 0) placeMindmap(note.id, at.x + nw / 2, at.y + nh / 2, 1);
+      positions.set(note.id, at);
     }
   }
 
