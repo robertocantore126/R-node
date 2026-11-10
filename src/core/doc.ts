@@ -73,21 +73,27 @@ export class DocumentModel {
 
   /** Nodes that are actually visible (not hidden by a collapsed ancestor). */
   visibleIds(rootId: string): string[] {
+    // Iterative and cycle-safe: a corrupt tree must not hang (or overflow the
+    // stack of) the status bar, which calls this on every repaint.
     const out: string[] = [];
-    const visit = (id: string): void => {
+    const seen = new Set<string>();
+    const stack = [rootId];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
       out.push(id);
       const n = this.node(id);
-      if (!n || n.collapsed) return;
-      for (const c of n.childrenIds) visit(c);
-    };
-    visit(rootId);
+      if (!n || n.collapsed) continue;
+      for (let i = n.childrenIds.length - 1; i >= 0; i--) stack.push(n.childrenIds[i]);
+    }
     return out;
   }
 
   depth(id: string): number {
     let d = 0;
     let cur = this.node(id)?.parentId ?? null;
-    while (cur) {
+    while (cur && d < 10_000) {
       d++;
       cur = this.node(cur)?.parentId ?? null;
     }

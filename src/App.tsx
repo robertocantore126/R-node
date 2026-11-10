@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { Component, useEffect, useMemo, type ReactNode } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "./editor/context";
 import { handleShortcut } from "./editor/shortcuts";
@@ -94,7 +94,7 @@ export function App(): JSX.Element {
       {state.flashcardsOpen && <FlashcardWindow key={`${state.flashcardsOpen.nodeId}:${state.flashcardsOpen.deckId}`} />}
 
       {state.message && (
-        <div className="toast" onClick={() => (store as unknown as { toast: (m: string) => void }).toast("")}>
+        <div className="toast" onClick={() => store.toast("")}>
           {state.message}
         </div>
       )}
@@ -103,14 +103,50 @@ export function App(): JSX.Element {
   );
 }
 
+/**
+ * Last line of defence for the whole UI. A render error used to unmount
+ * everything and leave a blank window — with the unsaved map still in memory
+ * and no way to reach it. This keeps a way out: export the document as JSON,
+ * then reload.
+ */
+export class AppErrorBoundary extends Component<{ onExport: () => void; children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+
+  componentDidCatch(error: Error): void {
+    console.error("r-node: the interface crashed", error);
+  }
+
+  render(): ReactNode {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="crash" style={{ padding: 24, font: "14px system-ui, sans-serif" }}>
+        <h2>R-node hit an error</h2>
+        <p>{this.state.error.message}</p>
+        <p>Your map is still in memory. Export it before reloading.</p>
+        <button className="btn" onClick={this.props.onExport}>Export map as JSON</button>{" "}
+        <button className="btn" onClick={() => window.location.reload()}>Reload</button>
+      </div>
+    );
+  }
+}
+
 function StatusBar(): JSX.Element {
   const store = useStore();
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  // This bar follows the camera, so it re-renders on every pan and zoom step;
+  // the count walks the whole tree and only changes with the revision.
+  const rev = store.revision;
+  const doc = store.doc;
+  const topicCount = useMemo(() => doc.visibleNodeCount, [doc, rev]);
   return (
     <footer className="statusbar">
       <span data-help="Current zoom" data-help-more="Zoom level of the map view. Ctrl+scroll to zoom, Ctrl+1 to fit the map.">{Math.round(state.camera.scale * 100)}%</span>
       <span className="sep">·</span>
-      <span data-help="Topic count" data-help-more="How many topics the current map contains.">{state.selection.length > 0 ? `${state.selection.length} selected` : `${store.doc.visibleNodeCount} topics`}</span>
+      <span data-help="Topic count" data-help-more="How many topics the current map contains.">{state.selection.length > 0 ? `${state.selection.length} selected` : `${topicCount} topics`}</span>
       <span className="sep">·</span>
       <span className={state.sync} data-help="Save status" data-help-more="Saved: everything up to your last Save is on disk. Unsaved changes: nothing has been written since.">{state.sync === "saved" ? "Saved" : "Unsaved changes"}</span>
       {state.op && (

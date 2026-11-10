@@ -130,7 +130,12 @@ export class IndexedDbAssetStore implements AssetStore {
   constructor(private readonly dbName: string = DEFAULT_DB_NAME) {}
 
   private db(): Promise<IDBDatabase> {
-    this.dbPromise ??= openDb(this.dbName);
+    // A failed open (blocked upgrade, quota, private mode) must not poison the
+    // store for the whole session: the next call tries again.
+    this.dbPromise ??= openDb(this.dbName).catch((e) => {
+      this.dbPromise = null;
+      throw e;
+    });
     return this.dbPromise;
   }
 
@@ -208,7 +213,11 @@ export class IndexedDbAssetStore implements AssetStore {
  * desktop build: it exists only inside the WebView2 window, never in a plain
  * browser tab — exactly what the factory needs.
  */
-type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+type TauriInvoke = (
+  cmd: string,
+  args?: Record<string, unknown> | Uint8Array,
+  options?: { headers?: Record<string, string> }
+) => Promise<unknown>;
 
 declare global {
   interface Window {
@@ -264,18 +273,44 @@ export class TauriAssetStore implements AssetStore {
 
   async putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void> {
     const path = await this.currentPath();
-    const invoke = this.invoke();
+    const parts: [string, Uint8Array][] = [];
     for (const level of ["original", "large", "small"] as const) {
-      const bytes = new Uint8Array(await levels[level].blob.arrayBuffer());
-      await invoke("put_asset", { path, id, level, bytes });
+      parts.push([level, new Uint8Array(await levels[level].blob.arrayBuffer())]);
     }
-    await invoke("put_asset", {
-      path,
-      id,
-      level: "meta",
-      bytes: new TextEncoder().encode(JSON.stringify(meta)),
+    parts.push(["meta", new TextEncoder().encode(JSON.stringify(meta))]);
+    // One call, one transaction, RAW bytes: passed as an argument they were
+    // serialized as a JSON array of numbers (a 25 MB original became a ~90 MB
+    // string). The arguments ride in a header, percent-encoded because header
+    // values must be ASCII and a document path need not be.
+    const body = new Uint8Array(parts.reduce((n, [, b]) => n + b.byteLength, 0));
+    let at = 0;
+    for (const [, b] of parts) {
+      body.set(b, at);
+      at += b.byteLength;
+    }
+    const args = { path, id, levels: parts.map(([level, b]) => [level, b.byteLength]) };
+    await this.invoke()("put_asset", body, {
+      headers: { "x-rnode-args": encodeURIComponent(JSON.stringify(args)) },
     });
     this.metaCache.set(id, meta);
+  }
+
+  /**
+   * Copy the complete assets among `ids` from the file `from` into the file
+   * `to` (null = the default scratch file), inside SQLite. Returns how many
+   * could not be copied (absent or incomplete in the source).
+   */
+  async copyBetween(from: string | null, to: string | null, ids: string[]): Promise<number> {
+    const resolve = async (p: string | null): Promise<string> =>
+      p ?? (this.defaultPath ??= this.invoke()("default_document_path") as Promise<string>);
+    const [src, dst] = [await resolve(from), await resolve(to)];
+    if (ids.length === 0) return 0;
+    return Number(await this.invoke()("copy_assets", { from: src, to: dst, ids })) || 0;
+  }
+
+  /** Shrink the current file after deletions (SQLite VACUUM). */
+  async compact(): Promise<void> {
+    await this.invoke()("compact_document", { path: await this.currentPath() });
   }
 
   async get(id: string, level: AssetLevel): Promise<Blob | null> {
@@ -337,44 +372,17 @@ export class TauriAssetStore implements AssetStore {
     ids: string[],
     onProgress?: (phase: "read" | "write", done: number, total: number) => void
   ): Promise<number> {
-    // The reads below go through this.currentPath(), still the OLD file: the
-    // switch happens only after every asset is copied. Only the BYTES matter
-    // for the copy — w/h live in the meta JSON.
+    // The copy runs inside SQLite (ATTACH + INSERT … SELECT): it used to read
+    // every level into the webview and push it back through the IPC, holding
+    // the whole map's pictures in memory twice. The switch happens only after
+    // the copy.
     //
     // Returns how many referenced assets could NOT be copied (missing meta or
     // any level): skipping is right (failing the whole save for one image
     // would be worse), but the caller must tell the user, not stay silent.
-    const payloads: { id: string; meta: AssetMeta; blobs: Record<AssetLevel, Blob> }[] = [];
-    let skipped = 0;
-    for (const id of ids) {
-      const [meta, original, large, small] = await Promise.all([
-        this.meta(id),
-        this.get(id, "original"),
-        this.get(id, "large"),
-        this.get(id, "small"),
-      ]);
-      if (!meta || !original || !large || !small) {
-        skipped++; // referenced but absent
-        continue;
-      }
-      payloads.push({ id, meta, blobs: { original, large, small } });
-      onProgress?.("read", payloads.length + skipped, ids.length);
-    }
-    const invoke = this.invoke();
-    let written = 0;
-    for (const { id, meta, blobs } of payloads) {
-      for (const level of ["original", "large", "small"] as const) {
-        const bytes = new Uint8Array(await blobs[level].arrayBuffer());
-        await invoke("put_asset", { path: newPath, id, level, bytes });
-      }
-      await invoke("put_asset", {
-        path: newPath,
-        id,
-        level: "meta",
-        bytes: new TextEncoder().encode(JSON.stringify(meta)),
-      });
-      onProgress?.("write", ++written, payloads.length);
-    }
+    onProgress?.("write", 0, ids.length);
+    const skipped = await this.copyBetween(this.path, newPath, ids);
+    onProgress?.("write", ids.length, ids.length);
     this.path = newPath;
     this.defaultPath = null;
     this.metaCache.clear();

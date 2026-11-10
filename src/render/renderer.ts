@@ -166,7 +166,17 @@ export class Renderer {
    */
   private imageCache = new Map<string, { bitmap: ImageBitmap; bytes: number }>();
   private imageBytes = 0;
-  private imageFailed = new Set<string>();
+  /** Decode failures by key, with when they happened: retried after IMAGE_RETRY_MS
+   *  instead of never (a transient read error used to break a picture until restart). */
+  private imageFailed = new Map<string, number>();
+  private readonly IMAGE_RETRY_MS = 10_000;
+  private failedRecently(key: string): boolean {
+    const at = this.imageFailed.get(key);
+    if (at === undefined) return false;
+    if (Date.now() - at < this.IMAGE_RETRY_MS) return true;
+    this.imageFailed.delete(key);
+    return false;
+  }
   /** Decodes in flight, key → requesting nodeId (a finished one for a node
    * that scrolled off is closed immediately, never cached). */
   private inflight = new Map<string, string>();
@@ -1491,7 +1501,7 @@ export class Renderer {
       }
       return;
     }
-    if (this.imageFailed.has(key)) return; // corrupt/unavailable: not per frame
+    if (this.failedRecently(key)) return; // corrupt/unavailable: not per frame
     if (this.inflight.has(key) || this.inflightCount >= this.MAX_INFLIGHT) return;
     this.startDecode(key, imageId, p.node.id, level, bucket);
   }
@@ -1503,7 +1513,7 @@ export class Renderer {
     try {
       const blob = await this.assetStore.get(assetId, level);
       if (!blob) {
-        this.imageFailed.add(key);
+        this.imageFailed.set(key, Date.now());
         trace.mark("render", "render:image-decode", { assetId, level, bucket, error: "missing" });
         return;
       }
@@ -1533,7 +1543,7 @@ export class Renderer {
       // user gesture (and starts the next pending decodes).
       this.onRepaint?.();
     } catch (e) {
-      this.imageFailed.add(key);
+      this.imageFailed.set(key, Date.now());
       trace.mark("render", "render:image-decode", { assetId, level, bucket, error: String(e) });
     } finally {
       if (this.inflight.delete(key)) this.inflightCount--;
@@ -1623,9 +1633,21 @@ export class Renderer {
     if (count > 0) trace.mark("render", "render:cache-evict", { kind: "image", entries: count, freed });
   }
 
+  /** Serialized title runs by array identity. Every title change installs a
+   *  NEW runs array (setTitle, the edit draft, restore), so the identity is
+   *  the version — and stringifying the runs of every visible topic on every
+   *  frame was the most expensive part of building this key. */
+  private runsKeys = new WeakMap<object, string>();
+
   private textCacheKey(n: MindNode, color: string, maxW: number, res: number): string {
     const st = n.style;
-    const runs = JSON.stringify(n.titleRuns ?? n.title);
+    let runs: string;
+    if (n.titleRuns) {
+      runs = this.runsKeys.get(n.titleRuns) ?? JSON.stringify(n.titleRuns);
+      this.runsKeys.set(n.titleRuns, runs);
+    } else {
+      runs = JSON.stringify(n.title);
+    }
     return `${n.id}|${runs}|${st.fontSize ?? 14}|${st.fontFamily ?? ""}|${st.fontWeight ?? 400}|${st.italic ? 1 : 0}|${st.align ?? "center"}|${st.padding ?? 10}|${st.underline ? 1 : 0}|${st.strikethrough ? 1 : 0}|${color}|${maxW}|${res}`;
   }
 
@@ -2416,14 +2438,14 @@ export class Renderer {
         );
         const key = `${id}@${bucket}`;
         if (this.imageCache.has(key)) return;
-        if (this.imageFailed.has(key)) {
+        if (this.failedRecently(key)) {
           if (strict) throw new Error(`Cannot print image ${id}`);
           return;
         }
         try {
           const blob = await this.assetStore.get(id, bucket <= 256 ? "small" : "large");
           if (!blob) {
-            this.imageFailed.add(key);
+            this.imageFailed.set(key, Date.now());
             if (strict) throw new Error(`Missing image ${id}`);
             return;
           }
@@ -2431,7 +2453,7 @@ export class Renderer {
           this.imageCache.set(key, { bitmap, bytes: bitmap.width * bitmap.height * 4 });
           this.imageBytes += bitmap.width * bitmap.height * 4;
         } catch (error) {
-          this.imageFailed.add(key);
+          this.imageFailed.set(key, Date.now());
           if (strict) throw error;
         }
       })
@@ -2509,14 +2531,45 @@ export class Renderer {
    * tracks the cursor, so without this it answers its own hit test and hides
    * whatever it is being dragged onto.
    */
+  /**
+   * Uniform grid over the cached placements: cell → indices into `placed`,
+   * ascending. hitTest runs on every pointer move, and it used to filter and
+   * scan every topic of the sheet each time. Built lazily, once per placement
+   * (it follows the placement cache's identity, so pans reuse it).
+   */
+  private hitGrid: { placed: Placed[]; cells: Map<string, number[]> } | null = null;
+  private static readonly HIT_CELL = 512;
+
+  private hitCandidates(placed: Placed[], wx: number, wy: number): number[] | null {
+    if (this.placedCache?.value !== placed) return null; // uncached turn: plain scan
+    if (this.hitGrid?.placed !== placed) {
+      const S = Renderer.HIT_CELL;
+      const cells = new Map<string, number[]>();
+      placed.forEach((p, i) => {
+        for (let cx = Math.floor(p.x / S); cx <= Math.floor((p.x + p.w) / S); cx++) {
+          for (let cy = Math.floor(p.y / S); cy <= Math.floor((p.y + p.h) / S); cy++) {
+            const k = `${cx},${cy}`;
+            const list = cells.get(k);
+            if (list) list.push(i);
+            else cells.set(k, [i]);
+          }
+        }
+      });
+      this.hitGrid = { placed, cells };
+    }
+    return this.hitGrid.cells.get(`${Math.floor(wx / Renderer.HIT_CELL)},${Math.floor(wy / Renderer.HIT_CELL)}`) ?? [];
+  }
+
   hitTest(state: RenderState, worldX: number, worldY: number, skip?: (id: string) => boolean): string | null {
-    const placed = this.placedNodes(state).filter((p) => p.visible);
+    const placed = this.placedNodes(state);
+    const candidates = this.hitCandidates(placed, worldX, worldY);
+    const count = candidates ? candidates.length : placed.length;
     // Board backgrounds are painted before all ordinary topics. Use that
     // same two-layer order here, including nested/overlapping canvases.
     for (const background of [false, true]) {
-      for (let i = placed.length - 1; i >= 0; i--) {
-        const p = placed[i];
-        if (!!p.node.style.freeform !== background || skip?.(p.node.id)) continue;
+      for (let k = count - 1; k >= 0; k--) {
+        const p = placed[candidates ? candidates[k] : k];
+        if (!p.visible || !!p.node.style.freeform !== background || skip?.(p.node.id)) continue;
         if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
       }
     }

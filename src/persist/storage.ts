@@ -280,12 +280,26 @@ export class TauriStorageAdapter implements StorageAdapter {
     return doc ? [doc] : [];
   }
 
-  async save(docs: RnodeDocument[]): Promise<void> {
+  /**
+   * The `documentId` stored at `path` (null = no file or no document row),
+   * read by the backend without shipping the whole document over the IPC.
+   * The save guard runs this on every Ctrl+S.
+   */
+  async readDocumentIdAt(path: string): Promise<string | null> {
+    return ((await this.invoke("read_document_id", { path })) as string | null) ?? null;
+  }
+
+  /**
+   * Write the document row. `create` is for "Save as" only: a plain save of a
+   * file that vanished (moved or deleted outside the app) is refused by the
+   * backend instead of recreating it without its images.
+   */
+  async save(docs: RnodeDocument[], opts: { create?: boolean } = {}): Promise<void> {
     const doc = docs[0];
     if (!doc) return;
     if (!this.root) throw new Error("TauriStorageAdapter: no document file chosen");
     const json = JSON.stringify(doc);
-    await this.invoke("write_document", { path: this.root, data: json });
+    await this.invoke("write_document", { path: this.root, data: json, create: opts.create === true });
     // The persist boundary event the gap detector resets on (desktop side).
     trace.mark("persist", "persist:save", { via: "document file (rust)", path: this.root, chars: json.length });
   }

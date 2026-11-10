@@ -100,32 +100,48 @@ describe("TauriAssetStore", () => {
   it("adoptFile copies every referenced asset to the new file BEFORE switching", async () => {
     const OLD = "C:/old";
     const NEW = "C:/new.rnode";
-    const calls = installTauri(async (cmd, args) => {
+    const calls = installTauri(async (cmd) => {
       if (cmd === "default_document_path") return OLD;
-      if (cmd === "get_asset" && args.level === "meta") return metaBytes;
-      if (cmd === "get_asset" && args.level === "original") return raw([1, 2, 3]);
-      if (cmd === "get_asset" && args.level === "large") return raw([4, 5]);
-      if (cmd === "get_asset" && args.level === "small") return raw([6]);
+      if (cmd === "copy_assets") return 0;
       return null;
     });
     const store = new TauriAssetStore();
     await store.adoptFile(NEW, [ID]);
 
-    // Reads happened against the OLD path…
-    const reads = calls.filter((c) => c.cmd === "get_asset").map((c) => c.args.path);
-    expect(reads.length).toBeGreaterThan(0);
-    expect(reads.every((p) => p === OLD)).toBe(true);
-
-    // …and the writes went to the NEW one: all four levels per asset.
-    const puts = calls.filter((c) => c.cmd === "put_asset");
-    expect(puts).toHaveLength(4);
-    expect(puts.every((p) => p.args.path === NEW)).toBe(true);
-    expect(puts.map((p) => p.args.level).sort()).toEqual(["large", "meta", "original", "small"]);
+    // One backend copy from the OLD file to the NEW one: no byte crosses the
+    // IPC, nothing is read into the webview, nothing is put level by level.
+    const copies = calls.filter((c) => c.cmd === "copy_assets");
+    expect(copies).toHaveLength(1);
+    expect(copies[0].args).toEqual({ from: OLD, to: NEW, ids: [ID] });
+    expect(calls.filter((c) => c.cmd === "get_asset" || c.cmd === "put_asset")).toHaveLength(0);
 
     // After the switch, reads come from the new file.
     calls.length = 0;
     await store.get(ID, "large");
     expect(calls.find((c) => c.cmd === "get_asset")?.args.path).toBe(NEW);
+  });
+
+  it("putUnderId sends every level in ONE raw call, arguments in a header", async () => {
+    const calls: { cmd: string; body: unknown; headers?: Record<string, string> }[] = [];
+    const invoke = vi.fn(async (cmd: string, body: unknown, opts?: { headers?: Record<string, string> }) => {
+      calls.push({ cmd, body, headers: opts?.headers });
+      return cmd === "default_document_path" ? "C:/Mappe/Città.rnode" : null;
+    });
+    (globalThis as unknown as { window?: unknown }).window = { __TAURI__: { core: { invoke } } };
+    const store = new TauriAssetStore();
+    const level = (bytes: number[]) => ({ blob: new Blob([Uint8Array.from(bytes)]), w: 1, h: 1 });
+    await store.putUnderId(ID, { original: level([1, 2, 3]), large: level([4, 5]), small: level([6]) }, meta);
+
+    const puts = calls.filter((c) => c.cmd === "put_asset");
+    expect(puts).toHaveLength(1);
+    const args = JSON.parse(decodeURIComponent(puts[0].headers!["x-rnode-args"]));
+    const metaLen = new TextEncoder().encode(JSON.stringify(meta)).length;
+    expect(args).toEqual({ path: "C:/Mappe/Città.rnode", id: ID, levels: [["original", 3], ["large", 2], ["small", 1], ["meta", metaLen]] });
+    // Header values must be ASCII; the non-ASCII path survives percent-encoded.
+    expect(/^[\x20-\x7e]*$/.test(puts[0].headers!["x-rnode-args"])).toBe(true);
+    const body = puts[0].body as Uint8Array;
+    expect([...body.slice(0, 6)]).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(body.byteLength).toBe(6 + metaLen);
   });
 
   it("adoptFile with no referenced assets just switches the path", async () => {
@@ -140,23 +156,14 @@ describe("TauriAssetStore", () => {
 
   it("adoptFile reports how many referenced assets it could not copy", async () => {
     const MISSING = "b".repeat(64);
-    const calls = installTauri(async (cmd, args) => {
+    installTauri(async (cmd) => {
       if (cmd === "default_document_path") return "C:/old";
-      if (args?.id === MISSING) return new ArrayBuffer(0); // absent from the source
-      if (cmd === "get_asset" && args.level === "meta") return metaBytes;
-      if (cmd === "get_asset" && args.level === "original") return raw([1, 2, 3]);
-      if (cmd === "get_asset" && args.level === "large") return raw([4, 5]);
-      if (cmd === "get_asset" && args.level === "small") return raw([6]);
+      if (cmd === "copy_assets") return 1; // the backend counts the incomplete ones
       return null;
     });
     const store = new TauriAssetStore();
     const skipped = await store.adoptFile("C:/new.rnode", [ID, MISSING]);
-
     expect(skipped).toBe(1); // the missing one is counted, not silently dropped
-    // Only the present asset was copied: 4 levels (not 8).
-    const puts = calls.filter((c) => c.cmd === "put_asset");
-    expect(puts).toHaveLength(4);
-    expect(puts.every((p) => p.args.path === "C:/new.rnode")).toBe(true);
   });
 });
 
@@ -272,9 +279,9 @@ describe("desktop save flow", () => {
   });
 
   it("save reports how many referenced images could not be copied", async () => {
-    installTauri(async (cmd) => {
+    installTauri(async (cmd, args) => {
       if (cmd === "pick_document_file") return "C:/MiaMappa.rnode";
-      if (cmd === "get_asset") return new ArrayBuffer(0); // every level absent
+      if (cmd === "copy_assets") return (args.ids as string[]).length; // every asset absent
       return null;
     });
     const store = new EditorStore(new TauriStorageAdapter());
