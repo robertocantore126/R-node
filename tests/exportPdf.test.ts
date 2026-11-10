@@ -16,6 +16,7 @@ import { applyLayout } from "../src/layout/mindmap";
 import { DocumentModel } from "../src/core/doc";
 import type { MindNode, Sheet, TextRun } from "../src/core/types";
 import { THEMES } from "../src/render/theme";
+import { latin1 } from "./latin1";
 
 const MARGIN = 28.35;
 
@@ -86,7 +87,7 @@ describe("vector editor surfaces", () => {
     const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light, grid: true });
     const content = (await pageStreams(out.blob)).join("\n");
     const bytes = new Uint8Array(await out.blob.arrayBuffer());
-    const file = new TextDecoder("latin1").decode(bytes);
+    const file = latin1(bytes);
     expect(content).toContain("(Canvas title) Tj");
     expect(content).toContain("(Independent text) Tj");
     expect(content.match(/\(Canvas title\) Tj/g)).toHaveLength(1);
@@ -110,7 +111,7 @@ describe("vector editor surfaces", () => {
     sheet.boundaries.push({ id: "g", memberIds: [board.id], borderWidth: 3, color: "#ff0000" });
     const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light, grid: true });
     const content = (await pageStreams(out.blob)).join("\n");
-    const file = new TextDecoder("latin1").decode(await out.blob.arrayBuffer());
+    const file = latin1(await out.blob.arrayBuffer());
     expect(content).toContain("0.961 0.969 0.980 RG");
     expect(content).toContain("[9 5.85] 0 d");
     expect(file).toContain("/ca 0.06 /CA 0.06");
@@ -126,7 +127,7 @@ describe("vector editor surfaces", () => {
     const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light,
       borderOf: (id) => (id === a.id ? { color: "#123456", width: 3, dash: [10, 6], cap: "butt", double: false } : null) });
     const content = (await pageStreams(out.blob)).join("\n");
-    const file = new TextDecoder("latin1").decode(await out.blob.arrayBuffer());
+    const file = latin1(await out.blob.arrayBuffer());
     expect(content).toContain("(Ideas) Tj");
     expect(file).toContain("/ca 0.12 /CA 0.12"); // the tint's alpha
     expect(content).toContain("1 J"); // dotted = round caps
@@ -139,7 +140,7 @@ describe("vector editor surfaces", () => {
 /** Every FlateDecode stream, decompressed. Image streams are DCT, not zlib. */
 async function pageStreams(blob: Blob): Promise<string[]> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
-  const text = new TextDecoder("latin1").decode(bytes);
+  const text = latin1(bytes);
   const out: string[] = [];
   const marker = "stream\n";
   let at = 0;
@@ -149,7 +150,7 @@ async function pageStreams(blob: Blob): Promise<string[]> {
     const end = text.indexOf("\nendstream", start);
     if (end < 0) break;
     try {
-      out.push(new TextDecoder("latin1").decode(unzlibSync(bytes.subarray(start + marker.length, end))));
+      out.push(latin1(unzlibSync(bytes.subarray(start + marker.length, end))));
     } catch {
       /* not zlib (an embedded JPEG): not a page */
     }
@@ -258,7 +259,7 @@ describe("paginated PDF", () => {
 
   it("declares one page object per sheet, at the requested size", async () => {
     const out = await sheetToPdf(mapOf(80), { ...OPTS, page: "A2" });
-    const text = new TextDecoder("latin1").decode(new Uint8Array(await out.blob.arrayBuffer()));
+    const text = latin1(new Uint8Array(await out.blob.arrayBuffer()));
     expect((text.match(/\/Type \/Page[^s]/g) ?? []).length).toBe(out.pages);
     expect(text).toContain(`/Count ${out.pages}`);
     expect(text).toContain(`/MediaBox [0 0 ${PAGE_SIZES.A2.w} ${PAGE_SIZES.A2.h}]`);
@@ -365,7 +366,7 @@ describe("PDF rich text", () => {
       ...OPTS,
       page: "A1",
     });
-    const file = new TextDecoder("latin1").decode(new Uint8Array(await out.blob.arrayBuffer()));
+    const file = latin1(new Uint8Array(await out.blob.arrayBuffer()));
     // Four faces, each with a Widths array and a descriptor to hang it on.
     expect((file.match(/\/Widths \[/g) ?? []).length).toBe(4);
     expect((file.match(/\/FontDescriptor \d+ 0 R/g) ?? []).length).toBe(4);
@@ -414,7 +415,7 @@ describe("PDF images", () => {
     return sheet;
   }
   const fileOf = async (out: { blob: Blob }): Promise<string> =>
-    new TextDecoder("latin1").decode(new Uint8Array(await out.blob.arrayBuffer()));
+    latin1(new Uint8Array(await out.blob.arrayBuffer()));
 
   it("embeds a JPEG untouched", async () => {
     const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);

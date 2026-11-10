@@ -11,6 +11,7 @@ import { sheetToPdf } from "../src/export/pdf";
 import { HEURISTIC_MEASURER } from "../src/layout/measure";
 import { applyLayout } from "../src/layout/mindmap";
 import { THEMES } from "../src/render/theme";
+import { latin1 } from "./latin1";
 
 const line = (width = 3): InkStroke => ({ width, path: [100, 100, 120, 100, 140, 100] });
 
@@ -175,12 +176,12 @@ describe("export", () => {
   it("writes the stroke into the PDF as a round-ended line", async () => {
     const out = await sheetToPdf(sheetWithInk(), { ...opts, theme: THEMES.light } as never);
     const bytes = new Uint8Array(await out.blob.arrayBuffer());
-    const raw = new TextDecoder("latin1").decode(bytes);
+    const raw = latin1(bytes);
     let content = raw;
     for (const m of raw.matchAll(/stream\r?\n/g)) {
       const start = m.index! + m[0].length;
       const end = raw.indexOf("endstream", start);
-      try { content += new TextDecoder("latin1").decode(unzlibSync(bytes.subarray(start, end))); } catch { /* not deflated */ }
+      try { content += latin1(unzlibSync(bytes.subarray(start, end))); } catch { /* not deflated */ }
     }
     expect(content).toMatch(/1(\.0+)? 0(\.0+)? 0(\.0+)? RG/);
     expect(content).toMatch(/1 J 1 j/);
