@@ -68,13 +68,17 @@ describe("unsaved changes per document", () => {
     expect(store.hasUnsavedChanges()).toBe(true);
   });
 
-  it("a deleted document no longer counts as unsaved", () => {
+  it("web: deleting a document is itself unsaved until browser storage drops it", () => {
+    // Browser storage still holds the deleted map until the next save: if the
+    // close guard stayed quiet, closing the tab brought the map back on reload.
     const store = new EditorStore(memoryAdapter());
     store.newDocument();
     const b = store.getSnapshot().activeDocId;
     store.createChildOf(store.sheet.rootNodeId);
     store.deleteDocument(b);
-    expect(store.hasUnsavedChanges()).toBe(false);
+    expect(store.getSnapshot().docs.some((d) => d.documentId === b)).toBe(false);
+    expect(store.hasUnsavedChanges()).toBe(true);
+    expect(store.getSnapshot().sync).toBe("dirty");
   });
 
   it("a desktop save with no edit in between leaves everything saved", async () => {

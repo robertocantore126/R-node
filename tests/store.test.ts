@@ -526,6 +526,9 @@ describe("save / load file", () => {
     const main = store.doc.node(root.childrenIds[root.childrenIds.length - 1])!;
 
     const first = store.saveNow(); // in flight, blocked on the gate
+    // The file is written first, then browser storage — wait until the first
+    // save has reached its (slow) storage write before editing.
+    await vi.waitFor(() => expect(captured).toHaveLength(1));
     store.execOps([
       makeOp<Op & { type: "setTitle" }>("setTitle", {
         id: main.id,
@@ -542,10 +545,10 @@ describe("save / load file", () => {
     await second;
 
     // …and the queued re-run writes exactly ONE more time, newest content.
-    // (blobs = the portable file, written after the adapter write: waiting on
+    // (captured = the storage write, the last step of a web save: waiting on
     // it means the whole second save finished, download included.)
-    await vi.waitFor(() => expect(blobs).toHaveLength(2));
-    expect(captured).toHaveLength(2);
+    await vi.waitFor(() => expect(captured).toHaveLength(2));
+    expect(blobs).toHaveLength(2);
     expect(JSON.parse(captured[0])[0].sheets[0].nodes[main.id].title).not.toBe("Versione corrente");
     expect(JSON.parse(captured[1])[0].sheets[0].nodes[main.id].title).toBe("Versione corrente");
   });

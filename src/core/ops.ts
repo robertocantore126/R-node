@@ -144,6 +144,10 @@ export function applyOp(sheet: Sheet, op: Op): void {
     }
     case "deleteNode": {
       for (const n of op.subtree) delete nodes[n.id];
+      // The node itself goes even when the op carries no subtree: the plain
+      // inverse of createNode (`inverseOf`) has none, and used to unlink the
+      // node from its parent while leaving it in the map as an orphan.
+      delete nodes[op.id];
       if (op.parentId) {
         const parent = nodes[op.parentId];
         if (parent) {

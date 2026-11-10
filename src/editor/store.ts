@@ -22,7 +22,7 @@ import { studyOutline } from "../core/studyOutline";
 import { flashcardsClipText } from "./flashcardPrompts";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
-import { applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
+import { applyOp, applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
 import { INK_DEFAULT_WIDTH, inkStrokes } from "../core/ink";
@@ -324,6 +324,17 @@ export class EditorStore {
    */
   private editRev = new Map<string, number>();
   private savedRev = new Map<string, number>();
+  /**
+   * Web: a change to the SET of documents (one deleted) that browser storage
+   * does not hold yet. Per-document counters cannot express it — the deleted
+   * document has none left — so the close guard never asked and the map came
+   * back on reload.
+   */
+  private workspaceDirty = false;
+  /** Stored documents that failed the open check at startup (see storedDocs). */
+  private unopenable: RnodeDocument[] = [];
+  /** Set when the last import was declined to protect unsaved changes. */
+  private importDeclined = false;
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -486,8 +497,11 @@ export class EditorStore {
     return this.rev;
   }
 
-  private notify(): void {
-    this.rev++;
+  private notify(geometry = true): void {
+    // `geometry: false` for changes no box depends on (a toast): bumping the
+    // revision there invalidated the renderer's placement cache and re-measured
+    // the whole sheet for a message in the corner.
+    if (geometry) this.rev++;
     const d = this.model.doc;
     this.state = {
       ...this.state,
@@ -516,11 +530,11 @@ export class EditorStore {
 
   toast(msg: string): void {
     this.state.message = msg;
-    this.notify();
+    this.notify(false);
     if (this.msgTimer) clearTimeout(this.msgTimer);
     this.msgTimer = setTimeout(() => {
       this.state.message = null;
-      this.notify();
+      this.notify(false);
     }, 2200);
   }
 
@@ -612,6 +626,12 @@ export class EditorStore {
     // bare "cannot open the document".
     let docs: RnodeDocument[] = [];
     let initError: string | null = null;
+    // Desktop: the scratch file holds images of maps that were never saved,
+    // and those maps do not survive a restart — clear it before anything uses
+    // it, or it only ever grows.
+    if (this.adapter instanceof TauriStorageAdapter && typeof window !== "undefined" && window.__TAURI__) {
+      await window.__TAURI__.core.invoke("clear_scratch").catch((e: unknown) => trace.error("init:scratch", String(e)));
+    }
     // Desktop: the adapter restored the path of the file open last session, so
     // the asset store must be pointed at it BEFORE anything reads an image.
     // Both roots always move together — that pairing is the T19 trap.
@@ -630,20 +650,26 @@ export class EditorStore {
       // save recreate an empty document at a path the user no longer has.
       if (this.adapter instanceof TauriStorageAdapter) this.adapter.setRoot(null);
     }
-    // The adapters check only that `sheets` is an array. A document with no
-    // sheet, or whose first sheet has lost its root node, passed that check
-    // and then threw in `new DocumentModel` below — outside the try, so the
-    // app never mounted. Keep only the documents that can actually open.
-    // Nothing is written back here: storage keeps the bad one until a save.
-    const openable = docs.filter((d) => {
-      const sh = d.sheets[0];
-      return !!sh && !!sh.nodes && !!sh.nodes[sh.rootNodeId];
-    });
-    if (openable.length < docs.length) {
-      trace.error("init:incompatible-schema", `${docs.length - openable.length} stored document(s) cannot be opened`);
-      initError ??= documentLoadErrorLabel("incompatible-schema");
-      docs = openable;
+    // Startup goes through the SAME door as File → Open: the sanitizer and the
+    // topology check. It used to check only that `sheets` was an array, so a
+    // stored document with a cycle opened at startup and hung the first walk,
+    // while the same file was refused by Open.
+    //
+    // A document that cannot open is NOT dropped: it is kept aside and written
+    // back on every save of the browser storage, so a failed check never turns
+    // into a deleted map.
+    const openable: RnodeDocument[] = [];
+    this.unopenable = [];
+    for (const d of docs) {
+      const clean = this.validateImportedDoc(d);
+      if (clean) openable.push(clean);
+      else this.unopenable.push(d);
     }
+    if (this.unopenable.length > 0) {
+      trace.error("init:incompatible-schema", `${this.unopenable.length} stored document(s) cannot be opened`);
+      initError ??= `${documentLoadErrorLabel("incompatible-schema")} — ${this.unopenable.length} kept untouched`;
+    }
+    docs = openable;
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
       // The restored document keeps its file for the whole session: switching
@@ -707,13 +733,13 @@ export class EditorStore {
 
   /** The status indicator shows the ACTIVE document. */
   private refreshSync(): void {
-    this.state.sync = this.isDocDirty(this.state.activeDocId) ? "dirty" : "saved";
+    this.state.sync = this.workspaceDirty || this.isDocDirty(this.state.activeDocId) ? "dirty" : "saved";
   }
 
   /** Whether any open document has changes that are not on disk — what the
    *  close guard asks before the window or tab goes away. */
   hasUnsavedChanges(): boolean {
-    if (this.isDocDirty(this.model.doc.documentId)) return true;
+    if (this.workspaceDirty || this.isDocDirty(this.model.doc.documentId)) return true;
     return this.state.docs.some((d) => this.isDocDirty(d.documentId));
   }
 
@@ -733,11 +759,20 @@ export class EditorStore {
         node = node.parentId ? this.model.node(node.parentId) : undefined;
       }
     };
-    for (const op of ops) {
-      const id = "id" in op ? op.id : "nodeId" in op ? op.nodeId : null;
-      if (id) collect(id);
-      inverses.push(applyWithInverse(this.sheet, op));
-      if (id) collect(id);
+    // All or nothing. applyOp trusts its ids, so an op naming a missing node
+    // throws — and a throw half-way through a batch left the earlier ops
+    // applied with no history entry to undo them. Roll back what was applied.
+    try {
+      for (const op of ops) {
+        const id = "id" in op ? op.id : "nodeId" in op ? op.nodeId : null;
+        if (id) collect(id);
+        inverses.push(applyWithInverse(this.sheet, op));
+        if (id) collect(id);
+      }
+    } catch (e) {
+      for (const inv of [...inverses].reverse().flat()) applyOp(this.sheet, inv);
+      trace.error("execOps", `batch rolled back: ${e instanceof Error ? e.message : String(e)}`);
+      throw e;
     }
     // Inner canvases grow before their enclosing canvas is measured.
     const depth = (id: string): number => {
@@ -941,9 +976,19 @@ export class EditorStore {
               // Last line of defence against the two-documents overwrite: the
               // adapter's current file must be THIS document's file. If it now
               // holds a different document, writing would destroy that map —
-              // refuse and stay dirty so the user sees the mismatch.
-              const existing = await this.adapter.readDocumentAt(target).catch(() => null);
-              if (existing && existing.documentId !== this.model.doc.documentId) {
+              // refuse and stay dirty so the user sees the mismatch. Only the
+              // id is read (not the whole document), and a file that cannot be
+              // read is refused too: the guard cannot vouch for what it would
+              // overwrite.
+              let existingId: string | null;
+              try {
+                existingId = await this.adapter.readDocumentIdAt(target);
+              } catch (e) {
+                this.state.sync = "dirty";
+                this.toast(`Not saved — "${titleFromDocPath(target)}" cannot be read (${e instanceof Error ? e.message : String(e)})`);
+                return "refused";
+              }
+              if (existingId && existingId !== this.model.doc.documentId) {
                 this.state.sync = "dirty";
                 this.toast(
                   `Not saved — "${titleFromDocPath(target)}" now contains a different document; refusing to overwrite it`
@@ -971,21 +1016,42 @@ export class EditorStore {
       // Anything changed after this point stays unsaved, which can only
       // over-report — never call an unwritten edit saved.
       const revs = this.state.docs.map((d) => [d.documentId, this.revOf(d.documentId)] as const);
-      await this.adapter.save(this.state.docs);
-      // The web saves the same `.rnode` file the desktop does — one SQLite
-      // database with the document and its images — so a map moves between
-      // the two without an export. `.rnode.json` / `.rnode.zip` stay as
-      // explicit exports and are still opened.
-      const fileWritten = await this.writePortableRnode();
+      // The FILE first. The web saves the same `.rnode` file the desktop does
+      // — one SQLite database with the document and its images — so a map
+      // moves between the two without an export. Browser storage used to go
+      // first, and once the documents outgrew its ~5 MB quota its throw
+      // aborted the save before the file was written at all.
+      let fileWritten = false;
+      let fileError: unknown = null;
+      try {
+        fileWritten = await this.writePortableRnode();
+      } catch (e) {
+        fileError = e;
+      }
+      // Then browser storage (what reopens the maps on the next visit). A
+      // failure here is a warning, not a failed save, when the file is on disk.
+      let localError: unknown = null;
+      try {
+        await this.adapter.save(this.storedDocs());
+      } catch (e) {
+        localError = e;
+      }
+      // A cancelled or failed file write is still a cancelled/failed save (the
+      // catch below says which), even though browser storage was refreshed.
+      if (fileError) throw fileError;
+      if (localError && !fileWritten) throw localError;
       for (const [id, rev] of revs) this.markSaved(id, rev);
+      if (!localError) this.workspaceDirty = false;
       this.refreshSync();
       trace.mark("state", "state:sync", { status: this.state.sync, via: this.adapter.label });
       this.toast(
-        !fileWritten
-          ? "Saved locally (no file chosen)"
-          : this.lastSaveSkipped > 0
-            ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be written (missing from storage)`
-            : this.savedNote()
+        localError
+          ? "Saved to the file — the browser's storage is full, so this map will not reopen by itself"
+          : !fileWritten
+            ? "Saved locally (no file chosen)"
+            : this.lastSaveSkipped > 0
+              ? `Saved — ${this.lastSaveSkipped} image${this.lastSaveSkipped === 1 ? "" : "s"} could not be written (missing from storage)`
+              : this.savedNote()
       );
       return fileWritten ? "saved" : "cancelled";
     } catch (e) {
@@ -995,7 +1061,11 @@ export class EditorStore {
         this.toast("Save cancelled");
         return "cancelled";
       }
-      this.toast("Save failed — check storage");
+      // The reason, not "check storage": a missing file, a full disk and a
+      // locked file need three different actions from the user.
+      const why = e instanceof Error ? e.message : String(e);
+      trace.error("save", why);
+      this.toast(`Save failed — ${why}`);
       return "failed";
     }
   }
@@ -1007,11 +1077,21 @@ export class EditorStore {
    * count matches the bytes on their way to disk. An edit made while the
    * write is in flight bumps the count past it and stays unsaved.
    */
-  private async writeActiveDocDesktop(): Promise<void> {
+  private async writeActiveDocDesktop(create = false): Promise<void> {
     const doc = this.model.doc;
     const rev = this.revOf(doc.documentId);
-    await this.adapter.save([doc]);
+    if (this.adapter instanceof TauriStorageAdapter) await this.adapter.save([doc], { create });
+    else await this.adapter.save([doc]);
     this.markSaved(doc.documentId, rev);
+  }
+
+  /**
+   * What browser storage holds: the open documents, plus the stored ones that
+   * failed the open check at startup. Those are written back untouched — a
+   * save that dropped them would turn a refused document into a deleted one.
+   */
+  private storedDocs(): RnodeDocument[] {
+    return this.unopenable.length > 0 ? [...this.state.docs, ...this.unopenable] : this.state.docs;
   }
 
   /** The success toast; says so when the map changed while it was saving. */
@@ -1075,8 +1155,9 @@ export class EditorStore {
     this.adoptFileTitle(file);
     // The ACTIVE document is saved, not docs[0]: on desktop the sidebar may
     // still carry the never-saved sample, and saving it over the chosen file
-    // would corrupt the document on disk.
-    await this.writeActiveDocDesktop();
+    // would corrupt the document on disk. Save as is the one write allowed to
+    // create the file.
+    await this.writeActiveDocDesktop(true);
     return true;
   }
 
@@ -1227,8 +1308,15 @@ export class EditorStore {
     // The file becomes THIS document's file before switchToDoc runs (inside
     // importDocumentFromJson): the switch points the adapter and the asset
     // store at it — both roots always move together (the T19 trap).
+    const previousPath = this.docFilePaths.get(doc.documentId);
     this.docFilePaths.set(doc.documentId, file);
-    this.importDocumentFromJson(JSON.stringify(doc));
+    if (!this.importDocumentFromJson(JSON.stringify(doc))) {
+      // Declined or refused: the open copy (if any) keeps its own file.
+      if (previousPath) this.docFilePaths.set(doc.documentId, previousPath);
+      else this.docFilePaths.delete(doc.documentId);
+      if (!this.importDeclined) this.toast(`Cannot open "${titleFromDocPath(file)}" — ${documentLoadErrorLabel("incompatible-schema")}`);
+      return false;
+    }
     // The file's name IS the document's name from here on. Nothing is renamed
     // on disk — the title simply stops disagreeing with the file it came from.
     this.adoptFileTitle(file);
@@ -1274,54 +1362,69 @@ export class EditorStore {
    * true when a file was written or downloaded, false when the user cancelled
    * the picker (the document is still persisted to app storage).
    */
-  private async writePortableBytes(
-    blob: Blob,
+  /**
+   * Where a portable save goes: the stored handle for this document+format,
+   * else a handle the user picks now, else "download". Null = the user
+   * cancelled the picker.
+   *
+   * Asked BEFORE the file is built: `showSaveFilePicker` needs a live user
+   * activation, and building a picture-heavy `.rnode` outlasts it — the picker
+   * then threw, and the save fell back to a download without a word.
+   */
+  private async portableTarget(
     fileName: string,
     pickerType: { description: string; accept: Record<string, string[]> },
     format: PortableFormat
-  ): Promise<boolean> {
-    const docId = this.model.doc.documentId;
-    const key = portableFileKey(docId, format);
-
-    // 1) Reuse the stored handle for THIS format → silent overwrite, no
-    //    dialog, no download.
+  ): Promise<FileSystemFileHandle | "download" | null> {
+    const key = portableFileKey(this.model.doc.documentId, format);
+    // 1) The stored handle for THIS format → silent overwrite, no dialog.
     let handle = this.fileHandles.get(key) ?? null;
     if (!handle) {
       handle = await this.loadFileHandle(key);
       if (handle) this.fileHandles.set(key, handle);
     }
-    if (handle) {
+    if (handle) return handle;
+    // 2) No handle but the API exists → let the user pick where to save.
+    if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
       try {
-        const writable = await handle.createWritable();
+        const picked = await window.showSaveFilePicker({ suggestedName: fileName, types: [pickerType] });
+        this.fileHandles.set(key, picked);
+        await this.storeFileHandle(key, picked);
+        return picked;
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return null;
+        // picker failed (permission/unsupported) → fall back to download
+      }
+    }
+    return "download";
+  }
+
+  private async writePortableBytes(
+    blob: Blob,
+    fileName: string,
+    pickerType: { description: string; accept: Record<string, string[]> },
+    format: PortableFormat,
+    target?: FileSystemFileHandle | "download" | null
+  ): Promise<boolean> {
+    const key = portableFileKey(this.model.doc.documentId, format);
+    const where = target === undefined ? await this.portableTarget(fileName, pickerType, format) : target;
+    if (where === null) return false;
+    if (where !== "download") {
+      try {
+        const writable = await where.createWritable();
         await writable.write(blob);
         await writable.close();
-        trace.mark("files", "files:write", { format, bytes: blob.size, via: "stored-handle" });
+        trace.mark("files", "files:write", { format, bytes: blob.size, via: "handle" });
         return true;
       } catch {
-        // Handle stale (file moved/deleted) → drop it and ask again.
+        // Handle stale (file moved/deleted, permission revoked) → forget it;
+        // the content still leaves as a download below, and the next save asks.
         this.fileHandles.delete(key);
         await this.clearFileHandle(key);
       }
     }
 
-    // 2) No handle but the API exists → let the user pick where to save.
-    if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
-      try {
-        const picked = await window.showSaveFilePicker({ suggestedName: fileName, types: [pickerType] });
-        const writable = await picked.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        this.fileHandles.set(key, picked);
-        await this.storeFileHandle(key, picked);
-        trace.mark("files", "files:write", { format, bytes: blob.size, via: "picker" });
-        return true;
-      } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") return false;
-        // picker failed (permission/unsupported) → fall back to download
-      }
-    }
-
-    // 3) Fallback: download the file with the CURRENT content.
+    // Fallback: download the file with the CURRENT content.
     this.download(blob, fileName);
     trace.mark("err", "err:fallback", { what: "portable-save", format, bytes: blob.size });
     trace.mark("files", "files:write", { format, bytes: blob.size, via: "download" });
@@ -1345,6 +1448,10 @@ export class EditorStore {
    * can be cancelled between images.
    */
   private async writePortableRnode(): Promise<boolean> {
+    const pickerType = { description: "R-node document", accept: { "application/vnd.sqlite3": [".rnode"] } };
+    // Where to write is settled while the Ctrl+S activation is still alive.
+    const target = await this.portableTarget(this.docRnodeName(), pickerType, "rnode");
+    if (target === null) return false;
     const signal = this.beginLongOp("Saving document…", true);
     try {
       const { bytes, skipped } = await buildRnodeFile(this.model.doc, this.sheet, getAssetStore(), {
@@ -1356,8 +1463,9 @@ export class EditorStore {
       return this.writePortableBytes(
         new Blob([bytes.slice().buffer], { type: "application/vnd.sqlite3" }),
         this.docRnodeName(),
-        { description: "R-node document", accept: { "application/vnd.sqlite3": [".rnode"] } },
-        "rnode"
+        pickerType,
+        "rnode",
+        target
       );
     } finally {
       this.endLongOp();
@@ -1432,8 +1540,12 @@ export class EditorStore {
     }
   }
 
+  /** One connection for the session (each call used to open a new one and
+   *  never close it); a failed open is retried by the next call. */
+  private idbPromise: Promise<IDBDatabase> | null = null;
+
   private openIdb(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
+    this.idbPromise ??= new Promise<IDBDatabase>((resolve, reject) => {
       const req = indexedDB.open("r-node", 1);
       req.onupgradeneeded = () => {
         const db = req.result;
@@ -1441,7 +1553,11 @@ export class EditorStore {
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
+    }).catch((e) => {
+      this.idbPromise = null;
+      throw e;
     });
+    return this.idbPromise;
   }
 
   /**
@@ -1477,14 +1593,15 @@ export class EditorStore {
         }
         const id = this.importDocumentFromJson(JSON.stringify(doc));
         if (id) await this.settleOpenedDocument();
-        this.toast(id ? `Opened ${file.name}` : "Not a valid R-node file");
+        if (id) this.toast(`Opened ${file.name}`);
+        else if (!this.importDeclined) this.toast("Not a valid R-node file");
         return;
       }
       const text = new TextDecoder().decode(buf);
       const id = this.importDocumentFromJson(text);
       if (id) await this.settleOpenedDocument();
       if (id) this.toast(`Opened ${file.name}`);
-      else this.toast("Not a valid R-node file");
+      else if (!this.importDeclined) this.toast("Not a valid R-node file");
     } catch (e) {
       trace.error("loadFile", e instanceof Error ? e.message : String(e));
       this.toast("Could not read the file");
@@ -1525,6 +1642,8 @@ export class EditorStore {
     input.accept = ".rnode,.rnode.json,.rmind.json,.rnode.zip,application/json,application/zip";
     const file: File | null = await new Promise((resolve) => {
       input.onchange = (): void => resolve(input.files?.[0] ?? null);
+      // Without this a dismissed dialog left the promise pending forever.
+      input.addEventListener("cancel", () => resolve(null), { once: true });
       input.click();
     });
     return file ? { file, handle: null } : null;
@@ -1557,7 +1676,7 @@ export class EditorStore {
     }
     const id = this.importDocumentFromJson(JSON.stringify(result.doc));
     if (!id) {
-      this.toast(`Could not open ${fileName}: ${documentLoadErrorLabel("incompatible-schema")}`);
+      if (!this.importDeclined) this.toast(`Could not open ${fileName}: ${documentLoadErrorLabel("incompatible-schema")}`);
       return;
     }
     this.adoptFileTitle(fileName);
@@ -1586,7 +1705,7 @@ export class EditorStore {
     const id = this.model.doc.documentId;
     const rev = this.revOf(id);
     try {
-      await this.adapter.save(this.state.docs);
+      await this.adapter.save(this.storedDocs());
     } catch {
       return;
     }
@@ -1609,9 +1728,23 @@ export class EditorStore {
     } catch {
       return null;
     }
+    this.importDeclined = false;
     const doc = this.validateImportedDoc(raw);
     if (!doc) return null;
     const existing = this.state.docs.findIndex((d) => d.documentId === doc.documentId);
+    // Opening a file whose document is already open REPLACES the open copy
+    // (identity is the documentId — a copy made in Explorer has the same one).
+    // With unsaved changes on the open copy that silently threw them away.
+    if (existing >= 0 && this.isDocDirty(doc.documentId)) {
+      const ok =
+        typeof window === "undefined" || typeof window.confirm !== "function" ||
+        window.confirm(`"${this.state.docs[existing].title}" is open with unsaved changes. Replace it with the file's version and lose them?`);
+      if (!ok) {
+        this.importDeclined = true;
+        this.toast("Open cancelled — the open copy keeps its unsaved changes");
+        return null;
+      }
+    }
     if (existing >= 0) this.state.docs[existing] = doc;
     else this.state.docs = [...this.state.docs, doc];
     trace.mark("data", "data:import", { docId: doc.documentId, nodes: Object.keys(doc.sheets[0].nodes).length });
@@ -1647,10 +1780,15 @@ export class EditorStore {
         childrenIds: Array.isArray(node.childrenIds) ? node.childrenIds.filter((c): c is string => typeof c === "string") : [],
         title: typeof node.title === "string" ? node.title : "",
         titleRuns: sanitizeTitleRuns(node.titleRuns),
+        // Every Position field: this is the startup door too, and dropping
+        // offsets or branchFree here would rewrite every map on each launch.
         position: {
-          x: typeof position.x === "number" ? position.x : 0,
-          y: typeof position.y === "number" ? position.y : 0,
+          x: typeof position.x === "number" && Number.isFinite(position.x) ? position.x : 0,
+          y: typeof position.y === "number" && Number.isFinite(position.y) ? position.y : 0,
           manual: !!position.manual,
+          ...(position.branchFree === true ? { branchFree: true } : {}),
+          ...(typeof position.offsetX === "number" ? { offsetX: position.offsetX } : {}),
+          ...(typeof position.offsetY === "number" ? { offsetY: position.offsetY } : {}),
         },
         style: (typeof node.style === "object" && node.style ? node.style : {}) as Style,
         collapsed: !!node.collapsed,
@@ -1693,12 +1831,26 @@ export class EditorStore {
       presentation: typeof s.presentation === "object" && s.presentation ? s.presentation : {},
     };
 
+    // Topology. Dangling references are dropped — they point at nothing, so
+    // removing them loses nothing. Anything still incoherent after that (a
+    // cycle, a child listed under the wrong parent) is refused: it used to
+    // open, then hang the first tree walk or corrupt the next edit, and in
+    // production nothing checked it.
+    for (const n of Object.values(nodes)) n.childrenIds = n.childrenIds.filter((c) => !!nodes[c]);
+    sheet.relationships = sheet.relationships.filter((r) => !!r && !!nodes[r.fromId] && !!nodes[r.toId]);
+    try {
+      validateSheet(sheet);
+    } catch (e) {
+      trace.error("import:topology", e instanceof Error ? e.message : String(e));
+      return null;
+    }
+
     return {
       schemaVersion: typeof d.schemaVersion === "string" ? d.schemaVersion : SCHEMA_VERSION,
       documentId: d.documentId,
       title: typeof d.title === "string" ? d.title : "Imported map",
       createdAt: typeof d.createdAt === "string" ? d.createdAt : nowIso(),
-      updatedAt: nowIso(),
+      updatedAt: typeof d.updatedAt === "string" ? d.updatedAt : nowIso(),
       archived: !!d.archived,
       pinned: !!d.pinned,
       settings: {
@@ -2654,7 +2806,7 @@ export class EditorStore {
     // listed before its ancestor through: two ops, and the undo restored the
     // child into a parent that the ancestor's restore had already brought back
     // with it — the same id twice in childrenIds.
-    const toDelete = pruned.filter((id) => !pruned.some((other) => other !== id && this.isDescendant(other, id)));
+    const toDelete = this.topmostIds(pruned);
     const ops: Op[] = [];
     // Each op's index must be the child's position at the moment THAT op
     // runs, i.e. after the earlier deletes of the batch. Undo replays the
@@ -2728,6 +2880,25 @@ export class EditorStore {
       cur = this.model.node(cur)?.parentId ?? null;
     }
     return false;
+  }
+
+  /**
+   * The ids of `ids` that have no ancestor in `ids`, in their original order.
+   * One walk up per id against a set: the pairwise isDescendant it replaces
+   * was quadratic in the selection (and times the depth).
+   */
+  private topmostIds(ids: string[]): string[] {
+    const set = new Set(ids);
+    return ids.filter((id) => {
+      const seen = new Set<string>();
+      let cur = this.model.node(id)?.parentId ?? null;
+      while (cur && !seen.has(cur)) {
+        if (set.has(cur)) return false;
+        seen.add(cur);
+        cur = this.model.node(cur)?.parentId ?? null;
+      }
+      return true;
+    });
   }
 
   /** Descendant ids whose position is manually pinned (must follow their parent). */
@@ -4128,6 +4299,15 @@ export class EditorStore {
     // 2) Then the blobs — NOT undoable, and deliberately after the cards:
     // the op above is the undoable half; the byte deletion is the purge half.
     for (const id of report.blobs) await store.delete(id);
+    // Desktop: SQLite keeps freed pages for reuse, so the file only shrinks
+    // after a VACUUM — without it the bytes reported here were not recovered.
+    if (store instanceof TauriAssetStore && report.blobs.length > 0) {
+      try {
+        await store.compact();
+      } catch (e) {
+        trace.error("gc:compact", String(e));
+      }
+    }
     this.toast(`Removed ${cardsLabel} and ${blobsLabel} (${formatBytes(bytes)})`);
   }
 
@@ -4381,7 +4561,7 @@ export class EditorStore {
 
   async copySelection(): Promise<void> {
     const ids = this.state.selection;
-    const pruned = ids.filter((id) => !ids.some((other) => other !== id && this.isDescendant(other, id)));
+    const pruned = this.topmostIds(ids);
     let roots = pruned;
     let nodes = [...new Set(pruned.flatMap((id) => this.model.subtreeIds(id)))].map((id) => this.model.requireNode(id));
     const imageNode = this.state.imageSel ? this.model.node(this.state.imageSel) : undefined;
@@ -4448,7 +4628,7 @@ export class EditorStore {
    *  follow indented, in tree order. */
   async copySelectionOutline(): Promise<void> {
     const ids = this.state.selection;
-    const pruned = ids.filter((id) => !ids.some((other) => other !== id && this.isDescendant(other, id)));
+    const pruned = this.topmostIds(ids);
     if (pruned.length === 0) return;
     const text = this.outlineText(pruned);
     if (!text) return;
@@ -5155,17 +5335,45 @@ export class EditorStore {
 
   setStructure(patch: Partial<Sheet["structure"]>): void {
     const cur = this.sheet.structure;
-    this.execOps([makeOp<Op & { type: "setStructure" }>("setStructure", { config: { ...cur, ...patch }, prev: cur })]);
-    // Changing the structure is an explicit global reflow. Clear manual
-    // overrides so the new structure does not immediately fight old ones.
-    this.scheduleLayout(true, true);
+    // Changing the structure is an explicit global reflow: manual overrides
+    // are cleared so the new structure does not fight old ones — as OPS, in
+    // the same batch, so one Ctrl+Z brings back the structure AND every hand
+    // placement. The flags used to be cleared by the layout itself, outside
+    // the history, and on a 30 ms debounce any later reflow could cancel.
+    this.execOps([
+      makeOp<Op & { type: "setStructure" }>("setStructure", { config: { ...cur, ...patch }, prev: cur }),
+      ...this.clearManualOps(),
+    ]);
+    this.relayoutNow();
   }
 
   autoLayoutAll(): void {
-    // Run immediately and clear manual flags so auto-layout takes over
-    applyLayout(this.sheet, true, this.measurer, true);
-    this.notify();
+    const ops = this.clearManualOps();
+    if (ops.length > 0) this.execOps(ops);
+    this.relayoutNow();
     this.toast("Layout recalculated");
+  }
+
+  /** setPosition ops releasing every hand-placed node (undoable). */
+  private clearManualOps(): Op[] {
+    const ops: Op[] = [];
+    for (const n of Object.values(this.sheet.nodes)) {
+      const p = n.position;
+      if (!p.manual && p.offsetX === undefined && p.offsetY === undefined) continue;
+      ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", { id: n.id, x: p.x, y: p.y, manual: false, prev: { ...p } }));
+    }
+    return ops;
+  }
+
+  /** A forced global layout, now — never left to a debounce that a later
+   *  ordinary reflow would replace. */
+  private relayoutNow(): void {
+    if (this.layoutTimer) {
+      clearTimeout(this.layoutTimer);
+      this.layoutTimer = null;
+    }
+    this.applyLayoutTraced(true, true);
+    this.notify();
   }
 
   // -------------------------------------------------------------------------
@@ -5646,9 +5854,14 @@ export class EditorStore {
     if (!node) return;
     const { ink: _replaced, ...rest } = node.style;
     const style = ink.length > 0 ? { ...rest, ink } : rest;
+    const before = { w: node.style.width, h: node.style.height };
     // An ordinary setStyle: one undo step, and execOps grows the canvas with it.
     this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: canvasId, style, prev: node.style })]);
-    this.settleLayoutNow();
+    // A stroke inside the canvas moves no box: the full synchronous layout is
+    // needed only when the canvas grew to fit it (the debounced one follows
+    // either way). It used to run on every single stroke.
+    const after = this.model.node(canvasId)?.style;
+    if (after && (after.width !== before.w || after.height !== before.h)) this.settleLayoutNow();
   }
 
   addInkStroke(canvasId: string, stroke: InkStroke): void {
@@ -5786,7 +5999,7 @@ export class EditorStore {
     return doc.documentId;
   }
 
-  duplicateDocument(id: string): void {
+  async duplicateDocument(id: string): Promise<void> {
     const src = this.state.docs.find((d) => d.documentId === id);
     if (!src) return;
     const copy: RnodeDocument = structuredClone(src);
@@ -5797,7 +6010,23 @@ export class EditorStore {
     this.state.docs = [...this.state.docs, copy];
     this.markDirty(copy.documentId);
     this.notify();
-    this.toast("Document duplicated");
+    // Desktop: the copy has no file yet, so its images are read from the
+    // scratch file until its first Save as — and the source's images live in
+    // the SOURCE's file. Copy them across now, or the copy shows empty frames
+    // and its Save as reports every picture as "could not be copied".
+    let skipped = 0;
+    const assetStore = getAssetStore();
+    const from = this.docFilePaths.get(id);
+    if (this.adapter instanceof TauriStorageAdapter && assetStore instanceof TauriAssetStore && from && src.sheets[0]) {
+      try {
+        skipped = await assetStore.copyBetween(from, null, [...referencedAssetIds(src.sheets[0])]);
+      } catch (e) {
+        trace.error("duplicate:assets", String(e));
+        this.toast("Document duplicated — its images could not be copied");
+        return;
+      }
+    }
+    this.toast(skipped > 0 ? `Document duplicated — ${skipped} image${skipped === 1 ? "" : "s"} missing from the source` : "Document duplicated");
   }
 
   renameDocument(id: string, title: string): void {
@@ -5846,9 +6075,14 @@ export class EditorStore {
         // try to write the blank over it — and the overwrite guard would
         // refuse, stranding the new document.
         this.applyDocFile(null);
+        this.markDirty(this.model.doc.documentId); // a blank nobody has saved
       }
     }
-    this.state.sync = "dirty";
+    // Web: browser storage still holds the deleted map until the next save,
+    // and the close guard must say so. Desktop: deleting only closes the
+    // document; its file is untouched and there is nothing to save.
+    if (!(this.adapter instanceof TauriStorageAdapter)) this.workspaceDirty = true;
+    this.refreshSync();
     this.notify();
   }
 

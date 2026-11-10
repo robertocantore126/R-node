@@ -578,7 +578,7 @@ export interface CoverageReport {
 // dev session can be torn down cleanly (StrictMode mounts twice).
 // ---------------------------------------------------------------------------
 
-type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+type TauriInvoke = (cmd: string, args?: Record<string, unknown> | Uint8Array, options?: unknown) => Promise<unknown>;
 
 /** The commands that ARE the filesystem layer of the desktop backend. */
 const FS_COMMANDS = new Set([
@@ -591,11 +591,16 @@ const FS_COMMANDS = new Set([
   "get_asset",
   "delete_asset",
   "list_assets",
+  "copy_assets",
+  "compact_document",
+  "clear_scratch",
+  "read_document_id",
   "default_document_path",
 ]);
 
 /** Collapse large IPC payloads (image bytes!) into a length instead of a dump. */
-function summarize(args?: Record<string, unknown>): Detail | undefined {
+function summarize(args?: Record<string, unknown> | Uint8Array): Detail | undefined {
+  if (args instanceof Uint8Array) return { body: `[${args.byteLength} bytes]` };
   if (!args) return undefined;
   const out: Detail = {};
   for (const [k, v] of Object.entries(args)) {
@@ -617,10 +622,13 @@ function summarize(args?: Record<string, unknown>): Detail | undefined {
  *
  * Exported for unit tests; installTrace calls it against the real global.
  */
-export function wrapTauriInvoke(api: { core: { invoke: TauriInvoke } } | undefined): () => void {
+/** Any invoke signature: the wrapper forwards whatever it is given. */
+type AnyInvoke = (cmd: string, args?: never, options?: never) => Promise<unknown>;
+
+export function wrapTauriInvoke(api: { core: { invoke: AnyInvoke } } | undefined): () => void {
   if (!api?.core || typeof api.core.invoke !== "function") return () => {};
   const orig = api.core.invoke;
-  const wrapped: TauriInvoke = (cmd, args) => {
+  const wrapped: TauriInvoke = (cmd, args, options) => {
     const t0 = typeof performance !== "undefined" ? performance.now() : 0;
     const fs = FS_COMMANDS.has(cmd);
     trace.mark("rust", fs ? "rust:filesystem" : "rust:invoke", { cmd, ...summarize(args) }, undefined, cmd);
@@ -630,7 +638,7 @@ export function wrapTauriInvoke(api: { core: { invoke: TauriInvoke } } | undefin
       else trace.mark("rust", "rust:error", { cmd, error: String(err), ms: Math.round(ms * 100) / 100 }, undefined, cmd);
     };
     try {
-      const p = orig.apply(api.core, [cmd, args] as never) as Promise<unknown>;
+      const p = orig.apply(api.core, [cmd, args, options] as never) as Promise<unknown>;
       if (p && typeof (p as Promise<unknown>).then === "function") {
         return (p as Promise<unknown>).then(
           (r) => {

@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App";
+import { App, AppErrorBoundary } from "./App";
 import { EditorStore } from "./editor/store";
 import { inspectMachines } from "./editor/machine";
 import { StoreContext } from "./editor/context";
@@ -35,7 +35,9 @@ void store.boot().then(() => {
   createRoot(document.getElementById("root")!).render(
     <StrictMode>
       <StoreContext.Provider value={store}>
-        <App />
+        <AppErrorBoundary onExport={() => store.exportJson()}>
+          <App />
+        </AppErrorBoundary>
       </StoreContext.Provider>
     </StrictMode>
   );

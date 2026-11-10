@@ -217,10 +217,16 @@ export async function readRnodeFile(
         select.reset();
 
         const metaBytes = found.get("meta");
-        if (!metaBytes || LEVELS.some((l) => !found.get(l)?.byteLength)) {
+        // A damaged meta row costs that one picture, not the whole open.
+        let meta: AssetMeta | null = null;
+        try {
+          meta = metaBytes ? (JSON.parse(new TextDecoder().decode(metaBytes)) as AssetMeta) : null;
+        } catch {
+          meta = null;
+        }
+        if (!meta || LEVELS.some((l) => !found.get(l)?.byteLength)) {
           skipped++;
         } else {
-          const meta = JSON.parse(new TextDecoder().decode(metaBytes)) as AssetMeta;
           const levels = {} as Record<AssetLevel, AssetBlob>;
           for (const l of LEVELS) {
             levels[l] = { blob: new Blob([found.get(l)!.slice().buffer], { type: meta.mime }), ...levelSize(meta, l) };

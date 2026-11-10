@@ -30,6 +30,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The suite gates the deploy: a red test must not reach the live site.
+      - run: npm test
       - run: npm run build
         env:
           RNODE_BASE: /R-node/
