@@ -17,7 +17,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { useStore } from "../editor/context";
 import { clearStudyProgress, loadStudyProgress, saveStudyProgress, validQuizProgress } from "./studyProgress";
-import { quizSearchTiers } from "../core/quiz";
+import { newQuizSeed, quizAnswerOrder, quizSearchTiers } from "../core/quiz";
 
 let lastPos: { x: number; y: number } | null = null;
 
@@ -72,6 +72,8 @@ export function QuizWindow(): JSX.Element | null {
   const [picked, setPicked] = useState<number | null>(saved && saved.results.length > saved.index ? saved.results[saved.index] : null);
   const [results, setResults] = useState<number[]>(saved?.results ?? []);
   const [done, setDone] = useState(false);
+  // Answers are shown in a per-run shuffled order (see quizAnswerOrder).
+  const [seed, setSeed] = useState(() => saved?.seed ?? newQuizSeed());
   const submitted = useRef(false);
 
   // Where the window sits (null = centred by CSS until first dragged). Kept in
@@ -128,8 +130,8 @@ export function QuizWindow(): JSX.Element | null {
   useEffect(() => {
     if (!nodeId || !quizId) return;
     if (done || results.length === 0) clearStudyProgress(nodeId, quizId);
-    else saveStudyProgress(nodeId, quizId, { index, results });
-  }, [nodeId, quizId, index, results, done]);
+    else saveStudyProgress(nodeId, quizId, { index, results, seed });
+  }, [nodeId, quizId, index, results, done, seed]);
 
   // Persist the score exactly once per finished run (a retry resets the guard).
   useEffect(() => {
@@ -162,6 +164,7 @@ export function QuizWindow(): JSX.Element | null {
     setPicked(null);
     setResults([]);
     setDone(false);
+    setSeed(newQuizSeed());
     submitted.current = false;
   };
 
@@ -226,7 +229,8 @@ export function QuizWindow(): JSX.Element | null {
           <div className="quiz-body">
             <p className="quiz-q">{q.q}</p>
             <div className="quiz-answers">
-              {q.answers.map((a, idx) => {
+              {quizAnswerOrder(seed, index, q.answers.length).map((idx) => {
+                const a = q.answers[idx];
                 let cls = "quiz-answer";
                 if (answered) {
                   if (idx === q.correct) cls += " correct";

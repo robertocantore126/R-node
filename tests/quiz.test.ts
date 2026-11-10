@@ -1,6 +1,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { extractQuizJson, normalizeQuiz, parseQuiz } from "../src/core/quiz";
+import { extractQuizJson, normalizeQuiz, parseQuiz, quizAnswerOrder } from "../src/core/quiz";
+import { validQuizProgress } from "../src/ui/studyProgress";
 import { makeOp, type Op } from "../src/core/ops";
 import { plainToRuns } from "../src/core/text";
 import { quizClipText } from "../src/editor/quizPrompts";
@@ -243,5 +244,25 @@ describe("quiz strip — multiple quizzes, window and score", () => {
     const quizId = attachQuiz(store, topic, 2);
     store.submitQuizScore(topic, quizId, 99);
     expect(store.doc.node(topic)!.style.quizzes![0].score).toEqual({ last: 2, best: 2, attempts: 1 });
+  });
+});
+
+describe("quiz answer shuffling", () => {
+  it("quizAnswerOrder is a deterministic permutation of the four answers", () => {
+    const order = quizAnswerOrder(12345, 3);
+    expect([...order].sort()).toEqual([0, 1, 2, 3]);
+    expect(quizAnswerOrder(12345, 3)).toEqual(order);
+  });
+
+  it("spreads a stored answer evenly over the four display slots", () => {
+    // LLM quizzes often store the correct answer at index 0; it must not stay on top.
+    const slots = [0, 0, 0, 0];
+    for (let seed = 0; seed < 400; seed++) for (let q = 0; q < 10; q++) slots[quizAnswerOrder(seed, q).indexOf(0)]++;
+    for (const n of slots) expect(n).toBeGreaterThan(800);
+  });
+
+  it("keeps a saved run's seed and accepts runs saved without one", () => {
+    expect(validQuizProgress({ index: 1, results: [2], seed: 7 }, 5)).toEqual({ index: 1, results: [2], seed: 7 });
+    expect(validQuizProgress({ index: 1, results: [2] }, 5)).toEqual({ index: 1, results: [2] });
   });
 });

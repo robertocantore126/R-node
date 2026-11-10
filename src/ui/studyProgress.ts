@@ -59,6 +59,9 @@ export function validFlashcardProgress(value: unknown, cardCount: number): Flash
 export interface QuizProgress {
   index: number;
   results: number[];
+  /** Seed of this run's answer order (`quizAnswerOrder`), so a resumed run
+   *  shows the answers where they were. Absent in runs saved before shuffling. */
+  seed?: number;
 }
 
 /** The saved run if it still fits a quiz of `questionCount` questions. */
@@ -67,5 +70,7 @@ export function validQuizProgress(value: unknown, questionCount: number): QuizPr
   if (!p || !Array.isArray(p.results) || !isIndex(p.index, questionCount)) return null;
   if (p.results.length < p.index || p.results.length > p.index + 1 || p.results.length > questionCount) return null;
   if (!p.results.every((a) => isIndex(a, 4))) return null;
-  return { index: p.index, results: p.results };
+  const out: QuizProgress = { index: p.index, results: p.results };
+  if (Number.isInteger(p.seed)) out.seed = p.seed;
+  return out;
 }

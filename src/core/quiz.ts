@@ -93,6 +93,37 @@ export function quizMistakeNodeIds(sheet: Sheet): Set<string> {
   return result;
 }
 
+/**
+ * The order the answers of question `questionIndex` are SHOWN in for a run
+ * seeded with `seed`: a permutation of 0..count-1 (display slot -> stored
+ * index). LLMs put the correct answer first far more often than chance, so
+ * showing the stored order would let position give the answer away. Answers
+ * are still stored and scored by their stored index; only the display moves.
+ * Deterministic so a resumed run shows the same order.
+ */
+export function quizAnswerOrder(seed: number, questionIndex: number, count = QUIZ_ANSWER_COUNT): number[] {
+  // mulberry32 on seed mixed with the question index.
+  let a = (seed ^ Math.imul(questionIndex + 1, 0x9e3779b1)) >>> 0;
+  const rand = (): number => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const order = Array.from({ length: count }, (_, i) => i);
+  for (let i = count - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return order;
+}
+
+/** A fresh seed for a new quiz run. */
+export function newQuizSeed(): number {
+  return Math.floor(Math.random() * 0x7fffffff);
+}
+
 /** Accept a parsed object as a quiz, or null if any rule is broken. */
 export function normalizeQuiz(value: unknown): QuizSeed | null {
   const o = asRecord(value);

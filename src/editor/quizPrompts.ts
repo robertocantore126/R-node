@@ -11,12 +11,54 @@
 
 export const QUIZ_PROMPT = `Create a multiple-choice quiz about the topics in the outline above.
 
-Rules:
-- Write the questions in the SAME language as the outline.
-- Every question has EXACTLY four answers, and exactly one of them is correct.
+What to ask:
+- Test whether the learner understands the material, not whether they
+  remember how the outline is worded. About TWO THIRDS of the questions are
+  THEORY and ONE THIRD are PRACTICE:
+  THEORY - the concepts themselves:
+  * what something is, what it is for, how it works inside
+  * why it is designed that way, its properties, limits and trade-offs
+  * the difference between two concepts that are easy to confuse
+  * a consequence: "What happens if ...?" / "What does X do when ...?"
+  PRACTICE - applying them:
+  * a task: "You need to <do X>. Which command / service / setting do you use?"
+  * a short scenario you invent: a team, a requirement, a constraint -> best choice
+  * a problem to troubleshoot: a symptom -> the likely cause or fix
+- NEVER ask the learner to recall a specific example, sample command, sample
+  file, sample template, sample value or sample name from the outline. Wrong:
+  "In the CLI example, which command is shown for launching an instance?",
+  "In the template example, what resource type is used for the bucket?".
+  Right: turn the concept the example illustrates into a new task with your own
+  values: "You want to launch a t3.small instance from the command line. Which
+  command do you run?".
+- Never mention the outline, the notes, "the material" or "the example" in a
+  question or answer. The question must make sense on its own.
+- The KNOWLEDGE tested must come from the outline - do not test facts it does
+  not support. Scenarios, names and values you invent to set up a question are
+  fine and encouraged.
+
+The four answers:
+- EXACTLY four answers, and exactly one of them is correct beyond dispute.
+- All four are the same kind of thing (all commands, all services, all numbers,
+  all short statements) with the same grammatical form, and SIMILAR LENGTH and
+  level of detail. The correct answer must not stand out as the longest, the
+  most precise or the most carefully qualified one.
+- Every wrong answer is something a learner who half-knows the topic could
+  pick: a related service, a neighbouring command or option, a real value from
+  a different context, a common misconception. Never an absurd, joking or
+  out-of-category option, never "all/none of the above".
+- Do not let the question give the answer away (a word repeated only in the
+  correct answer, a grammatical hint, an obviously different style).
+- Put the correct answer at a different position from question to question.
 - "correct" is the 0-based index (0, 1, 2 or 3) of the right answer inside "answers".
-- "explain" is optional: one short sentence on why the correct answer is right.
-- Only ask about material that is IN the outline; do not invent facts.
+- "explain" is optional: one or two short sentences on why the correct answer is
+  right and, when useful, why the most tempting wrong answer is wrong.
+- Write the questions in the SAME language as the outline.
+
+Before you reply, check every question against these rules and rewrite any
+that breaks one.
+
+Format rules:
 - Each outline entry has a [topic "..."] identifier. For EVERY question, include
   "sourceNodeIds": an array of the exact topic identifiers whose text supports
   the question. Include at least one, use only identifiers from this outline,
