@@ -59,8 +59,14 @@ export function freeformOffset(node: MindNode, index: number): { x: number; y: n
 }
 
 /** Local bounds of all content. Nested canvases occupy their own rectangle. */
-export function freeformContentBounds(sheet: Sheet, id: string, size: (node: MindNode) => { w: number; h: number }): { minX: number; minY: number; maxX: number; maxY: number } {
-  const bounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+export function freeformContentBounds(
+  sheet: Sheet,
+  id: string,
+  size: (node: MindNode) => { w: number; h: number },
+  /** Bounds of the content alone (±Infinity when empty) instead of always including the origin. */
+  tight = false,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const bounds = tight ? { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity } : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
   const visited = new Set<string>();
   const visit = (parentId: string, x: number, y: number): void => {
     if (visited.has(parentId)) return;

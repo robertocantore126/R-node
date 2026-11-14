@@ -625,9 +625,9 @@ export function CanvasView(): JSX.Element {
   };
 
   const writeAt = (g: CanvasGesture & { kind: "ink-stroke" }, wx: number, wy: number): void => {
-    // Never above the title band or left of the canvas: it only grows right and down.
-    const x = Math.max(0, wx - g.originX);
-    const y = Math.max(FREEFORM_HEADER, wy - g.originY);
+    // Anywhere: past an edge, the canvas grows on that side when the pen lifts.
+    const x = wx - g.originX;
+    const y = wy - g.originY;
     appendInkSample(g.stroke.path, x, y, 0.6 / store.getSnapshot().camera.scale);
   };
 
@@ -1224,6 +1224,15 @@ export function CanvasView(): JSX.Element {
         dropMode = relY < 0.28 ? "before" : relY > 0.72 ? "after" : "child";
         store.setDrop({ mode: dropMode, nodeId: hit });
       }
+    } else if (freeformOwner(store.sheet, dragging)) {
+      // An item of a canvas dragged past its edge, over nothing else: it stays
+      // in its canvas and follows the pointer; on release the canvas grows on
+      // that side (draw.io's endless page). Dropping it on another topic still
+      // takes it out.
+      const owner = freeformOwner(store.sheet, dragging)!;
+      store.setDrop({ mode: "child", nodeId: owner });
+      store.setNodeDragDraft(dragging, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+      return;
     } else {
       // Only main topics (root children) and floating topics can be pinned to
       // a free position — deeper hierarchical nodes stay in the auto layout.

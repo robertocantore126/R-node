@@ -1,6 +1,6 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, type FreeformShape } from "../core/freeform";
 import { looksLikeDrawio, parseDrawio, type DrawioDiagram } from "../core/drawio";
-import { diagramPrompt, type DiagramKind } from "../core/diagramPrompt";
+import { diagramPrompt } from "../core/diagramPrompt";
 import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
@@ -786,16 +786,60 @@ export class EditorStore {
       while (n?.parentId && !seen.has(n.id)) { seen.add(n.id); count++; n = this.model.node(n.parentId); }
       return count;
     };
+    const apply = (op: Op): void => {
+      inverses.push(applyWithInverse(this.sheet, op));
+      ops.push(op);
+    };
+    // A canvas laid out by the map cannot move its own left/top edge, so when
+    // it grows that way its content would jump on screen; the camera follows
+    // the content instead (measured after the layout, below).
+    const follow: { id: string; before: { x: number; y: number }; dx: number; dy: number }[] = [];
     for (const id of [...canvases].sort((a, b) => depth(b) - depth(a))) {
       const node = this.model.node(id);
       if (!node?.style.freeform) continue;
+      // Content past the left edge or above the title band: the canvas grows on
+      // that side. Its items shift right/down by the same amount and the canvas
+      // itself moves left/up, so nothing moves in the world.
+      const margin = node.style.container ? 0 : FREEFORM_PADDING;
+      const resolve = imageResolver(this.sheet);
+      const tight = freeformContentBounds(this.sheet, id, (n) => measureNode(n, this.measurer, resolve), true);
+      const dx = Number.isFinite(tight.minX) && tight.minX < margin ? Math.ceil(margin - tight.minX) : 0;
+      const dy = Number.isFinite(tight.minY) && tight.minY < FREEFORM_HEADER + margin ? Math.ceil(FREEFORM_HEADER + margin - tight.minY) : 0;
+      if (dx || dy) {
+        node.childrenIds.forEach((childId, index) => {
+          const child = this.model.node(childId);
+          if (!child) return;
+          const at = freeformOffset(child, index);
+          apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: childId, style: { ...child.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: child.style }));
+        });
+        const style: Style = { ...node.style, width: (node.style.width ?? 720) + dx, height: (node.style.height ?? 480) + dy };
+        if (node.style.ink?.length) style.ink = node.style.ink.map((s) => ({ ...s, path: s.path.map((v, i) => v + (i % 2 ? dy : dx)) }));
+        if (freeformOwner(this.sheet, id)) {
+          const at = freeformOffset(node, this.model.node(node.parentId!)?.childrenIds.indexOf(id) ?? 0);
+          style.freeformPosition = { x: at.x - dx, y: at.y - dy };
+        } else if (node.position.manual) {
+          apply(makeOp<Op & { type: "setPosition" }>("setPosition", { id, x: node.position.x - dx, y: node.position.y - dy, manual: true, prev: { ...node.position } }));
+        } else {
+          follow.push({ id, before: { x: node.position.x, y: node.position.y }, dx, dy });
+        }
+        apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: node.style }));
+        trace.applied("freeform:grow-left-up", { id, dx, dy, moved: follow.at(-1)?.id === id ? "camera" : "canvas" });
+      }
+      const grown = this.model.node(id)!;
       const min = this.freeformMinimumSize(id);
-      const width = Math.max(node.style.width ?? 720, min.w);
-      const height = Math.max(node.style.height ?? 480, min.h);
-      if (width === node.style.width && height === node.style.height) continue;
-      const op = makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, width, height }, prev: node.style });
-      inverses.push(applyWithInverse(this.sheet, op));
-      ops.push(op);
+      const width = Math.max(grown.style.width ?? 720, min.w);
+      const height = Math.max(grown.style.height ?? 480, min.h);
+      if (width === grown.style.width && height === grown.style.height) continue;
+      apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...grown.style, width, height }, prev: grown.style }));
+    }
+    if (follow.length) {
+      applyLayout(this.sheet, false, this.measurer);
+      const f = follow[0];
+      const after = this.model.node(f.id)?.position;
+      if (after) {
+        const cam = this.state.camera;
+        this.state.camera = { ...cam, x: cam.x + (after.x + f.dx - f.before.x), y: cam.y + (after.y + f.dy - f.before.y) };
+      }
     }
     if (!opts?.skipHistory) this.history.push(ops, inverses);
     trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
@@ -2684,12 +2728,9 @@ export class EditorStore {
   moveIntoFreeform(id: string, parentId: string, x: number, y: number): void {
     const node = this.model.node(id), parent = this.model.node(parentId);
     if (!node || !parent?.style.freeform || node.type === "central" || id === parentId || this.isDescendant(id, parentId)) return;
-    const resolve = imageResolver(this.sheet);
-    const ext = measureNode(node, this.measurer, resolve);
-    const bounds = node.style.freeform ? { minX: 0, minY: 0, maxX: ext.w, maxY: ext.h } : freeformContentBounds(this.sheet, id, (n) => measureNode(n, this.measurer, resolve));
-    const box = measureNode(parent, this.measurer);
-    const px = Math.max(FREEFORM_PADDING - bounds.minX, Math.min(x - parent.position.x, box.w - Math.max(ext.w, bounds.maxX) - FREEFORM_PADDING));
-    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING - bounds.minY, Math.min(y - parent.position.y, box.h - Math.max(ext.h, bounds.maxY) - FREEFORM_PADDING));
+    // No clamp: dropped past any edge, the canvas grows on that side (execOps).
+    const px = x - parent.position.x;
+    const py = y - parent.position.y;
     const internal = freeformOwner(this.sheet, id) === parentId;
     const actualParent = internal && node.parentId ? this.model.requireNode(node.parentId) : parent;
     const offset = { x: parent.position.x + px - actualParent.position.x, y: parent.position.y + py - actualParent.position.y };
@@ -3394,38 +3435,23 @@ export class EditorStore {
     return { canvasId, roots };
   }
 
-  private groupDragState: { roots: string[]; orig: Map<string, Style>; minDx: number; minDy: number } | null = null;
+  private groupDragState: { roots: string[]; orig: Map<string, Style> } | null = null;
 
-  /** Capture the group's pre-drag styles and how far up/left it may go. */
+  /**
+   * Capture the group's pre-drag styles. It may go past any edge of its
+   * canvas: on release the canvas grows on that side (execOps).
+   */
   beginGroupDrag(ids: string[]): void {
     const group = this.freeformGroup(ids);
-    const canvas = group ? this.model.node(group.canvasId) : undefined;
-    if (!group || !canvas) { this.groupDragState = null; return; }
-    const resolve = imageResolver(this.sheet);
-    const size = (n: MindNode): { w: number; h: number } => measureNode(n, this.measurer, resolve);
-    let minX = Infinity, minY = Infinity;
+    if (!group || !this.model.node(group.canvasId)) { this.groupDragState = null; return; }
     const orig = new Map<string, Style>();
-    for (const id of group.roots) {
-      const n = this.model.requireNode(id);
-      orig.set(id, n.style);
-      const b = n.style.freeform ? { minX: 0, minY: 0 } : freeformContentBounds(this.sheet, id, size);
-      minX = Math.min(minX, n.position.x + Math.min(0, b.minX));
-      minY = Math.min(minY, n.position.y + Math.min(0, b.minY));
-    }
-    // The group stops at the canvas's left margin and under its title band,
-    // like a single item; right and down it may go anywhere, the canvas grows.
-    this.groupDragState = {
-      roots: group.roots,
-      orig,
-      minDx: Math.min(0, canvas.position.x + FREEFORM_PADDING - minX),
-      minDy: Math.min(0, canvas.position.y + FREEFORM_HEADER + FREEFORM_PADDING - minY),
-    };
+    for (const id of group.roots) orig.set(id, this.model.requireNode(id).style);
+    this.groupDragState = { roots: group.roots, orig };
   }
 
-  private groupStyles(dx: number, dy: number): Map<string, Style> {
+  private groupStyles(cx: number, cy: number): Map<string, Style> {
     const d = this.groupDragState!;
     const out = new Map<string, Style>();
-    const cx = Math.max(d.minDx, dx), cy = Math.max(d.minDy, dy);
     for (const id of d.roots) {
       const node = this.model.requireNode(id);
       const style = d.orig.get(id)!;
@@ -5971,8 +5997,8 @@ export class EditorStore {
   }
 
   /** Put the diagram prompt (with the user's material) on the clipboard. */
-  async copyDiagramPrompt(material: string, kind: DiagramKind): Promise<boolean> {
-    const text = diagramPrompt(material, kind);
+  async copyDiagramPrompt(material: string): Promise<boolean> {
+    const text = diagramPrompt(material);
     try {
       await navigator.clipboard.writeText(text);
       this.toast("Copied the diagram prompt: paste it into any AI chat");

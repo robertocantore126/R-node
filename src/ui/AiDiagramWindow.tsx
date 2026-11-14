@@ -1,37 +1,24 @@
 /**
  * "Diagram from AI": the draw.io-style generator, without an API key.
  *
- *  1. Describe the diagram or paste the material (as much as you like), pick a
- *     kind, and copy the prompt.
+ *  1. Describe the diagram or paste the material (as much as you like) and
+ *     copy the prompt.
  *  2. Paste it into any AI chat (ChatGPT, Claude, DeepSeek...).
  *  3. Paste the answer back here and Import (or Ctrl+V on the canvas).
  *
- * The prompt (core/diagramPrompt.ts) restricts the AI to the draw.io dialect
- * the importer (core/drawio.ts) reads. DOM chrome over the map, like the quiz.
+ * The prompt (core/diagramPrompt.ts) states only the output format the
+ * importer (core/drawio.ts) reads. DOM chrome over the map, like the quiz.
  */
 import { useEffect, useRef, useState, type JSX } from "react";
 import { useStore } from "../editor/context";
-import { DIAGRAM_KINDS, diagramPrompt, type DiagramKind } from "../core/diagramPrompt";
-
-const KIND_LABELS: Record<DiagramKind, string> = {
-  auto: "Let the AI choose",
-  flowchart: "Flowchart",
-  architecture: "Architecture (cloud / system)",
-  process: "Process with swimlanes",
-  concept: "Concept map",
-  hierarchy: "Hierarchy / tree",
-  sequence: "Timeline / sequence",
-  comparison: "Comparison",
-};
+import { diagramPrompt } from "../core/diagramPrompt";
 
 /** What the user typed survives closing the window (not the document). */
 let lastMaterial = "";
-let lastKind: DiagramKind = "auto";
 
 export function AiDiagramWindow({ nodeId }: { nodeId: string }): JSX.Element {
   const store = useStore();
   const [material, setMaterial] = useState(lastMaterial);
-  const [kind, setKind] = useState<DiagramKind>(lastKind);
   const [answer, setAnswer] = useState("");
   const [showPrompt, setShowPrompt] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -40,7 +27,6 @@ export function AiDiagramWindow({ nodeId }: { nodeId: string }): JSX.Element {
   const intoCanvas = !!node?.style.freeform;
 
   useEffect(() => { lastMaterial = material; }, [material]);
-  useEffect(() => { lastKind = kind; }, [kind]);
   useEffect(() => {
     winRef.current?.querySelector("textarea")?.focus();
     // In capture, ahead of App's window shortcuts: Escape closes this window,
@@ -55,7 +41,7 @@ export function AiDiagramWindow({ nodeId }: { nodeId: string }): JSX.Element {
   }, [store]);
 
   const copy = async (): Promise<void> => {
-    const ok = await store.copyDiagramPrompt(material, kind);
+    const ok = await store.copyDiagramPrompt(material);
     setCopied(ok);
     if (!ok) setShowPrompt(true);
   };
@@ -80,18 +66,12 @@ export function AiDiagramWindow({ nodeId }: { nodeId: string }): JSX.Element {
               onChange={(e) => { setMaterial(e.target.value); setCopied(false); }}
             />
           </label>
-          <div className="field">
-            <span>Kind</span>
-            <select value={kind} title={DIAGRAM_KINDS[kind]} onChange={(e) => { setKind(e.target.value as DiagramKind); setCopied(false); }}>
-              {(Object.keys(KIND_LABELS) as DiagramKind[]).map((k) => <option key={k} value={k}>{KIND_LABELS[k]}</option>)}
-            </select>
-          </div>
           <div className="ai-diagram-row">
             <button className="btn primary" onClick={() => void copy()}>{copied ? "Copied ✓" : "Copy prompt"}</button>
             <button className="btn small" aria-expanded={showPrompt} onClick={() => setShowPrompt((v) => !v)}>{showPrompt ? "Hide prompt" : "Show prompt"}</button>
             <span className="muted">{material.length ? `${material.length.toLocaleString()} characters` : ""}</span>
           </div>
-          {showPrompt && <textarea className="ai-diagram-prompt" readOnly rows={8} value={diagramPrompt(material, kind)} onFocus={(e) => e.currentTarget.select()} />}
+          {showPrompt && <textarea className="ai-diagram-prompt" readOnly rows={8} value={diagramPrompt(material)} onFocus={(e) => e.currentTarget.select()} />}
           <p className="muted ai-diagram-note"><b>2.</b> Paste the prompt into any AI chat (ChatGPT, Claude, DeepSeek, Gemini…).</p>
           <label className="ai-diagram-step">
             <span><b>3.</b> Paste the AI's whole answer here, then Import. {intoCanvas ? "It goes into this canvas, below what it already holds." : "It goes into a new canvas under this topic."} You can also just press Ctrl+V on the canvas.</span>
