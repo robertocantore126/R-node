@@ -1,0 +1,363 @@
+/**
+ * draw.io (mxGraph) XML → a neutral list of boxes and arrows.
+ *
+ * The point is the AI workflow: every assistant already writes draw.io XML
+ * well, so R-node accepts that instead of teaching a format of its own. It is
+ * also what draw.io itself puts on the clipboard, plain or compressed.
+ *
+ * This module only READS the XML. Mapping onto topics and relationships, and
+ * where they land in the canvas, is the store's job (importDrawio). Anything
+ * the reader does not recognise still produces a box: the label is the
+ * content, the outline is a guess, and nothing the user pasted is dropped.
+ */
+import type { ArrowHead, ConnectorStyle, RelAnchor, TopicShape } from "./types";
+
+export interface DrawioVertex {
+  id: string;
+  label: string;
+  /** Absolute, in draw.io units (pixels at 100%), parents already added. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** The draw.io shape name as written ("ellipse", "cylinder3", "swimlane"...). */
+  kind: string;
+  shape: TopicShape;
+  /** Text only: no box at all. */
+  text: boolean;
+  /** Holds other vertices (swimlane, container=1, or the parent of one). */
+  container: boolean;
+  fill?: string;
+  stroke?: string;
+  textColor?: string;
+  strokeWidth?: number;
+  dashed?: boolean;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  opacity?: number;
+  align?: "left" | "center";
+}
+
+export interface DrawioEdge {
+  id: string;
+  source: string;
+  target: string;
+  label: string;
+  color?: string;
+  width?: number;
+  lineStyle?: "solid" | "dashed" | "dotted";
+  connector: ConnectorStyle;
+  endArrow: ArrowHead;
+  startArrow: ArrowHead;
+  fromAnchor?: RelAnchor;
+  toAnchor?: RelAnchor;
+}
+
+export interface DrawioDiagram {
+  vertices: DrawioVertex[];
+  edges: DrawioEdge[];
+  /** Edges with a loose end (draw.io allows them; an R-node arrow needs two topics). */
+  skippedEdges: number;
+}
+
+/** Cheap test, before any parsing: does this text carry a draw.io diagram? */
+export function looksLikeDrawio(text: string): boolean {
+  return /<mxGraphModel[\s>]|<mxfile[\s>]/.test(text);
+}
+
+/**
+ * Cut the diagram out of what an assistant answered: it may sit in a ```xml
+ * fence, after a sentence of prose, or with an <?xml?> header.
+ */
+export function extractDrawioXml(text: string): string | null {
+  const open = /<mxfile[\s>]|<mxGraphModel[\s>]/.exec(text);
+  if (!open) return null;
+  const tag = open[0].startsWith("<mxfile") ? "mxfile" : "mxGraphModel";
+  const close = text.lastIndexOf(`</${tag}>`);
+  if (close < open.index) return null;
+  return text.slice(open.index, close + tag.length + 3);
+}
+
+/** draw.io's compressed page: base64 → raw deflate → URI-encoded XML. */
+async function inflatePage(data: string): Promise<string> {
+  const bin = atob(data.replace(/\s+/g, ""));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  const source = new ReadableStream<BufferSource>({ start(c) { c.enqueue(bytes); c.close(); } });
+  const reader = source.pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+  const decoder = new TextDecoder();
+  let xml = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    xml += decoder.decode(value, { stream: true });
+  }
+  xml += decoder.decode();
+  return decodeURIComponent(xml);
+}
+
+/** "ellipse;whiteSpace=wrap;fillColor=#fff" → { ellipse: "", whiteSpace: "wrap", ... }. */
+export function parseStyle(style: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of style.split(";")) {
+    const p = part.trim();
+    if (!p) continue;
+    const eq = p.indexOf("=");
+    if (eq < 0) out[p] = "";
+    else out[p.slice(0, eq)] = p.slice(eq + 1);
+  }
+  return out;
+}
+
+/** The bare first token of a style ("ellipse", "text", "swimlane"), if any. */
+function styleName(style: string): string {
+  const first = style.split(";")[0]?.trim() ?? "";
+  return first && !first.includes("=") ? first : "";
+}
+
+/** "none" means none; "default" and absent mean "let the theme decide". */
+function color(v: string | undefined): string | undefined {
+  if (v === undefined || v === "" || v === "default" || v === "inherit") return undefined;
+  if (v === "none") return "transparent";
+  return /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(v) ? v.toLowerCase() : /^[a-z]+$/i.test(v) ? v.toLowerCase() : undefined;
+}
+
+function num(v: string | undefined): number | undefined {
+  if (v === undefined || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** A label written as HTML (html=1) becomes plain lines. */
+export function labelText(value: string, html: boolean): string {
+  if (!value) return "";
+  let s = value;
+  if (html || /<[a-z][\s\S]*>/i.test(s)) {
+    s = s
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(div|p|li|h[1-6])>/gi, "\n")
+      .replace(/<li[^>]*>/gi, "• ")
+      .replace(/<[^>]+>/g, "");
+    // Entities left after stripping (&nbsp;, &amp;...).
+    if (typeof DOMParser !== "undefined") {
+      s = new DOMParser().parseFromString(`<!doctype html><body>${s.replace(/</g, "&lt;")}`, "text/html").body.textContent ?? s;
+    }
+  }
+  return s.replace(/ /g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * Which R-node outline a draw.io shape gets. Shapes R-node does not draw yet
+ * fall back to the closest box, so the content is always there.
+ */
+export function shapeFor(kind: string, s: Record<string, string>, w: number, h: number): TopicShape {
+  switch (kind) {
+    case "ellipse":
+    case "doubleEllipse":
+      return Math.abs(w - h) <= 2 ? "circle" : "capsule";
+    case "rhombus":
+      return "diamond";
+    case "hexagon":
+      return "hexagon";
+    case "cloud":
+      return "cloud";
+    case "text":
+      return "none";
+    default:
+      return s.rounded === "1" ? "rounded" : "rect";
+  }
+}
+
+function arrowHead(v: string | undefined, fill: string | undefined, fallback: ArrowHead): ArrowHead {
+  if (v === undefined) return fallback;
+  switch (v) {
+    case "none":
+      return "none";
+    case "open":
+    case "openThin":
+    case "openAsync":
+      return "open";
+    case "diamond":
+    case "diamondThin":
+    case "ERmandOne":
+      return "diamond";
+    case "oval":
+    case "circle":
+    case "circlePlus":
+      return "circle";
+    default:
+      // classic, block, blockThin, async...: a closed head, unless draw.io
+      // says it is drawn hollow.
+      return fill === "0" ? "open" : "triangle";
+  }
+}
+
+function anchor(x: string | undefined, y: string | undefined): RelAnchor | undefined {
+  const ax = num(x), ay = num(y);
+  return ax === undefined || ay === undefined ? undefined : { x: Math.min(1, Math.max(0, ax)), y: Math.min(1, Math.max(0, ay)) };
+}
+
+/** The <mxGraphModel> of the first page, whatever the wrapping. */
+async function graphModel(xml: string): Promise<Element | null> {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length) return null;
+  const model = doc.getElementsByTagName("mxGraphModel")[0];
+  if (model) return model;
+  const page = doc.getElementsByTagName("diagram")[0];
+  const data = page?.textContent?.trim();
+  if (!data) return null;
+  try {
+    return graphModel(await inflatePage(data));
+  } catch {
+    return null;
+  }
+}
+
+/** Parse a pasted diagram; null when the text holds none or it is broken. */
+export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
+  const xml = extractDrawioXml(text);
+  if (!xml || typeof DOMParser === "undefined") return null;
+  const model = await graphModel(xml);
+  if (!model) return null;
+
+  interface Cell { id: string; parent: string; el: Element; style: Record<string, string>; name: string; vertex: boolean; edge: boolean }
+  const cells = new Map<string, Cell>();
+  const order: Cell[] = [];
+  // UserObject / object wrappers carry the label as an attribute and the
+  // mxCell inside them; the wrapper's id is the cell's id.
+  const read = (el: Element, wrapper?: Element): void => {
+    const id = wrapper?.getAttribute("id") ?? el.getAttribute("id");
+    if (!id) return;
+    const styleText = el.getAttribute("style") ?? "";
+    const cell: Cell = {
+      id,
+      parent: el.getAttribute("parent") ?? "",
+      el: wrapper ?? el,
+      style: parseStyle(styleText),
+      name: styleName(styleText),
+      vertex: el.getAttribute("vertex") === "1",
+      edge: el.getAttribute("edge") === "1",
+    };
+    cells.set(id, cell);
+    order.push(cell);
+  };
+  const root = model.getElementsByTagName("root")[0];
+  if (!root) return null;
+  for (const child of Array.from(root.children)) {
+    if (child.tagName === "mxCell") read(child);
+    else {
+      const inner = child.getElementsByTagName("mxCell")[0];
+      if (inner) read(inner, child);
+    }
+  }
+
+  const geometry = (c: Cell): { x: number; y: number; w: number; h: number; relative: boolean } => {
+    const g = (c.el.tagName === "mxCell" ? c.el : c.el.getElementsByTagName("mxCell")[0])?.getElementsByTagName("mxGeometry")[0];
+    return {
+      x: num(g?.getAttribute("x") ?? undefined) ?? 0,
+      y: num(g?.getAttribute("y") ?? undefined) ?? 0,
+      w: num(g?.getAttribute("width") ?? undefined) ?? 0,
+      h: num(g?.getAttribute("height") ?? undefined) ?? 0,
+      relative: g?.getAttribute("relative") === "1",
+    };
+  };
+  const value = (c: Cell): string => labelText(c.el.getAttribute("value") ?? c.el.getAttribute("label") ?? "", c.style.html === "1");
+
+  // Absolute origin of a vertex: draw.io stores children relative to their
+  // parent vertex (groups, swimlanes, containers); layers sit at 0,0.
+  const origin = new Map<string, { x: number; y: number }>();
+  const absolute = (id: string, seen = new Set<string>()): { x: number; y: number } => {
+    const known = origin.get(id);
+    if (known) return known;
+    const c = cells.get(id);
+    if (!c || !c.vertex || seen.has(id)) return { x: 0, y: 0 };
+    seen.add(id);
+    const g = geometry(c);
+    const p = absolute(c.parent, seen);
+    const out = { x: p.x + g.x, y: p.y + g.y };
+    origin.set(id, out);
+    return out;
+  };
+
+  const parentsOfVertices = new Set(order.filter((c) => c.vertex && cells.get(c.parent)?.vertex).map((c) => c.parent));
+  const edgeLabels = new Map<string, string[]>();
+  const vertices: DrawioVertex[] = [];
+  for (const c of order) {
+    if (!c.vertex) continue;
+    const g = geometry(c);
+    const owner = cells.get(c.parent);
+    // A label riding on an edge: it belongs to that arrow, not to the canvas.
+    if (owner?.edge || g.relative) {
+      const text = value(c);
+      if (owner?.edge && text) edgeLabels.set(owner.id, [...(edgeLabels.get(owner.id) ?? []), text]);
+      continue;
+    }
+    const s = c.style;
+    const kind = s.shape ?? c.name ?? "";
+    // An invisible group only positions its children.
+    if (c.name === "group" || (kind === "" && s.group === "1")) continue;
+    const pos = absolute(c.id);
+    const text = c.name === "text" || s.text === "1" || (s.strokeColor === "none" && (s.fillColor === "none" || s.fillColor === undefined) && c.name !== "swimlane");
+    const fontStyle = num(s.fontStyle) ?? 0;
+    const container = kind === "swimlane" || c.name === "swimlane" || s.container === "1" || parentsOfVertices.has(c.id);
+    const fill = color(s.fillColor);
+    const fillOpacity = num(s.fillOpacity);
+    vertices.push({
+      id: c.id,
+      label: value(c),
+      x: pos.x,
+      y: pos.y,
+      w: Math.max(10, g.w),
+      h: Math.max(10, g.h),
+      kind: c.name === "swimlane" ? "swimlane" : kind,
+      shape: text ? "none" : shapeFor(kind, s, g.w, g.h),
+      text,
+      container,
+      fill: fill && fillOpacity !== undefined && fillOpacity < 100 && fill.startsWith("#") && fill.length === 7
+        ? fill + Math.round((fillOpacity / 100) * 255).toString(16).padStart(2, "0")
+        : fill,
+      stroke: color(s.strokeColor),
+      textColor: color(s.fontColor),
+      strokeWidth: num(s.strokeWidth),
+      dashed: s.dashed === "1",
+      fontSize: num(s.fontSize),
+      bold: (fontStyle & 1) !== 0 || undefined,
+      italic: (fontStyle & 2) !== 0 || undefined,
+      underline: (fontStyle & 4) !== 0 || undefined,
+      opacity: num(s.opacity) !== undefined ? num(s.opacity)! / 100 : undefined,
+      align: s.align === "left" ? "left" : undefined,
+    });
+  }
+
+  const ids = new Set(vertices.map((v) => v.id));
+  const edges: DrawioEdge[] = [];
+  let skippedEdges = 0;
+  for (const c of order) {
+    if (!c.edge) continue;
+    const el = c.el.tagName === "mxCell" ? c.el : c.el.getElementsByTagName("mxCell")[0];
+    const source = el?.getAttribute("source") ?? "", target = el?.getAttribute("target") ?? "";
+    if (!ids.has(source) || !ids.has(target) || source === target) {
+      skippedEdges++;
+      continue;
+    }
+    const s = c.style;
+    const dash = s.dashPattern ?? "";
+    const label = [value(c), ...(edgeLabels.get(c.id) ?? [])].filter(Boolean).join("\n");
+    edges.push({
+      id: c.id,
+      source,
+      target,
+      label,
+      color: color(s.strokeColor),
+      width: num(s.strokeWidth),
+      lineStyle: s.dashed === "1" ? (/^1\s+[1-4]$/.test(dash.trim()) ? "dotted" : "dashed") : undefined,
+      connector: s.curved === "1" ? "curved" : /orthogonal|elbow|entityRelation/i.test(s.edgeStyle ?? "") ? "elbow" : "straight",
+      endArrow: arrowHead(s.endArrow, s.endFill, "triangle"),
+      startArrow: arrowHead(s.startArrow, s.startFill, "none"),
+      fromAnchor: anchor(s.exitX, s.exitY),
+      toAnchor: anchor(s.entryX, s.entryY),
+    });
+  }
+  return { vertices, edges, skippedEdges };
+}

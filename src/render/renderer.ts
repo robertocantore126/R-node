@@ -450,8 +450,12 @@ export class Renderer {
     this.drawGroupFills(state, byId);
 
     // 1) relationships
+    // An arrow between two items of a freeform canvas is a diagram edge: it is
+    // painted over the boxes (draw.io), or a filled container would hide every
+    // arrow inside it. Arrows on the map stay under the topics, as always.
     let rels = 0;
     let relsDrawn = 0;
+    const overRels: [Placed, Placed, Relationship][] = [];
     for (const rel of state.sheet.relationships) {
       rels++;
       const a = byId.get(rel.fromId);
@@ -459,7 +463,8 @@ export class Renderer {
       if (state.relDraft?.replaces === rel.id) continue;
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
-        this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id);
+        if (freeformOwner(state.sheet, rel.fromId) && freeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
+        else this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id);
       }
     }
 
@@ -503,6 +508,7 @@ export class Renderer {
       if (!p.visible) continue;
       this.drawNode(theme, p, state, false);
     }
+    for (const [a, b, rel] of overRels) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id);
     // Handwriting goes over the items on its canvas, to annotate them.
     for (const p of placed) if (p.visible && p.node.style.freeform) this.drawInk(theme, p, state);
 
@@ -2896,11 +2902,17 @@ export class Renderer {
     const byId = new Map(all.map((p) => [p.node.id, p]));
     for (const p of all) if (p.node.style.freeform) this.drawFreeform(theme, p);
     this.drawGroupFills({ ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);
-    for (const rel of state.sheet.relationships) {
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
-      if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false);
-    }
+    // Diagram arrows (both ends in a canvas) go over the boxes, as on screen.
+    const inCanvas = (rel: Relationship): boolean => !!freeformOwner(state.sheet, rel.fromId) && !!freeformOwner(state.sheet, rel.toId);
+    const paintRels = (over: boolean): void => {
+      for (const rel of state.sheet.relationships) {
+        if (inCanvas(rel) !== over) continue;
+        const a = byId.get(rel.fromId);
+        const b = byId.get(rel.toId);
+        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false);
+      }
+    };
+    paintRels(false);
     for (const p of all) {
       if (p.node.parentId) {
         const parent = byId.get(p.node.parentId);
@@ -2915,6 +2927,7 @@ export class Renderer {
       }
     }
     for (const p of all) this.drawNode(theme, p, { ...state, showHidden: true }, false);
+    paintRels(true);
     for (const p of all) if (p.node.style.freeform) this.drawInk(theme, p, state);
     // export with a fixed 1px-ish stroke scale
     this.drawGroupsAndSummaries(theme, { ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);

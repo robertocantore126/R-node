@@ -1,5 +1,5 @@
 import { phoneMapPages } from "./pdfPhone";
-import { FREEFORM_HEADER } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
 import { THEMES, readableOn, type RenderTheme } from "../render/theme";
@@ -1115,16 +1115,21 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       ops += 2;
     }
 
-    for (const rel of sheet.relationships) {
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
-      if (!a || !b) continue;
-      const span = routeYRange(relationshipRoute(rel, a, b));
-      if (span.lo >= pg.top + pg.height || span.hi <= pg.top) continue;
-      const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
-      drawRelationship(cmds, rel, a, b, color, fr);
-      cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
-    }
+    // Diagram arrows (both ends inside a canvas) go over the boxes, as on screen.
+    const paintRels = (over: boolean): void => {
+      for (const rel of sheet.relationships) {
+        if ((!!freeformOwner(sheet, rel.fromId) && !!freeformOwner(sheet, rel.toId)) !== over) continue;
+        const a = byId.get(rel.fromId);
+        const b = byId.get(rel.toId);
+        if (!a || !b) continue;
+        const span = routeYRange(relationshipRoute(rel, a, b));
+        if (span.lo >= pg.top + pg.height || span.hi <= pg.top) continue;
+        const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
+        drawRelationship(cmds, rel, a, b, color, fr);
+        cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
+      }
+    };
+    paintRels(false);
 
     for (const p of pg.nodes) {
       if (p.node.style.freeform) continue;
@@ -1134,6 +1139,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       drawCaptions(cmds, p, colors?.text ?? "#111111", fr);
       drawTitle(cmds, p, colors?.text ?? "#111111", fr);
     }
+    paintRels(true);
     // Handwriting over the items on its canvas, as on screen.
     for (const p of pg.nodes) {
       if (!p.node.style.freeform) continue;

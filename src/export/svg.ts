@@ -1,4 +1,4 @@
-import { FREEFORM_HEADER } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
 import { inkPolyline, inkStrokes } from "../core/ink";
 /**
  * SVG export — the whole map as one vector document.
@@ -471,9 +471,17 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   parts.push("</g>");
 
   let relationships = 0;
+  // Diagram arrows (both ends inside a canvas) are painted over the boxes, as on screen.
+  const inCanvas = (rel: Relationship): boolean => !!freeformOwner(sheet, rel.fromId) && !!freeformOwner(sheet, rel.toId);
+  const overRels: string[] = [];
   if (sheet.relationships.length > 0) {
     parts.push("<g>");
     for (const rel of sheet.relationships) {
+      if (inCanvas(rel)) {
+        const el = relationship(rel, byId, opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5");
+        if (el) { overRels.push(el); relationships++; }
+        continue;
+      }
       const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
       const el = relationship(rel, byId, color);
       if (el) {
@@ -560,6 +568,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     parts.push(title(p, text, pos, opts.measurer));
     parts.push(`</g>`);
   }
+  if (overRels.length) parts.push("<g>", ...overRels, "</g>");
   // Handwriting last, over the items on its canvas, as on screen.
   for (const p of placed) {
     if (!p.node.style.freeform) continue;

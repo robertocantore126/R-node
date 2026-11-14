@@ -1,4 +1,5 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, type FreeformShape } from "../core/freeform";
+import { looksLikeDrawio, parseDrawio, type DrawioDiagram } from "../core/drawio";
 import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
@@ -2513,6 +2514,103 @@ export class EditorStore {
     this.settleLayoutNow();
     if (!text && !imageId) this.startEdit(id); else this.select(id);
     return id;
+  }
+
+  /**
+   * Import a draw.io diagram into a canvas: every box becomes an item, every
+   * connected edge an arrow, in ONE history entry (one Ctrl+Z removes it all)
+   * and the canvas grows to hold it (execOps). An empty canvas takes it at its
+   * top-left; one with content takes it below what is already there. The new
+   * items end up selected, so a drag moves the whole diagram.
+   */
+  importDrawio(canvasId: string, diagram: DrawioDiagram): { shapes: number; arrows: number } | null {
+    const canvas = this.model.node(canvasId);
+    if (!canvas?.style.freeform || diagram.vertices.length === 0) return null;
+    const resolve = imageResolver(this.sheet);
+    let top = FREEFORM_HEADER + FREEFORM_PADDING;
+    if (canvas.childrenIds.length || (canvas.style.ink?.length ?? 0) > 0) {
+      top = Math.max(top, freeformContentBounds(this.sheet, canvasId, (n) => measureNode(n, this.measurer, resolve)).maxY + 32);
+    }
+    const minX = Math.min(...diagram.vertices.map((v) => v.x));
+    const minY = Math.min(...diagram.vertices.map((v) => v.y));
+    const dx = FREEFORM_PADDING - minX, dy = top - minY;
+    const idMap = new Map<string, string>();
+    const ops: Op[] = [];
+    let index = canvas.childrenIds.length;
+    for (const v of diagram.vertices) {
+      const id = uid("n");
+      idMap.set(v.id, id);
+      const px = Math.round(v.x + dx), py = Math.round(v.y + dy);
+      const style: Style = {
+        freeformPosition: { x: px, y: py },
+        shape: v.shape,
+        width: Math.round(v.w),
+        height: Math.round(v.h),
+        fontSize: v.fontSize ?? 12,
+        align: v.align ?? "center",
+      };
+      if (!v.text) style.borderWidth = v.strokeWidth ?? 1;
+      if (v.fill) style.fill = v.fill;
+      if (v.stroke) style.stroke = v.stroke;
+      if (v.textColor) style.textColor = v.textColor;
+      if (v.dashed) style.borderStyle = "dashed";
+      if (v.bold) style.fontWeight = 700;
+      if (v.italic) style.italic = true;
+      if (v.underline) style.underline = true;
+      if (v.opacity !== undefined) style.opacity = v.opacity;
+      ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
+        id, nodeType: "subtopic", parentId: canvasId, index: index++,
+        title: v.label, titleRuns: v.label ? [{ text: v.label }] : [],
+        style,
+        position: { x: canvas.position.x + px, y: canvas.position.y + py, manual: false },
+      }));
+    }
+    let arrows = 0;
+    for (const e of diagram.edges) {
+      const fromId = idMap.get(e.source), toId = idMap.get(e.target);
+      if (!fromId || !toId) continue;
+      const rel: Relationship = { id: uid("rel"), fromId, toId, connector: e.connector, endArrow: e.endArrow, startArrow: e.startArrow };
+      if (e.label) rel.label = e.label;
+      if (e.color && e.color !== "transparent") rel.color = e.color;
+      if (e.width) rel.width = e.width;
+      if (e.lineStyle) rel.lineStyle = e.lineStyle;
+      if (e.fromAnchor) rel.fromAnchor = e.fromAnchor;
+      if (e.toAnchor) rel.toAnchor = e.toAnchor;
+      ops.push(makeOp<Op & { type: "createRelationship" }>("createRelationship", { relationship: rel }));
+      arrows++;
+    }
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.selectMany([...idMap.values()]);
+    trace.applied("paste:drawio", { canvasId, shapes: idMap.size, arrows, skippedEdges: diagram.skippedEdges });
+    return { shapes: idMap.size, arrows };
+  }
+
+  /**
+   * Paste route for a draw.io diagram: into the selected canvas, or into a new
+   * canvas under the selected topic. Returns false when the text is not one.
+   */
+  private async pasteDrawio(text: string, target: MindNode | null): Promise<boolean> {
+    if (!looksLikeDrawio(text)) return false;
+    const sheet = this.sheet;
+    const diagram = await parseDrawio(text);
+    if (this.sheet !== sheet) return true;
+    if (!diagram || diagram.vertices.length === 0) {
+      this.toast("This draw.io diagram could not be read");
+      trace.ignored("paste:drawio", "unreadable or empty diagram");
+      return true;
+    }
+    let canvasId = target?.style.freeform ? target.id : target ? freeformOwner(this.sheet, target.id) : null;
+    if (!canvasId) {
+      const parent = target ?? this.model.rootNode;
+      this.createFreeformTopic(parent.id);
+      canvasId = this.state.selection[0] ?? null;
+    }
+    const done = canvasId ? this.importDrawio(canvasId, diagram) : null;
+    if (!done) return true;
+    const skipped = diagram.skippedEdges ? ` (${diagram.skippedEdges} loose arrow${diagram.skippedEdges === 1 ? "" : "s"} skipped)` : "";
+    this.toast(`Imported ${done.shapes} shape${done.shapes === 1 ? "" : "s"} and ${done.arrows} arrow${done.arrows === 1 ? "" : "s"}${skipped}`);
+    return true;
   }
 
   async addFreeformImageFile(parentId: string, file: Blob & { name?: string }, x: number, y: number): Promise<void> {
@@ -5040,6 +5138,9 @@ export class EditorStore {
     // typed into the topic as raw JSON (and then show up in Ctrl+F).
     // parseQuiz tolerates a ```json fence, which an LLM adds often enough.
     // A flashcard deck takes the same route; `kind` decides which strip.
+    // A draw.io diagram (what an AI writes when asked for one, or a copy out
+    // of draw.io itself) becomes boxes and arrows in a freeform canvas.
+    if (await this.pasteDrawio(text, destination ?? null)) return;
     if (parseQuiz(text) || parseFlashcards(text)) {
       const target = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
       if (!target) return trace.ignored("paste:quiz", "no topic selected to attach the quiz or flashcards to");
