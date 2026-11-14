@@ -258,6 +258,7 @@ export function CanvasView(): JSX.Element {
     if (g.kind === "idle") return;
     endGesture(`cancel:${reason}`);
     if (g.kind === "node-drag") store.cancelNodeDrag();
+    else if (g.kind === "group-drag") store.cancelGroupDrag();
     else if (g.kind === "resize-topic" || g.kind === "resize-freeform") store.cancelResize();
     else if (g.kind === "resize-image") store.cancelImageResize();
     else if (g.kind === "move-image") store.setDrop(null);
@@ -639,6 +640,25 @@ export function CanvasView(): JSX.Element {
     }
   };
 
+  /** Marquee hits; a canvas-scoped box picks only that canvas's own items, wholly inside. */
+  const marqueeIds = (scope: string | undefined, w0: { x: number; y: number }, w1: { x: number; y: number }): string[] => {
+    const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y, !!scope);
+    return scope ? ids.filter((id) => freeformOwner(store.sheet, id) === scope && !store.sheet.nodes[id]?.style.chartNote) : ids;
+  };
+
+  /**
+   * Pressing on an item of a multi-selection inside one canvas grabs the whole
+   * selection (draw.io). A release without a move narrows it to that item.
+   */
+  const startGroupDrag = (id: string, world: { x: number; y: number }, additive: boolean): boolean => {
+    const sel = store.getSnapshot().selection;
+    if (additive || sel.length < 2 || !sel.includes(id) || !store.freeformGroup(sel)) return false;
+    gesture.to({ kind: "group-drag", nodeId: id, startWorldX: world.x, startWorldY: world.y }, "pointerdown");
+    store.beginGroupDrag(sel);
+    trace.applied("pointerdown:group-drag", { id, count: sel.length });
+    return true;
+  };
+
   const onPointerDown = (e: RPointerEvent): void => {
     interactedRef.current = true;
     if (e.pointerType === "touch") {
@@ -844,6 +864,7 @@ export function CanvasView(): JSX.Element {
 
     const imgHit = s.relFrom ? null : renderer.hitTestImageSlot(rs, world.x, world.y);
     if (imgHit && freeformOwner(store.sheet, imgHit.nodeId)) {
+      if (startGroupDrag(imgHit.nodeId, world, e.shiftKey || e.ctrlKey || e.metaKey)) return;
       const rect = renderer.nodeWorldRect(rs, imgHit.nodeId)!;
       gesture.to({ kind: "node-drag", nodeId: imgHit.nodeId, grabOffsetX: world.x - rect.x, grabOffsetY: world.y - rect.y }, "pointerdown");
       store.selectImage(imgHit.nodeId, imgHit.slot);
@@ -883,7 +904,19 @@ export function CanvasView(): JSX.Element {
         trace.applied("pointerdown:relationship", { id: rel, insideFreeform: true });
         return;
       }
+      // Below the title band, the canvas's empty area draws a selection box
+      // over its items (draw.io); the title band still moves the canvas. A
+      // click without a drag selects the canvas, as before.
+      const rect = renderer.nodeWorldRect(rs, hit);
+      if (rect && world.y >= rect.y + FREEFORM_HEADER) {
+        const keepsSelection = e.shiftKey || e.ctrlKey || e.metaKey;
+        if (!keepsSelection) store.select(hit, { additive: false });
+        trace.applied("pointerdown:freeform-marquee", { id: hit, keepsSelection, wasEditing });
+        gesture.to({ kind: "marquee", anchorX: x, anchorY: y, active: false, scope: hit }, "pointerdown");
+        return;
+      }
     }
+    if (hit && startGroupDrag(hit, world, e.shiftKey || e.ctrlKey || e.metaKey)) return;
     if (hit) {
       const rect = renderer.nodeWorldRect(rs, hit);
       const additive = e.shiftKey || e.ctrlKey || e.metaKey;
@@ -1064,7 +1097,7 @@ export function CanvasView(): JSX.Element {
       const s = store.getSnapshot();
       const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, mx0, my0);
       const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-      const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
+      const ids = marqueeIds(marq.scope, w0, w1);
       marqueeSelRef.current = ids.length > 0 ? new Set(ids) : null;
       schedule();
       return;
@@ -1124,6 +1157,13 @@ export function CanvasView(): JSX.Element {
         store.setDrop({ mode: "none", nodeId: gs.nodeId });
         ghostRef.current = srcImg ? { imageId: srcImg, x: world.x, y: world.y, nodeId: gs.nodeId } : null;
       }
+      return;
+    }
+    if (gs.kind === "group-drag") {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      store.setGroupDragDraft(w.x - gs.startWorldX, w.y - gs.startWorldY);
       return;
     }
     // Only idle and a marquee still inside its 4px arm distance get here.
@@ -1240,6 +1280,17 @@ export function CanvasView(): JSX.Element {
       else trace.ignored("pointerup:chart-grow", "slider back where it started", { id: g.id });
       return;
     }
+    if (gs.kind === "group-drag") {
+      if (drag.moved) {
+        const { x, y } = localPoint(e);
+        const w = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+        store.commitGroupDrag(w.x - gs.startWorldX, w.y - gs.startWorldY);
+      } else {
+        store.cancelGroupDrag();
+        store.select(gs.nodeId, { additive: false });
+      }
+      return;
+    }
     if (gs.kind === "marquee") {
       // A plain click on empty canvas never armed the box: nothing to select.
       if (!gs.active) return;
@@ -1247,7 +1298,7 @@ export function CanvasView(): JSX.Element {
       const { x, y } = localPoint(e);
       const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, gs.anchorX, gs.anchorY);
       const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-      const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
+      const ids = marqueeIds(gs.scope, w0, w1);
       if (ids.length > 0) store.selectMany(ids, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
       return;
     }

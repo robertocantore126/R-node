@@ -2798,12 +2798,20 @@ export class Renderer {
     return p ? { x: p.x, y: p.y, w: p.w, h: p.h, node: p.node } : null;
   }
 
-  /** Visible node ids whose box intersects the given world-space rectangle (marquee). */
-  nodesInRect(state: RenderState, wx0: number, wy0: number, wx1: number, wy1: number): string[] {
+  /**
+   * Visible node ids whose box intersects the given world-space rectangle
+   * (marquee). With `contain`, only boxes lying wholly inside it — the
+   * draw.io rule a freeform canvas's marquee follows.
+   */
+  nodesInRect(state: RenderState, wx0: number, wy0: number, wx1: number, wy1: number, contain = false): string[] {
     const minX = Math.min(wx0, wx1), maxX = Math.max(wx0, wx1);
     const minY = Math.min(wy0, wy1), maxY = Math.max(wy0, wy1);
     return this.placedNodes(state)
-      .filter((p) => p.visible && p.x < maxX && p.x + p.w > minX && p.y < maxY && p.y + p.h > minY)
+      .filter((p) =>
+        p.visible &&
+        (contain
+          ? p.x >= minX && p.x + p.w <= maxX && p.y >= minY && p.y + p.h <= maxY
+          : p.x < maxX && p.x + p.w > minX && p.y < maxY && p.y + p.h > minY))
       .map((p) => p.node.id);
   }
 

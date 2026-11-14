@@ -17,8 +17,11 @@ export type CanvasGesture =
   /** Right/middle drag or pan mode, on the canvas or over the text editor. */
   | { kind: "pan"; over: "canvas" | "overlay" }
   /** Armed on empty canvas; `active` once the pointer has travelled 4px. */
-  | { kind: "marquee"; anchorX: number; anchorY: number; active: boolean }
+  /** `scope`: started inside a freeform canvas, so it picks only that canvas's items. */
+  | { kind: "marquee"; anchorX: number; anchorY: number; active: boolean; scope?: string }
   | { kind: "node-drag"; nodeId: string; grabOffsetX: number; grabOffsetY: number }
+  /** A multi-selection inside one freeform canvas moving together (draw.io style). */
+  | { kind: "group-drag"; nodeId: string; startWorldX: number; startWorldY: number }
   | { kind: "resize-topic"; nodeId: string; side: "left" | "right"; startWorldX: number; startWidth: number; startX: number }
   | { kind: "resize-freeform"; nodeId: string; startWorldX: number; startWorldY: number; startWidth: number; startHeight: number }
   | { kind: "resize-image"; nodeId: string; startWorldX: number; startWidth: number }
@@ -39,10 +42,11 @@ const BACK_TO_IDLE = ["idle"] as const;
 
 /** A gesture only ever starts from idle and only ever ends there. */
 export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
-  idle: ["pan", "marquee", "node-drag", "resize-topic", "resize-freeform", "resize-image", "move-image", "move-cell", "connect", "chart-grow", "ink-stroke", "ink-erase"],
+  idle: ["pan", "marquee", "node-drag", "group-drag", "resize-topic", "resize-freeform", "resize-image", "move-image", "move-cell", "connect", "chart-grow", "ink-stroke", "ink-erase"],
   pan: BACK_TO_IDLE,
   marquee: BACK_TO_IDLE,
   "node-drag": BACK_TO_IDLE,
+  "group-drag": BACK_TO_IDLE,
   "resize-topic": BACK_TO_IDLE,
   "resize-freeform": BACK_TO_IDLE,
   "resize-image": BACK_TO_IDLE,

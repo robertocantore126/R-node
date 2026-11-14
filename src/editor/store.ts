@@ -3216,6 +3216,117 @@ export class EditorStore {
     this.notify();
   }
 
+  /**
+   * A multi-selection that lives inside ONE freeform canvas, reduced to the
+   * items that move: a selected topic whose ancestor is also selected rides
+   * along with it (offsets are parent-relative), so moving both would move it
+   * twice. Null when the selection is not such a group.
+   */
+  freeformGroup(ids: string[]): { canvasId: string; roots: string[] } | null {
+    if (ids.length < 2) return null;
+    const canvasId = freeformOwner(this.sheet, ids[0]);
+    if (!canvasId || ids.some((id) => freeformOwner(this.sheet, id) !== canvasId || this.model.node(id)?.style.chartNote)) return null;
+    const set = new Set(ids);
+    const roots = ids.filter((id) => {
+      let p = this.model.node(id)?.parentId;
+      while (p && p !== canvasId) {
+        if (set.has(p)) return false;
+        p = this.model.node(p)?.parentId;
+      }
+      return true;
+    });
+    return { canvasId, roots };
+  }
+
+  private groupDragState: { roots: string[]; orig: Map<string, Style>; minDx: number; minDy: number } | null = null;
+
+  /** Capture the group's pre-drag styles and how far up/left it may go. */
+  beginGroupDrag(ids: string[]): void {
+    const group = this.freeformGroup(ids);
+    const canvas = group ? this.model.node(group.canvasId) : undefined;
+    if (!group || !canvas) { this.groupDragState = null; return; }
+    const resolve = imageResolver(this.sheet);
+    const size = (n: MindNode): { w: number; h: number } => measureNode(n, this.measurer, resolve);
+    let minX = Infinity, minY = Infinity;
+    const orig = new Map<string, Style>();
+    for (const id of group.roots) {
+      const n = this.model.requireNode(id);
+      orig.set(id, n.style);
+      const b = n.style.freeform ? { minX: 0, minY: 0 } : freeformContentBounds(this.sheet, id, size);
+      minX = Math.min(minX, n.position.x + Math.min(0, b.minX));
+      minY = Math.min(minY, n.position.y + Math.min(0, b.minY));
+    }
+    // The group stops at the canvas's left margin and under its title band,
+    // like a single item; right and down it may go anywhere, the canvas grows.
+    this.groupDragState = {
+      roots: group.roots,
+      orig,
+      minDx: Math.min(0, canvas.position.x + FREEFORM_PADDING - minX),
+      minDy: Math.min(0, canvas.position.y + FREEFORM_HEADER + FREEFORM_PADDING - minY),
+    };
+  }
+
+  private groupStyles(dx: number, dy: number): Map<string, Style> {
+    const d = this.groupDragState!;
+    const out = new Map<string, Style>();
+    const cx = Math.max(d.minDx, dx), cy = Math.max(d.minDy, dy);
+    for (const id of d.roots) {
+      const node = this.model.requireNode(id);
+      const style = d.orig.get(id)!;
+      const parent = node.parentId ? this.model.node(node.parentId) : undefined;
+      const base = style.freeformPosition ?? freeformOffset(node, parent ? parent.childrenIds.indexOf(id) : 0);
+      out.set(id, { ...style, freeformPosition: { x: base.x + cx, y: base.y + cy } });
+    }
+    return out;
+  }
+
+  /** Live preview: the group follows the pointer; no op, no history. */
+  setGroupDragDraft(dx: number, dy: number): void {
+    if (!this.groupDragState) return;
+    for (const [id, style] of this.groupStyles(dx, dy)) this.model.requireNode(id).style = style;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  /** Release: one batch, so one Ctrl+Z puts every item back; execOps grows the canvas. */
+  commitGroupDrag(dx: number, dy: number): void {
+    const d = this.groupDragState;
+    if (!d) return;
+    const next = this.groupStyles(dx, dy);
+    this.groupDragState = null;
+    const ops: Op[] = [];
+    for (const id of d.roots) {
+      const node = this.model.node(id);
+      if (!node) continue;
+      node.style = d.orig.get(id)!;
+      const style = next.get(id)!;
+      if (style.freeformPosition?.x === node.style.freeformPosition?.x && style.freeformPosition?.y === node.style.freeformPosition?.y) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: node.style }));
+    }
+    if (ops.length) this.execOps(ops);
+    if (this.layoutTimer) {
+      clearTimeout(this.layoutTimer);
+      this.layoutTimer = null;
+    }
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  /** The press ended without a move, or Escape: put everything back. */
+  cancelGroupDrag(): void {
+    const d = this.groupDragState;
+    this.groupDragState = null;
+    if (!d) return;
+    let moved = false;
+    for (const id of d.roots) {
+      const node = this.model.node(id);
+      if (node && node.style !== d.orig.get(id)) { node.style = d.orig.get(id)!; moved = true; }
+    }
+    if (!moved) return;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
   // -------------------------------------------------------------------------
   // Style / tasks
   // -------------------------------------------------------------------------
