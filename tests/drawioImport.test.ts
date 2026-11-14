@@ -218,3 +218,30 @@ describe("draw.io import into a canvas", () => {
     expect(store.doc.requireNode(lane.id).style.height!).toBeGreaterThanOrEqual(197);
   });
 });
+
+describe("a diagram that was cut off", () => {
+  it("imports everything up to the last complete cell (the user's AWS answer, missing </root></mxGraphModel>)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const text = readFileSync("tests/fixtures/drawio-aws-truncated.xml", "utf8");
+    expect(text).not.toContain("</mxGraphModel>");
+    const d = (await parseDrawio(text))!;
+    expect(d).not.toBeNull();
+    expect(d.truncated).toBe(true);
+    expect(d.vertices).toHaveLength(22);
+    expect(d.edges).toHaveLength(13);
+  });
+
+  it("a cell cut in half is dropped, the ones before it kept", async () => {
+    const text = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+      <mxCell id="a" value="A" style="" vertex="1" parent="1"><mxGeometry x="0" y="0" width="80" height="40" as="geometry"/></mxCell>
+      <mxCell id="b" value="B" style="" vertex="1" parent="1"><mxGeometry x="200" y="0" wid`;
+    const d = (await parseDrawio(text))!;
+    expect(d.vertices.map((v) => v.id)).toEqual(["a"]);
+    expect(d.truncated).toBe(true);
+  });
+
+  it("a complete diagram is not marked as cut off", async () => {
+    const d = (await parseDrawio(AI_ANSWER))!;
+    expect(d.truncated).toBeUndefined();
+  });
+});

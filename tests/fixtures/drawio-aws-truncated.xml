@@ -1,0 +1,123 @@
+<mxGraphModel dx="1200" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+
+    <!-- AWS Cloud & VPC Boundaries -->
+    <mxCell id="aws_cloud" value="AWS Cloud (Region: eu-south-1 Milan)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;spacingTop=5;fillColor=#f9f9f9;strokeColor=#232f3e;fontStyle=1;fontColor=#232f3e;" vertex="1" parent="1">
+      <mxGeometry x="320" y="30" width="810" height="750" as="geometry"/>
+    </mxCell>
+    <mxCell id="vpc_box" value="Amazon VPC (Virtual Private Cloud)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;spacingTop=5;fillColor=#ffffff;strokeColor=#147eba;fontStyle=1;fontColor=#147eba;dashed=1;" vertex="1" parent="1">
+      <mxGeometry x="350" y="210" width="750" height="430" as="geometry"/>
+    </mxCell>
+    <mxCell id="public_subnet" value="Public Subnet" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;spacingTop=5;fillColor=#f2f8fd;strokeColor=#147eba;fontColor=#147eba;" vertex="1" parent="1">
+      <mxGeometry x="370" y="250" width="180" height="360" as="geometry"/>
+    </mxCell>
+    <mxCell id="private_app_subnet" value="Private Subnet (Compute)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;spacingTop=5;fillColor=#f3faf5;strokeColor=#2e7d32;fontColor=#2e7d32;" vertex="1" parent="1">
+      <mxGeometry x="580" y="250" width="250" height="360" as="geometry"/>
+    </mxCell>
+    <mxCell id="private_db_subnet" value="Private Subnet (Data)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;spacingTop=5;fillColor=#f3f4fa;strokeColor=#3f51b5;fontColor=#3f51b5;" vertex="1" parent="1">
+      <mxGeometry x="860" y="250" width="220" height="360" as="geometry"/>
+    </mxCell>
+
+    <!-- External & Edge Services -->
+    <mxCell id="users" value="End Users&lt;br&gt;(Web &amp;amp; Mobile)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="30" y="310" width="110" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="route53" value="Amazon Route 53&lt;br&gt;(DNS Routing)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="180" y="200" width="120" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="waf_shield" value="AWS WAF &amp;amp; Shield&lt;br&gt;(Firewall &amp;amp; DDoS)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="180" y="310" width="120" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="cloudfront" value="Amazon CloudFront&lt;br&gt;(Global CDN)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="395" y="80" width="130" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="s3_static" value="Amazon S3&lt;br&gt;(Static Assets &amp;amp; Media)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="635" y="80" width="140" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="cognito" value="Amazon Cognito&lt;br&gt;(User Auth &amp;amp; IAM)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="895" y="80" width="140" height="60" as="geometry"/>
+    </mxCell>
+
+    <!-- Public Subnet Services -->
+    <mxCell id="alb" value="Application Load&lt;br&gt;Balancer (ELB)&lt;br&gt;(Traffic Distribution)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="395" y="310" width="130" height="70" as="geometry"/>
+    </mxCell>
+    <mxCell id="nat_gw" value="NAT Gateway&lt;br&gt;(Outbound Internet)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+      <mxGeometry x="395" y="480" width="130" height="60" as="geometry"/>
+    </mxCell>
+
+    <!-- Private Compute Subnet Services -->
+    <mxCell id="ec2_ecs" value="Amazon EC2 / ECS&lt;br&gt;(Auto Scaling Web App&lt;br&gt;&amp;amp; Containers)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="625" y="310" width="160" height="70" as="geometry"/>
+    </mxCell>
+    <mxCell id="sqs" value="Amazon SQS&lt;br&gt;(Message Queue)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="635" y="425" width="140" height="55" as="geometry"/>
+    </mxCell>
+    <mxCell id="lambda" value="AWS Lambda&lt;br&gt;(Serverless Workers)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="635" y="525" width="140" height="55" as="geometry"/>
+    </mxCell>
+
+    <!-- Private Data Subnet Services -->
+    <mxCell id="rds" value="Amazon RDS&lt;br&gt;(Relational SQL DB&lt;br&gt;Multi-AZ)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="895" y="300" width="150" height="70" as="geometry"/>
+    </mxCell>
+    <mxCell id="elasticache" value="Amazon ElastiCache&lt;br&gt;(Redis In-Memory Cache)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="895" y="410" width="150" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="dynamodb" value="Amazon DynamoDB&lt;br&gt;(NoSQL Key-Value DB)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="895" y="515" width="150" height="60" as="geometry"/>
+    </mxCell>
+
+    <!-- Cross-Cutting Governance & Monitoring -->
+    <mxCell id="cloudwatch" value="Amazon CloudWatch&lt;br&gt;(Logs, Metrics &amp;amp; Alarms)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+      <mxGeometry x="395" y="680" width="180" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="iam_kms" value="AWS IAM &amp;amp; KMS&lt;br&gt;(Permissions &amp;amp; Encryption Keys)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="635" y="680" width="200" height="60" as="geometry"/>
+    </mxCell>
+    <mxCell id="secrets_mgr" value="AWS Secrets Manager&lt;br&gt;(DB Credentials &amp;amp; API Keys)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="895" y="680" width="180" height="60" as="geometry"/>
+    </mxCell>
+
+    <!-- Connections (Arrows) -->
+    <mxCell id="e1" value="1. DNS Lookup" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="users" target="route53">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e2" value="2. HTTPS Request" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="users" target="waf_shield">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e3" value="Static Content" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="waf_shield" target="cloudfront">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e4" value="Origin Fetch" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="cloudfront" target="s3_static">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e5" value="Dynamic API" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="waf_shield" target="alb">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e6" value="Verify JWT" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;" edge="1" parent="1" source="alb" target="cognito">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e7" value="Route Traffic" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="alb" target="ec2_ecs">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e8" value="Read / Write" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="ec2_ecs" target="rds">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e9" value="Cache Lookup" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="ec2_ecs" target="elasticache">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e10" value="Enqueue Job" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="ec2_ecs" target="sqs">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e11" value="Trigger Event" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="sqs" target="lambda">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e12" value="Store Events" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;" edge="1" parent="1" source="lambda" target="dynamodb">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="e13" value="Outbound Updates" style="edgeStyle=orthogonalEdgeStyle;html=1;fontSize=10;dashed=1;" edge="1" parent="1" source="lambda" target="nat_gw">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>

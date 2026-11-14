@@ -2711,7 +2711,8 @@ export class EditorStore {
     const done = canvasId ? this.importDrawio(canvasId, diagram) : null;
     if (!done) return "failed";
     const skipped = diagram.skippedEdges ? ` (${diagram.skippedEdges} loose arrow${diagram.skippedEdges === 1 ? "" : "s"} skipped)` : "";
-    this.toast(`Imported ${done.shapes} shape${done.shapes === 1 ? "" : "s"} and ${done.arrows} arrow${done.arrows === 1 ? "" : "s"}${skipped}`);
+    const cut = diagram.truncated ? " — the diagram was cut off, so its end is missing" : "";
+    this.toast(`Imported ${done.shapes} shape${done.shapes === 1 ? "" : "s"} and ${done.arrows} arrow${done.arrows === 1 ? "" : "s"}${skipped}${cut}`);
     return "done";
   }
 

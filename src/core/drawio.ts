@@ -65,6 +65,8 @@ export interface DrawioDiagram {
   edges: DrawioEdge[];
   /** Edges with a loose end (draw.io allows them; an R-node arrow needs two topics). */
   skippedEdges: number;
+  /** The text was cut off; this is what arrived up to the last complete cell. */
+  truncated?: boolean;
 }
 
 /** Cheap test, before any parsing: does this text carry a draw.io diagram? */
@@ -77,12 +79,29 @@ export function looksLikeDrawio(text: string): boolean {
  * fence, after a sentence of prose, or with an <?xml?> header.
  */
 export function extractDrawioXml(text: string): string | null {
+  return extractDrawio(text)?.xml ?? null;
+}
+
+/**
+ * As extractDrawioXml, and a diagram that was CUT OFF (an AI answer that hit
+ * its length limit, a copy that missed the last lines) is closed after its
+ * last complete cell, so everything that did arrive is still imported.
+ */
+export function extractDrawio(text: string): { xml: string; truncated: boolean } | null {
   const open = /<mxfile[\s>]|<mxGraphModel[\s>]/.exec(text);
   if (!open) return null;
   const tag = open[0].startsWith("<mxfile") ? "mxfile" : "mxGraphModel";
   const close = text.lastIndexOf(`</${tag}>`);
-  if (close < open.index) return null;
-  return text.slice(open.index, close + tag.length + 3);
+  if (close >= open.index) return { xml: text.slice(open.index, close + tag.length + 3), truncated: false };
+  // Unclosed. Only a plain model can be mended (a compressed page cut short is lost).
+  const model = /<mxGraphModel[\s>]/.exec(text.slice(open.index));
+  if (!model) return null;
+  const start = open.index + model.index;
+  const body = text.slice(start);
+  let end = -1;
+  for (const m of body.matchAll(/<\/mxCell>|<\/UserObject>|<\/object>|<mxCell\b[^<>]*\/>/g)) end = m.index! + m[0].length;
+  if (end < 0) return null;
+  return { xml: body.slice(0, end) + (body.includes("<root") ? "</root>" : "") + "</mxGraphModel>", truncated: true };
 }
 
 /** draw.io's compressed page: base64 → raw deflate → URI-encoded XML. */
@@ -261,9 +280,9 @@ async function graphModel(xml: string): Promise<Element | null> {
 
 /** Parse a pasted diagram; null when the text holds none or it is broken. */
 export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
-  const xml = extractDrawioXml(text);
-  if (!xml || typeof DOMParser === "undefined") return null;
-  const model = await graphModel(xml);
+  const found = extractDrawio(text);
+  if (!found || typeof DOMParser === "undefined") return null;
+  const model = await graphModel(found.xml);
   if (!model) return null;
 
   interface Cell { id: string; parent: string; el: Element; style: Record<string, string>; name: string; vertex: boolean; edge: boolean }
@@ -423,5 +442,5 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       toAnchor: anchor(s.entryX, s.entryY),
     });
   }
-  return { vertices, edges, skippedEdges };
+  return { vertices, edges, skippedEdges, ...(found.truncated ? { truncated: true } : {}) };
 }
