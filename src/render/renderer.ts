@@ -944,7 +944,12 @@ export class Renderer {
       if (selected || state.hoverId === n.id) {
         ctx.save(); ctx.strokeStyle = theme.selection;
         this.strokeRing(ctx, p, selected ? RING_W_SELECTED : RING_W_HOVER);
-        if (selected) { ctx.fillStyle = theme.selection; const hs = 8 / state.camera.scale; ctx.fillRect(p.x + p.w - hs / 2, p.y + p.h - hs / 2, hs, hs); }
+        // A resize handle on every corner (draw.io): any edge can move.
+        if (selected) {
+          ctx.fillStyle = theme.selection;
+          const hs = 8 / state.camera.scale;
+          for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
+        }
         ctx.restore();
       }
       return;

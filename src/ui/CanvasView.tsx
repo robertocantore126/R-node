@@ -259,7 +259,8 @@ export function CanvasView(): JSX.Element {
     endGesture(`cancel:${reason}`);
     if (g.kind === "node-drag") store.cancelNodeDrag();
     else if (g.kind === "group-drag") store.cancelGroupDrag();
-    else if (g.kind === "resize-topic" || g.kind === "resize-freeform") store.cancelResize();
+    else if (g.kind === "resize-topic") store.cancelResize();
+    else if (g.kind === "resize-freeform") store.cancelCanvasResize();
     else if (g.kind === "resize-image") store.cancelImageResize();
     else if (g.kind === "move-image") store.setDrop(null);
     trace.applied("gesture:cancel", { kind: g.kind, reason });
@@ -640,6 +641,22 @@ export function CanvasView(): JSX.Element {
     }
   };
 
+  /** The corner handle of a selected canvas under a world point, if any (all four corners). */
+  const canvasCornerAt = (wx: number, wy: number): { id: string; corner: "nw" | "ne" | "sw" | "se" } | null => {
+    const s = store.getSnapshot();
+    const renderer = rendererRef.current!;
+    const rs = currentRenderState();
+    const reach = 12 / s.camera.scale;
+    for (const id of s.selection) {
+      const r = store.doc.node(id)?.style.freeform ? renderer.nodeWorldRect(rs, id) : null;
+      if (!r) continue;
+      const west = Math.abs(wx - r.x) < reach, east = Math.abs(wx - r.x - r.w) < reach;
+      const north = Math.abs(wy - r.y) < reach, south = Math.abs(wy - r.y - r.h) < reach;
+      if ((west || east) && (north || south)) return { id, corner: `${north ? "n" : "s"}${west ? "w" : "e"}` as "nw" | "ne" | "sw" | "se" };
+    }
+    return null;
+  };
+
   /** Marquee hits; a canvas-scoped box picks only that canvas's own items, wholly inside. */
   const marqueeIds = (scope: string | undefined, w0: { x: number; y: number }, w1: { x: number; y: number }): string[] => {
     const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y, !!scope);
@@ -717,14 +734,12 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
 
-    for (const id of s.relFrom ? [] : s.selection) {
-      const n = store.doc.node(id);
-      const r = n?.style.freeform ? renderer.nodeWorldRect(rs, id) : null;
-      if (r && Math.abs(world.x - r.x - r.w) < 12 / s.camera.scale && Math.abs(world.y - r.y - r.h) < 12 / s.camera.scale) {
-        gesture.to({ kind: "resize-freeform", nodeId: id, startWorldX: world.x, startWorldY: world.y, startWidth: r.w, startHeight: r.h }, "pointerdown");
-        store.beginResize(id);
-        return;
-      }
+    const corner = s.relFrom ? null : canvasCornerAt(world.x, world.y);
+    if (corner) {
+      gesture.to({ kind: "resize-freeform", nodeId: corner.id, corner: corner.corner, startScreenX: x, startScreenY: y }, "pointerdown");
+      store.beginCanvasResize(corner.id, corner.corner);
+      trace.applied("pointerdown:canvas-resize", { id: corner.id, corner: corner.corner });
+      return;
     }
     if ((s.mode === "ink" || eraserEnd) && !s.relFrom) {
       const canvasId = inkCanvasAt(world.x, world.y);
@@ -1046,13 +1061,19 @@ export function CanvasView(): JSX.Element {
       drag.moved = true;
       return;
     }
-    if (gs.kind === "resize-freeform" || gs.kind === "resize-topic") {
+    if (gs.kind === "resize-freeform") {
+      // Screen deltas, not world points: a top/left drag may move the camera
+      // (to keep the content still), which would shift every world point.
+      const scale = store.getSnapshot().camera.scale;
+      store.setCanvasResizeDraft((x - gs.startScreenX) / scale, (y - gs.startScreenY) / scale);
+      drag.moved = true;
+      return;
+    }
+    if (gs.kind === "resize-topic") {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const dx = world.x - gs.startWorldX;
-      if (gs.kind === "resize-freeform") {
-        store.setResizeDraft(gs.nodeId, gs.startWidth + dx, { height: gs.startHeight + world.y - gs.startWorldY });
-      } else if (gs.side === "left") {
+      if (gs.side === "left") {
         // Right edge stays anchored; the left edge (position.x) follows the cursor.
         store.setResizeDraft(gs.nodeId, gs.startWidth - dx, {
           anchorRight: true,
@@ -1174,15 +1195,14 @@ export function CanvasView(): JSX.Element {
       const rs = currentRenderState();
       const rh = renderer?.hitTestResize(rs, w.x, w.y) ?? null;
       const ih = renderer?.hitTestImageResize(rs, w.x, w.y) ?? null;
-      const canvasCorner = s0.selection.some((id) => {
-        const n = store.doc.node(id);
-        const r = n?.style.freeform ? renderer?.nodeWorldRect(rs, id) : null;
-        return !!r && Math.abs(w.x - r.x - r.w) < 12 / s0.camera.scale && Math.abs(w.y - r.y - r.h) < 12 / s0.camera.scale;
-      });
-      setResizeHover(!!rh || canvasCorner);
+      const canvasCorner = renderer ? canvasCornerAt(w.x, w.y) : null;
+      setResizeHover(!!rh);
       const onRelHandle = !!renderer && (!!renderer.hitTestConnectHandle(rs, w.x, w.y) || !!renderer.hitTestRelEnd(rs, w.x, w.y));
       const slider = renderer?.hitTestChartGrow(rs, w.x, w.y) ?? null;
-      setHandleCursor(onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null);
+      setHandleCursor(
+        canvasCorner ? (canvasCorner.corner === "nw" || canvasCorner.corner === "se" ? "nwse-resize" : "nesw-resize")
+        : onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null,
+      );
       setImgResizeHover(!!ih);
       store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
       return;
@@ -1312,7 +1332,8 @@ export function CanvasView(): JSX.Element {
       return;
     }
     if (gs.kind === "resize-image") return store.commitImageResize();
-    if (gs.kind === "resize-topic" || gs.kind === "resize-freeform") return store.commitResize();
+    if (gs.kind === "resize-topic") return store.commitResize();
+    if (gs.kind === "resize-freeform") return store.commitCanvasResize();
     if (gs.kind === "pan") return;
     // Gallery cell dropped (T25). A plain click never moves anything: the
     // threshold in pointermove is what separates "grabbed it" from "clicked
@@ -1700,6 +1721,7 @@ export function CanvasView(): JSX.Element {
           cursor:
             gesture.state.kind === "connect" ? "crosshair"
             : gesture.state.kind === "chart-grow" ? (gesture.state.grow === "col" ? "ew-resize" : "ns-resize")
+            : gesture.state.kind === "resize-freeform" ? (gesture.state.corner === "nw" || gesture.state.corner === "se" ? "nwse-resize" : "nesw-resize")
             : handleCursor ? handleCursor
             : imgResizeHover || gesture.state.kind === "resize-image"
               ? "nwse-resize"

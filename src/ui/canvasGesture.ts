@@ -23,7 +23,8 @@ export type CanvasGesture =
   /** A multi-selection inside one freeform canvas moving together (draw.io style). */
   | { kind: "group-drag"; nodeId: string; startWorldX: number; startWorldY: number }
   | { kind: "resize-topic"; nodeId: string; side: "left" | "right"; startWorldX: number; startWidth: number; startX: number }
-  | { kind: "resize-freeform"; nodeId: string; startWorldX: number; startWorldY: number; startWidth: number; startHeight: number }
+  /** A canvas resized from one of its four corners; the start is in screen pixels. */
+  | { kind: "resize-freeform"; nodeId: string; corner: "nw" | "ne" | "sw" | "se"; startScreenX: number; startScreenY: number }
   | { kind: "resize-image"; nodeId: string; startWorldX: number; startWidth: number }
   /** A picture carried to another topic; `dropSlot` is the side it would take. */
   | { kind: "move-image"; nodeId: string; slot: ImageSlot; dropSlot: ImageSlot }

@@ -4644,6 +4644,134 @@ export class EditorStore {
     return { w: Math.max(floor.w, Math.ceil(bounds.maxX + margin)), h: Math.max(floor.h, Math.ceil(bounds.maxY + margin)) };
   }
 
+  /**
+   * Canvas corner resize (all four corners, draw.io style). The right/bottom
+   * edges simply move. A left/top edge moves by shifting the items (and ink)
+   * the other way and moving the canvas, so its content stays put while the
+   * edge follows the pointer: inside another canvas through its offset, a
+   * free-positioned canvas through its position, and a canvas placed by the
+   * map layout (whose edge the layout owns) through the camera. The draft is
+   * rebuilt from the originals on every move; one batch commits it.
+   */
+  private canvasResize: {
+    id: string;
+    corner: "nw" | "ne" | "sw" | "se";
+    style: Style;
+    pos: Position;
+    kids: Map<string, Style>;
+    camera: { x: number; y: number; scale: number };
+  } | null = null;
+
+  beginCanvasResize(id: string, corner: "nw" | "ne" | "sw" | "se"): void {
+    const node = this.model.node(id);
+    if (!node?.style.freeform) return;
+    const kids = new Map<string, Style>();
+    for (const k of node.childrenIds) { const c = this.model.node(k); if (c) kids.set(k, c.style); }
+    this.canvasResize = { id, corner, style: node.style, pos: { ...node.position }, kids, camera: { ...this.state.camera } };
+  }
+
+  private restoreCanvasResize(): void {
+    const r = this.canvasResize!;
+    const node = this.model.node(r.id);
+    if (!node) return;
+    node.style = r.style;
+    node.position = { ...r.pos };
+    for (const [k, s] of r.kids) { const c = this.model.node(k); if (c) c.style = s; }
+    this.state.camera = { ...this.state.camera, x: r.camera.x, y: r.camera.y };
+  }
+
+  /** dx/dy: how far the pointer moved, in world units at the drag's start. */
+  setCanvasResizeDraft(dx: number, dy: number): void {
+    const r = this.canvasResize;
+    if (!r) return;
+    this.restoreCanvasResize();
+    applyLayout(this.sheet, false, this.measurer);
+    const node = this.model.requireNode(r.id);
+    const before = { ...node.position };
+    const w0 = node.style.width ?? 720, h0 = node.style.height ?? 480;
+    const box = !!node.style.container;
+    const margin = box ? 0 : FREEFORM_PADDING;
+    const floor = box ? { w: 40, h: FREEFORM_HEADER + 16 } : { w: 240, h: 160 };
+    const resolve = imageResolver(this.sheet);
+    const tight = freeformContentBounds(this.sheet, r.id, (n) => measureNode(n, this.measurer, resolve), true);
+    const min = this.freeformMinimumSize(r.id);
+    const west = r.corner === "nw" || r.corner === "sw", north = r.corner === "nw" || r.corner === "ne";
+    // How far the left/top edge moves outward (negative: inward), never
+    // past the content or below the smallest canvas.
+    let ex = 0, ey = 0, w = w0, h = h0;
+    if (west) {
+      ex = Math.max(-dx, floor.w - w0, Number.isFinite(tight.minX) ? margin - tight.minX : -Infinity);
+      ex = Math.min(ex, 6000 - w0);
+      w = w0 + Math.round(ex); ex = Math.round(ex);
+    } else w = Math.round(Math.max(min.w, Math.min(6000, w0 + dx)));
+    if (north) {
+      ey = Math.max(-dy, floor.h - h0, Number.isFinite(tight.minY) ? FREEFORM_HEADER + margin - tight.minY : -Infinity);
+      ey = Math.min(ey, 6000 - h0);
+      h = h0 + Math.round(ey); ey = Math.round(ey);
+    } else h = Math.round(Math.max(min.h, Math.min(6000, h0 + dy)));
+    const style: Style = { ...node.style, width: w, height: h };
+    if (ex || ey) {
+      node.childrenIds.forEach((k, i) => {
+        const c = this.model.node(k);
+        if (!c) return;
+        const at = freeformOffset(c, i);
+        c.style = { ...c.style, freeformPosition: { x: at.x + ex, y: at.y + ey } };
+      });
+      if (node.style.ink?.length) style.ink = node.style.ink.map((s) => ({ ...s, path: s.path.map((v, i) => v + (i % 2 ? ey : ex)) }));
+      if (freeformOwner(this.sheet, r.id)) {
+        const at = freeformOffset(node, this.model.node(node.parentId!)?.childrenIds.indexOf(r.id) ?? 0);
+        style.freeformPosition = { x: at.x - ex, y: at.y - ey };
+      } else if (node.position.manual) {
+        node.position = { ...node.position, x: node.position.x - ex, y: node.position.y - ey };
+      }
+    }
+    node.style = style;
+    applyLayout(this.sheet, false, this.measurer);
+    if ((ex || ey) && !freeformOwner(this.sheet, r.id) && !r.pos.manual) {
+      // The layout keeps this canvas's place: follow the content with the view.
+      const after = node.position;
+      this.state.camera = { ...this.state.camera, x: r.camera.x + (after.x + ex - before.x), y: r.camera.y + (after.y + ey - before.y) };
+    }
+    this.notify();
+  }
+
+  /** Release: one batch (canvas style, items, position), so one Ctrl+Z undoes it. */
+  commitCanvasResize(): void {
+    const r = this.canvasResize;
+    this.canvasResize = null;
+    if (!r) return;
+    const node = this.model.node(r.id);
+    if (!node) return;
+    const draft = { style: node.style, pos: { ...node.position }, kids: new Map(node.childrenIds.map((k) => [k, this.model.node(k)?.style])) };
+    const camera = { ...this.state.camera };
+    this.canvasResize = r;
+    this.restoreCanvasResize();
+    this.canvasResize = null;
+    const ops: Op[] = [];
+    if (draft.style !== r.style) ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: r.id, style: draft.style, prev: r.style }));
+    for (const [k, s] of draft.kids) {
+      const prev = r.kids.get(k);
+      if (s && prev && s !== prev) ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: k, style: s, prev }));
+    }
+    if (draft.pos.x !== r.pos.x || draft.pos.y !== r.pos.y) {
+      if (r.pos.manual) ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", { id: r.id, x: draft.pos.x, y: draft.pos.y, manual: true, prev: r.pos }));
+    }
+    if (ops.length === 0) { applyLayout(this.sheet, false, this.measurer); this.notify(); return; }
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.state.camera = { ...this.state.camera, x: camera.x, y: camera.y };
+    this.notifyView();
+  }
+
+  /** Escape or a lost pointer: everything back as it was, the view included. */
+  cancelCanvasResize(): void {
+    if (!this.canvasResize) return;
+    this.restoreCanvasResize();
+    this.canvasResize = null;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
   /** A resize drag started on this node: capture the pre-drag style + position. */
   beginResize(nodeId: string): void {
     const node = this.model.node(nodeId);
