@@ -3438,6 +3438,93 @@ export class EditorStore {
     return { canvasId, roots };
   }
 
+  /** The selected items of one canvas that arrange together (a selected item's descendants ride along). */
+  private arrangeRoots(): string[] {
+    const sel = this.state.selection;
+    if (sel.length === 1) return freeformOwner(this.sheet, sel[0]) ? sel : [];
+    return this.freeformGroup(sel)?.roots ?? [];
+  }
+
+  /** Move each item so its box lands at (x, y) in canvas coordinates; one batch. */
+  private placeItems(targets: Map<string, { x: number; y: number }>): void {
+    const ops: Op[] = [];
+    for (const [id, to] of targets) {
+      const n = this.model.node(id), g = this.itemGeometry(id);
+      const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+      if (!n || !g || !parent) continue;
+      if (Math.round(to.x) === g.x && Math.round(to.y) === g.y) continue;
+      const at = freeformOffset(n, parent.childrenIds.indexOf(id));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, freeformPosition: { x: Math.round(at.x + to.x - g.x), y: Math.round(at.y + to.y - g.y) } }, prev: n.style }));
+    }
+    if (!ops.length) return;
+    this.execOps(ops);
+    this.settleLayoutNow();
+  }
+
+  /** Align the selected canvas items (draw.io's Arrange > Align): to the selection's own edge or centre. */
+  alignSelection(edge: "left" | "center" | "right" | "top" | "middle" | "bottom"): void {
+    const items = this.arrangeRoots().map((id) => ({ id, g: this.itemGeometry(id)! })).filter((i) => i.g);
+    if (items.length < 2) return;
+    const minX = Math.min(...items.map((i) => i.g.x)), maxX = Math.max(...items.map((i) => i.g.x + i.g.w));
+    const minY = Math.min(...items.map((i) => i.g.y)), maxY = Math.max(...items.map((i) => i.g.y + i.g.h));
+    const targets = new Map<string, { x: number; y: number }>();
+    for (const { id, g } of items) {
+      const x = edge === "left" ? minX : edge === "right" ? maxX - g.w : edge === "center" ? (minX + maxX) / 2 - g.w / 2 : g.x;
+      const y = edge === "top" ? minY : edge === "bottom" ? maxY - g.h : edge === "middle" ? (minY + maxY) / 2 - g.h / 2 : g.y;
+      targets.set(id, { x, y });
+    }
+    this.placeItems(targets);
+  }
+
+  /** Equal gaps between the selected items, keeping the outermost two where they are. */
+  distributeSelection(axis: "h" | "v"): void {
+    const items = this.arrangeRoots().map((id) => ({ id, g: this.itemGeometry(id)! })).filter((i) => i.g);
+    if (items.length < 3) return;
+    const pos = (g: { x: number; y: number }): number => (axis === "h" ? g.x : g.y);
+    const len = (g: { w: number; h: number }): number => (axis === "h" ? g.w : g.h);
+    items.sort((a, b) => pos(a.g) - pos(b.g));
+    const first = items[0].g, last = items[items.length - 1].g;
+    const total = pos(last) + len(last) - pos(first);
+    const gap = (total - items.reduce((sum, i) => sum + len(i.g), 0)) / (items.length - 1);
+    const targets = new Map<string, { x: number; y: number }>();
+    let at = pos(first);
+    for (const { id, g } of items) {
+      targets.set(id, axis === "h" ? { x: at, y: g.y } : { x: g.x, y: at });
+      at += len(g) + gap;
+    }
+    this.placeItems(targets);
+  }
+
+  /** Bring the selected canvas items in front of their siblings, or send them behind (draw order). */
+  reorderSelection(where: "front" | "back"): void {
+    const roots = this.arrangeRoots();
+    const ops: Op[] = [];
+    const ordered = where === "front" ? roots : [...roots].reverse();
+    for (const id of ordered) {
+      const n = this.model.node(id);
+      const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+      if (!n || !parent) continue;
+      const from = parent.childrenIds.indexOf(id);
+      const to = where === "front" ? parent.childrenIds.length - 1 : 0;
+      if (from === to) continue;
+      const op = makeOp<Op & { type: "moveNode" }>("moveNode", { id, fromParentId: parent.id, fromIndex: from, toParentId: parent.id, toIndex: to });
+      ops.push(op);
+      // Later ops read the order this one leaves.
+      parent.childrenIds.splice(from, 1);
+      parent.childrenIds.splice(to, 0, id);
+    }
+    // Undo the preview splices: execOps applies the same moves itself.
+    for (const op of [...ops].reverse()) {
+      const m = op as Op & { type: "moveNode" };
+      const parent = this.model.requireNode(m.toParentId!);
+      parent.childrenIds.splice(m.toIndex, 1);
+      parent.childrenIds.splice(m.fromIndex, 0, m.id);
+    }
+    if (!ops.length) return;
+    this.execOps(ops);
+    this.settleLayoutNow();
+  }
+
   /** True when the selection is items of one freeform canvas (the arrows nudge them). */
   canNudgeSelection(): boolean {
     const sel = this.state.selection;
@@ -3500,17 +3587,17 @@ export class EditorStore {
    * opposite corner stays, width AND height change. Shift keeps the shape's
    * proportions. A live draft, one undo step on release.
    */
-  private itemResize: { id: string; corner: "nw" | "ne" | "sw" | "se"; style: Style; w: number; h: number; at: { x: number; y: number } } | null = null;
+  private itemResize: { id: string; corner: "nw" | "ne" | "sw" | "se"; style: Style; w: number; h: number; at: { x: number; y: number }; g: { x: number; y: number } } | null = null;
 
   beginItemResize(id: string, corner: "nw" | "ne" | "sw" | "se"): void {
     const n = this.model.node(id);
     const g = this.itemGeometry(id);
     const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
     if (!n || !g || !parent) return;
-    this.itemResize = { id, corner, style: n.style, w: g.w, h: g.h, at: freeformOffset(n, parent.childrenIds.indexOf(id)) };
+    this.itemResize = { id, corner, style: n.style, w: g.w, h: g.h, at: freeformOffset(n, parent.childrenIds.indexOf(id)), g: { x: g.x, y: g.y } };
   }
 
-  setItemResizeDraft(dx: number, dy: number, keepRatio = false): void {
+  setItemResizeDraft(dx: number, dy: number, keepRatio = false, snap = 0): void {
     const r = this.itemResize;
     const n = r ? this.model.node(r.id) : undefined;
     if (!r || !n) return;
@@ -3520,6 +3607,11 @@ export class EditorStore {
     if (keepRatio && r.w > 0 && r.h > 0) {
       const k = Math.max(w / r.w, h / r.h);
       w = Math.max(16, r.w * k); h = Math.max(16, r.h * k);
+    } else if (snap > 0) {
+      // The moving edges land on the canvas grid (measured from its corner).
+      const q = (v: number): number => Math.round(v / snap) * snap;
+      w = Math.max(16, west ? r.g.x + r.w - q(r.g.x + r.w - w) : q(r.g.x + w) - r.g.x);
+      h = Math.max(16, north ? r.g.y + r.h - q(r.g.y + r.h - h) : q(r.g.y + h) - r.g.y);
     }
     w = Math.round(w); h = Math.round(h);
     n.style = {
@@ -3558,7 +3650,14 @@ export class EditorStore {
     this.notify();
   }
 
-  private groupDragState: { roots: string[]; orig: Map<string, Style> } | null = null;
+  private groupDragState: { roots: string[]; orig: Map<string, Style>; start: Map<string, { x: number; y: number }> } | null = null;
+
+  /** The drag delta that puts the grabbed item's top-left corner on the canvas grid. */
+  snapGroupDelta(anchorId: string, dx: number, dy: number, snap: number): { dx: number; dy: number } {
+    const g0 = this.groupDragState?.start.get(anchorId);
+    if (!g0 || snap <= 0) return { dx, dy };
+    return { dx: Math.round((g0.x + dx) / snap) * snap - g0.x, dy: Math.round((g0.y + dy) / snap) * snap - g0.y };
+  }
 
   /**
    * Capture the group's pre-drag styles. It may go past any edge of its
@@ -3568,8 +3667,15 @@ export class EditorStore {
     const group = this.freeformGroup(ids);
     if (!group || !this.model.node(group.canvasId)) { this.groupDragState = null; return; }
     const orig = new Map<string, Style>();
-    for (const id of group.roots) orig.set(id, this.model.requireNode(id).style);
-    this.groupDragState = { roots: group.roots, orig };
+    const start = new Map<string, { x: number; y: number }>();
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n) continue;
+      if (group.roots.includes(id)) orig.set(id, n.style);
+      const g = this.itemGeometry(id);
+      if (g) start.set(id, { x: g.x, y: g.y });
+    }
+    this.groupDragState = { roots: group.roots, orig, start };
   }
 
   private groupStyles(cx: number, cy: number): Map<string, Style> {

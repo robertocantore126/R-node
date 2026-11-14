@@ -96,6 +96,9 @@ interface PressTrack {
 
 /** What an arrow dragged out of a connection handle looks like: draw.io's
  *  default edge — solid, straight, one head at the target. */
+/** draw.io's grid: items snap to it while dragged or resized in a canvas (Alt: free). */
+const GRID = 10;
+
 const NEW_ARROW: Pick<Relationship, "connector" | "lineStyle" | "endArrow"> = { connector: "straight", lineStyle: "solid", endArrow: "triangle" };
 
 /** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
@@ -642,6 +645,17 @@ export function CanvasView(): JSX.Element {
     }
   };
 
+  /**
+   * A dragged item's top-left corner on the canvas grid (10 px, draw.io's),
+   * measured from the canvas's own corner. Alt places it freely.
+   */
+  const snapInCanvas = (canvasId: string | null, wx: number, wy: number, alt: boolean): { x: number; y: number } => {
+    const canvas = canvasId ? store.doc.node(canvasId) : null;
+    if (alt || !canvas?.style.freeform) return { x: wx, y: wy };
+    const o = canvas.position;
+    return { x: o.x + Math.round((wx - o.x) / GRID) * GRID, y: o.y + Math.round((wy - o.y) / GRID) * GRID };
+  };
+
   /** The corner handle of a selected canvas under a world point, if any (all four corners). */
   const canvasCornerAt = (wx: number, wy: number): { id: string; corner: "nw" | "ne" | "sw" | "se"; item: boolean } | null => {
     const s = store.getSnapshot();
@@ -1074,7 +1088,7 @@ export function CanvasView(): JSX.Element {
     }
     if (gs.kind === "resize-item") {
       const scale = store.getSnapshot().camera.scale;
-      store.setItemResizeDraft((x - gs.startScreenX) / scale, (y - gs.startScreenY) / scale, e.shiftKey);
+      store.setItemResizeDraft((x - gs.startScreenX) / scale, (y - gs.startScreenY) / scale, e.shiftKey, e.altKey ? 0 : GRID);
       drag.moved = true;
       return;
     }
@@ -1201,7 +1215,8 @@ export function CanvasView(): JSX.Element {
       if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
       drag.moved = true;
       const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-      store.setGroupDragDraft(w.x - gs.startWorldX, w.y - gs.startWorldY);
+      const d = store.snapGroupDelta(gs.nodeId, w.x - gs.startWorldX, w.y - gs.startWorldY, e.altKey ? 0 : GRID);
+      store.setGroupDragDraft(d.dx, d.dy);
       return;
     }
     // Only idle and a marquee still inside its 4px arm distance get here.
@@ -1253,7 +1268,10 @@ export function CanvasView(): JSX.Element {
         const draggedOwner = freeformOwner(store.sheet, dragging);
         if (owner && (owner === draggedOwner || store.doc.node(hit)?.style.freeform)) {
           store.setDrop({ mode: "child", nodeId: owner });
-          if (owner === draggedOwner) store.setNodeDragDraft(dragging, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+          if (owner === draggedOwner) {
+            const at = snapInCanvas(owner, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+            store.setNodeDragDraft(dragging, at.x, at.y);
+          }
           else store.resetNodeDragDraft(dragging);
           return;
         }
@@ -1268,7 +1286,8 @@ export function CanvasView(): JSX.Element {
       // takes it out.
       const owner = freeformOwner(store.sheet, dragging)!;
       store.setDrop({ mode: "child", nodeId: owner });
-      store.setNodeDragDraft(dragging, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+      const at = snapInCanvas(owner, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+      store.setNodeDragDraft(dragging, at.x, at.y);
       return;
     } else {
       // Only main topics (root children) and floating topics can be pinned to
@@ -1330,7 +1349,8 @@ export function CanvasView(): JSX.Element {
       if (drag.moved) {
         const { x, y } = localPoint(e);
         const w = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
-        store.commitGroupDrag(w.x - gs.startWorldX, w.y - gs.startWorldY);
+        const d = store.snapGroupDelta(gs.nodeId, w.x - gs.startWorldX, w.y - gs.startWorldY, e.altKey ? 0 : GRID);
+        store.commitGroupDrag(d.dx, d.dy);
       } else {
         store.cancelGroupDrag();
         store.select(gs.nodeId, { additive: false });
@@ -1383,7 +1403,10 @@ export function CanvasView(): JSX.Element {
       const { x, y } = localPoint(e);
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const target = drop.mode === "floating" ? null : drop.nodeId;
-      store.commitNodeDrag(gs.nodeId, target, drop.mode, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+      // Into a canvas: the same grid the drag showed.
+      const into = target && store.doc.node(target)?.style.freeform ? target : null;
+      const at = snapInCanvas(into, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+      store.commitNodeDrag(gs.nodeId, target, drop.mode, at.x, at.y);
     } else {
       // A plain click, or a release over nowhere it can land.
       store.cancelNodeDrag();

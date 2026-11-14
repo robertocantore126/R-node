@@ -249,6 +249,32 @@ export function Inspector(): JSX.Element {
         <ColorControls node={node} ids={snap.selection.includes(node.id) ? snap.selection : [node.id]} />
       )}
 
+      {freeformOwner(store.sheet, node.id) && !node.style.chartNote && (
+        <div className="inspector-section">
+          <div className="inspector-label" data-help="Arrange" data-help-more="Align and distribute act on the selected items of this canvas; Front/Back change which item is drawn on top.">Arrange</div>
+          {snap.selection.length >= 2 && (
+            <div className="arrange-row" role="group" aria-label="Align">
+              {([
+                ["left", "⇤", "Align left edges"], ["center", "↔", "Align centres horizontally"], ["right", "⇥", "Align right edges"],
+                ["top", "⤒", "Align top edges"], ["middle", "↕", "Align centres vertically"], ["bottom", "⤓", "Align bottom edges"],
+              ] as const).map(([edge, icon, title]) => (
+                <button key={edge} className="btn small" title={title} aria-label={title} onClick={() => store.alignSelection(edge)}>{icon}</button>
+              ))}
+            </div>
+          )}
+          {snap.selection.length >= 3 && (
+            <div className="arrange-row" role="group" aria-label="Distribute">
+              <button className="btn small" title="Equal horizontal gaps" onClick={() => store.distributeSelection("h")}>Distribute ↔</button>
+              <button className="btn small" title="Equal vertical gaps" onClick={() => store.distributeSelection("v")}>Distribute ↕</button>
+            </div>
+          )}
+          <div className="arrange-row">
+            <button className="btn small" title="Draw in front of the other items" onClick={() => store.reorderSelection("front")}>To front</button>
+            <button className="btn small" title="Draw behind the other items" onClick={() => store.reorderSelection("back")}>To back</button>
+          </div>
+        </div>
+      )}
+
       {!node.style.code && !node.style.freeform && (
         <div className="inspector-section">
           <div
