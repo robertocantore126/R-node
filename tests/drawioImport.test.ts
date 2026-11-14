@@ -245,3 +245,40 @@ describe("a diagram that was cut off", () => {
     expect(d.truncated).toBeUndefined();
   });
 });
+
+describe("frames drawn behind other boxes", () => {
+  it("a box that encloses others becomes their container, nested by size (the user's AWS answer)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const d = (await parseDrawio(readFileSync("tests/fixtures/drawio-aws-truncated.xml", "utf8")))!;
+    const by = Object.fromEntries(d.vertices.map((v) => [v.id, v]));
+    expect(by.aws_cloud).toMatchObject({ container: true, align: "left" });
+    expect(by.aws_cloud.parent).toBeUndefined();
+    expect(by.vpc_box).toMatchObject({ container: true, parent: "aws_cloud", dashed: true });
+    expect(by.public_subnet).toMatchObject({ container: true, parent: "vpc_box" });
+    expect(by.alb.parent).toBe("public_subnet");
+    expect(by.ec2_ecs.parent).toBe("private_app_subnet");
+    expect(by.rds.parent).toBe("private_db_subnet");
+    expect(by.cloudfront.parent).toBe("aws_cloud");
+    expect(by.cloudwatch.parent).toBe("aws_cloud");
+    // Outside every frame, and boxes that hold nothing stay boxes.
+    expect(by.users.parent).toBeUndefined();
+    expect(by.route53.container).toBe(false);
+  });
+
+  it("imports into nested canvases with each box where it was drawn", async () => {
+    const { readFileSync } = await import("node:fs");
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    store.importDrawio(board.id, (await parseDrawio(readFileSync("tests/fixtures/drawio-aws-truncated.xml", "utf8")))!);
+    const find = (title: string) => Object.values(store.sheet.nodes).find((n) => n.title.startsWith(title))!;
+    const cloud = find("AWS Cloud"), vpc = find("Amazon VPC"), pub = find("Public Subnet"), alb = find("Application Load");
+    expect(cloud.parentId).toBe(board.id);
+    expect(vpc.parentId).toBe(cloud.id);
+    expect(pub.parentId).toBe(vpc.id);
+    expect(alb.parentId).toBe(pub.id);
+    expect(cloud.style).toMatchObject({ freeform: true, align: "left", textColor: "#232f3e" });
+    // ALB at (395,310), Public Subnet at (370,250): 25 right, 60 down, clear of the band.
+    expect(alb.style.freeformPosition).toEqual({ x: 25, y: 60 });
+  });
+});

@@ -410,6 +410,35 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       p = pc.parent;
     }
   }
+  // Frames drawn as plain boxes BEHIND others (an "AWS Cloud" or "VPC"
+  // rectangle with verticalAlign=top, its services laid on top at the same
+  // level) are containers in all but name: draw.io only shows it by position.
+  // A rectangle that wholly encloses a box of its own level becomes the
+  // container of the smallest such frame holding it, so the title sits in the
+  // band and what it frames moves with it.
+  const tol = 1;
+  const encloses = (a: DrawioVertex, b: DrawioVertex): boolean =>
+    b.x >= a.x - tol && b.y >= a.y - tol && b.x + b.w <= a.x + a.w + tol && b.y + b.h <= a.y + a.h + tol && a.w * a.h > b.w * b.h;
+  const frames = vertices.filter((v) => !v.text && (v.shape === "rect" || v.shape === "rounded" || v.container));
+  const inferred = new Map<string, string>();
+  for (const v of vertices) {
+    let best: DrawioVertex | undefined;
+    for (const f of frames) {
+      if (f === v || f.parent !== v.parent || !encloses(f, v)) continue;
+      if (!best || f.w * f.h < best.w * best.h) best = f;
+    }
+    if (best) inferred.set(v.id, best.id);
+  }
+  for (const [child, frame] of inferred) {
+    const v = vertices.find((o) => o.id === child)!;
+    const f = vertices.find((o) => o.id === frame)!;
+    v.parent = frame;
+    if (!f.container) {
+      f.container = true;
+      // Its title goes in the band: left as draw.io put it, or centred.
+      f.align = f.align === "left" ? "left" : undefined;
+    }
+  }
   // Holders before what they hold, whatever order the file listed them in.
   const depth = (v: DrawioVertex): number => { let d = 0, p = v.parent; while (p && d < 64) { d++; p = vertices.find((o) => o.id === p)?.parent; } return d; };
   vertices.sort((a, b) => depth(a) - depth(b));
