@@ -3518,6 +3518,29 @@ export class EditorStore {
   }
 
   /**
+   * Restyle every selected topic in one batch (one Ctrl+Z): the Inspector's
+   * Colours section. `patch` may depend on the topic (a container takes a
+   * quick style on its header band, a box on its body). A key present with
+   * `undefined` clears that field, handing it back to the theme. Code topics
+   * are view only and are skipped, as everywhere.
+   */
+  setSelectionStyle(patch: Partial<Style> | ((n: MindNode) => Partial<Style>), ids: string[] = this.state.selection): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n || n.style.code) continue;
+      const p = typeof patch === "function" ? patch(n) : patch;
+      const style = this.topicStyle(n, p);
+      for (const [k, v] of Object.entries(p)) if (v === undefined) delete (style as Record<string, unknown>)[k];
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: n.style }));
+    }
+    if (ops.length === 0) return;
+    const fill = typeof patch === "function" ? undefined : patch.fill;
+    if (typeof fill === "string" && fill !== "transparent") addRecentColor(fill);
+    this.execOps(ops);
+  }
+
+  /**
    * Set the outline of every selected topic (C1) — one batch, one Ctrl+Z.
    * A key present with `undefined` clears that field, so `resetSelectionBorder`
    * is this call with all three cleared and the topic goes back to the theme's

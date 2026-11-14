@@ -12,6 +12,8 @@ import { plainToRuns } from "../core/text";
 import { chartSlotNote } from "../core/chartNotes";
 import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
 import { InkControls } from "./InkControls";
+import { ColorControls, ColorSwatch } from "./ColorControls";
+import { DIAGRAM_PALETTE } from "../core/paint";
 const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
 
 const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", ...DIAGRAM_SHAPES, "underline", "none"];
@@ -133,14 +135,6 @@ export function Inspector(): JSX.Element {
         ) : (
           <>
             <div className="field">
-              <span>Fill</span>
-              <input type="color" value={node.style.fill ?? "#4f46e5"} onChange={(e) => store.setNodeStyle(node.id, { fill: e.target.value })} />
-            </div>
-            <div className="field">
-              <span>Text</span>
-              <input type="color" value={node.style.textColor ?? "#ffffff"} onChange={(e) => store.setNodeStyle(node.id, { textColor: e.target.value })} />
-            </div>
-            <div className="field">
               <span>Font size</span>
               <input type="number" min={10} max={48} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
             </div>
@@ -204,12 +198,13 @@ export function Inspector(): JSX.Element {
                 {SHAPES.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
-            <button className="btn small" onClick={() => store.setNodeStyle(node.id, { fill: undefined, textColor: undefined })}>
-              Reset to branch color
-            </button>
           </>
         )}
       </div>
+
+      {!node.style.code && (!node.style.freeform || node.style.container) && (
+        <ColorControls node={node} ids={snap.selection.includes(node.id) ? snap.selection : [node.id]} />
+      )}
 
       {!node.style.code && !node.style.freeform && (
         <div className="inspector-section">
@@ -653,6 +648,16 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
           onBlur={() => { if (label !== (rel.label ?? "")) store.setRelationship(rel.id, { label: label.trim() || undefined }); }}
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
         />
+      </div>
+      <div className="field">
+        <span>Colour</span>
+        <ColorSwatch value={rel.color} fallback="#4f46e5" title="Arrow colour" onPick={(hex) => store.setRelationship(rel.id, { color: hex })} />
+        <button className="btn small" title="The theme's arrow colour" aria-pressed={rel.color === undefined} onClick={() => store.setRelationship(rel.id, { color: undefined })}>Auto</button>
+      </div>
+      <div className="color-presets" role="group" aria-label="Arrow colours">
+        {DIAGRAM_PALETTE.map((p) => (
+          <button key={p.name} className="color-preset color-preset-line" title={p.name} aria-label={`${p.name} arrow`} style={{ background: p.stroke }} onClick={() => store.setRelationship(rel.id, { color: p.stroke })} />
+        ))}
       </div>
       <div className="field">
         <span>Line</span>

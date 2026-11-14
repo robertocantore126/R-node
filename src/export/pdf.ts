@@ -694,10 +694,12 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     const outlined = shape === "none" ? "rounded" : shape;
     const path = boxPath(p, outlined, corner, fr);
     cmds.push("q");
-    if (shape !== "none" && fill !== "transparent" && fill !== "none") cmds.push(opacityCommand(fill),`${rgb(fill)} rg`,path,"f");
+    // The item's own opacity scales its box (fill and outline), as on screen.
+    const alpha = p.node.style.opacity ?? 1;
+    if (shape !== "none" && fill !== "transparent" && fill !== "none") cmds.push(opacityCommand(fill, alpha),`${rgb(fill)} rg`,path,"f");
     if (border) {
       const dash=`[${border.dash.map(d=>f(d*fr.s)).join(" ")}]`;
-      cmds.push(opacityCommand(border.color),`${rgb(border.color)} RG`,`${border.cap === "round" ? 1 : 0} J`,`${dash} 0 d`);
+      cmds.push(opacityCommand(border.color, alpha),`${rgb(border.color)} RG`,`${border.cap === "round" ? 1 : 0} J`,`${dash} 0 d`);
       if (border.double) {
         const t=border.width/3;
         cmds.push(`${f(t*fr.s)} w`);

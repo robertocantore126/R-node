@@ -92,7 +92,7 @@ describe("draw.io reader", () => {
     const d = (await parseDrawio(AI_ANSWER))!;
     expect(d.skippedEdges).toBe(1);
     const [e1, e2] = d.edges;
-    expect(e1).toMatchObject({ source: "user", target: "ec2", label: "HTTPS", connector: "elbow", endArrow: "triangle", startArrow: "none", fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 } });
+    expect(e1).toMatchObject({ source: "user", target: "ec2", label: "HTTPS", connector: "elbow", lineStyle: "solid", endArrow: "triangle", startArrow: "none", fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 } });
     expect(e2).toMatchObject({ label: "SQL", lineStyle: "dashed", endArrow: "open", startArrow: "circle", color: "#82b366", width: 2, connector: "straight" });
   });
 

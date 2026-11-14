@@ -11,6 +11,7 @@
  * content, the outline is a guess, and nothing the user pasted is dropped.
  */
 import type { ArrowHead, ConnectorStyle, RelAnchor, TopicShape } from "./types";
+import { withAlpha } from "./paint";
 
 export interface DrawioVertex {
   id: string;
@@ -361,9 +362,7 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       text: text && !container,
       container,
       headerFill: swimlane ? color(s.fillColor) ?? "transparent" : undefined,
-      fill: fill && fillOpacity !== undefined && fillOpacity < 100 && fill.startsWith("#") && fill.length === 7
-        ? fill + Math.round((fillOpacity / 100) * 255).toString(16).padStart(2, "0")
-        : fill,
+      fill: fill && fill !== "transparent" && fillOpacity !== undefined && fillOpacity < 100 ? withAlpha(fill, fillOpacity / 100) : fill,
       stroke: color(s.strokeColor),
       textColor: color(s.fontColor),
       strokeWidth: num(s.strokeWidth),
@@ -415,7 +414,8 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       label,
       color: color(s.strokeColor),
       width: num(s.strokeWidth),
-      lineStyle: s.dashed === "1" ? (/^1\s+[1-4]$/.test(dash.trim()) ? "dotted" : "dashed") : undefined,
+      // Explicit "solid": an R-node arrow with no lineStyle is drawn dashed.
+      lineStyle: s.dashed === "1" ? (/^1\s+[1-4]$/.test(dash.trim()) ? "dotted" : "dashed") : "solid",
       connector: s.curved === "1" ? "curved" : /orthogonal|elbow|entityRelation/i.test(s.edgeStyle ?? "") ? "elbow" : "straight",
       endArrow: arrowHead(s.endArrow, s.endFill, "triangle"),
       startArrow: arrowHead(s.startArrow, s.startFill, "none"),
