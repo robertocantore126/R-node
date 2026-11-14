@@ -14,7 +14,7 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
  * of the node being edited so the overlay doesn't double-paint.
  */
 import type { Group, ImageSlot, MindNode, RelAnchor, Relationship, ResolvedBorder, Sheet, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
-import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, type HeadShape, type RelRoute } from "../layout/relationship";
+import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, routeObstacles, type HeadShape, type Rect, type RelRoute } from "../layout/relationship";
 import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
 import { groupBoxes, groupRadius, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
@@ -472,7 +472,7 @@ export class Renderer {
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
         if (freeformOwner(state.sheet, rel.fromId) && freeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
-        else this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id);
+        else this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relObstacles(state, rel));
       }
     }
 
@@ -516,7 +516,7 @@ export class Renderer {
       if (!p.visible) continue;
       this.drawNode(theme, p, state, false);
     }
-    for (const [a, b, rel] of overRels) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id);
+    for (const [a, b, rel] of overRels) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relObstacles(state, rel));
     // Handwriting goes over the items on its canvas, to annotate them.
     for (const p of placed) if (p.visible && p.node.style.freeform) this.drawInk(theme, p, state);
 
@@ -1894,11 +1894,16 @@ export class Renderer {
     return { canvas, w: p.w, h: p.h };
   }
 
-  private drawRelationship(theme: RenderTheme, a: Box, b: Box, rel: Relationship, color: string, selected?: boolean): void {
+  /** The boxes an elbow arrow routes around (none for the other line styles). */
+  private relObstacles(state: RenderState, rel: Relationship): Rect[] | undefined {
+    return rel.connector === "elbow" ? routeObstacles(state.sheet, this.placedNodes(state), rel) : undefined;
+  }
+
+  private drawRelationship(theme: RenderTheme, a: Box, b: Box, rel: Relationship, color: string, selected?: boolean, obstacles?: Rect[]): void {
     const ctx = this.ctx;
     // The route (curve or polyline, cut at the borders or pinned to anchors)
     // is shared with both exports — see layout/relationship.ts.
-    const route = relationshipRoute(rel, a, b);
+    const route = relationshipRoute(rel, a, b, obstacles);
     const style = rel.lineStyle ?? "dashed";
     const width = relWidth(rel);
     ctx.strokeStyle = color;
@@ -2329,7 +2334,7 @@ export class Renderer {
       if (!a || !b) continue;
       // The drawn route, not the old centre-to-centre curve: an elbow or an
       // anchored line runs somewhere else entirely.
-      const d = routeDistance(relationshipRoute(rel, a, b), { x: wx, y: wy }) - relWidth(rel) / 2;
+      const d = routeDistance(relationshipRoute(rel, a, b, this.relObstacles(state, rel)), { x: wx, y: wy }) - relWidth(rel) / 2;
       if (d < threshold && d < bestD) {
         bestD = d;
         best = rel.id;
@@ -2345,7 +2350,7 @@ export class Renderer {
     const a = this.nodeWorldRect(state, rel.fromId);
     const b = this.nodeWorldRect(state, rel.toId);
     if (!a || !b) return null;
-    const route = relationshipRoute(rel, a, b);
+    const route = relationshipRoute(rel, a, b, this.relObstacles(state, rel));
     return { from: route.start.tip, to: route.end.tip };
   }
 
@@ -2990,7 +2995,7 @@ export class Renderer {
         if (inCanvas(rel) !== over) continue;
         const a = byId.get(rel.fromId);
         const b = byId.get(rel.toId);
-        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false);
+        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false, this.relObstacles(state, rel));
       }
     };
     paintRels(false);

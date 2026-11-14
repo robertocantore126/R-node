@@ -8,7 +8,8 @@
  * is a point behind it along the line, so the head's angle is the line's real
  * direction at the end.
  */
-import type { ArrowHead, ConnectorStyle, RelAnchor, Relationship } from "../core/types";
+import type { ArrowHead, ConnectorStyle, MindNode, RelAnchor, Relationship, Sheet } from "../core/types";
+import { freeformOwner } from "../core/freeform";
 import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
@@ -204,7 +205,7 @@ const ZERO = (p: Pt): Rect => ({ x: p.x, y: p.y, w: 0, h: 0 });
  * document had (centre to centre, cut at the borders, label between the
  * centres), so nothing existing moves.
  */
-export function relationshipRoute(rel: RelGeometry, a: Rect, b: Rect): RelRoute {
+export function relationshipRoute(rel: RelGeometry, a: Rect, b: Rect, obstacles?: Rect[]): RelRoute {
   const connector: ConnectorStyle = rel.connector ?? "curved";
   const ac = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
   const bc = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
@@ -212,6 +213,7 @@ export function relationshipRoute(rel: RelGeometry, a: Rect, b: Rect): RelRoute 
   const anchored = !!rel.fromAnchor || !!rel.toAnchor;
 
   if (connector === "elbow") {
+    if (obstacles?.length) return poly(routeAround(rel, a, b, obstacles));
     const fa = rel.fromAnchor ?? facingAnchor(a, rel.toAnchor ? anchorPoint(b, rel.toAnchor) : bc);
     const ta = rel.toAnchor ?? facingAnchor(b, rel.fromAnchor ? anchorPoint(a, rel.fromAnchor) : ac);
     return poly(elbowPoints(anchorPoint(a, fa), anchorNormal(fa), anchorPoint(b, ta), anchorNormal(ta)));
@@ -333,4 +335,119 @@ export function headShape(head: ArrowHead, from: Pt, tip: Pt, len: number): Head
     closed: true,
     fill: true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Obstacle-avoiding elbow routes (draw.io's orthogonal edges)
+// ---------------------------------------------------------------------------
+
+const SIDES: RelAnchor[] = [{ x: 0.5, y: 0 }, { x: 1, y: 0.5 }, { x: 0.5, y: 1 }, { x: 0, y: 0.5 }];
+/** Clearance kept from a box an elbow line goes around. */
+const CLEAR = 12;
+const routeCache = new Map<string, Pt[]>();
+
+/** Does the segment p→q (horizontal or vertical) pass through the inside of r? */
+function cutsRect(p: Pt, q: Pt, r: Rect): boolean {
+  const pad = 2; // touching an edge is not crossing it
+  const x0 = r.x + pad, x1 = r.x + r.w - pad, y0 = r.y + pad, y1 = r.y + r.h - pad;
+  if (x1 <= x0 || y1 <= y0) return false;
+  if (Math.abs(p.y - q.y) < 1e-6) {
+    const lo = Math.min(p.x, q.x), hi = Math.max(p.x, q.x);
+    return p.y > y0 && p.y < y1 && hi > x0 && lo < x1;
+  }
+  if (Math.abs(p.x - q.x) < 1e-6) {
+    const lo = Math.min(p.y, q.y), hi = Math.max(p.y, q.y);
+    return p.x > x0 && p.x < x1 && hi > y0 && lo < y1;
+  }
+  // Not axis-aligned: test a few samples (only the stub corners can be).
+  for (let t = 0.1; t < 1; t += 0.2) {
+    const x = p.x + (q.x - p.x) * t, y = p.y + (q.y - p.y) * t;
+    if (x > x0 && x < x1 && y > y0 && y < y1) return true;
+  }
+  return false;
+}
+
+function cost(pts: Pt[], obstacles: Rect[]): number {
+  let hits = 0, len = 0;
+  for (let i = 1; i < pts.length; i++) {
+    len += Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+    for (const r of obstacles) if (cutsRect(pts[i - 1], pts[i], r)) hits++;
+  }
+  return hits * 100000 + len + (pts.length - 2) * 30;
+}
+
+/**
+ * The best orthogonal route from a to b among: every side each end may leave
+ * from (a pinned end keeps its side), with the middle leg at its natural
+ * place or moved just past an obstacle. Crossing fewer boxes wins, then
+ * shorter, then fewer bends. Cached by its inputs: redraws cost nothing.
+ */
+function routeAround(rel: RelGeometry, a: Rect, b: Rect, all: Rect[]): Pt[] {
+  const near = all.filter((r) => {
+    const minX = Math.min(a.x, b.x) - 200, maxX = Math.max(a.x + a.w, b.x + b.w) + 200;
+    const minY = Math.min(a.y, b.y) - 200, maxY = Math.max(a.y + a.h, b.y + b.h) + 200;
+    return r.x < maxX && r.x + r.w > minX && r.y < maxY && r.y + r.h > minY;
+  });
+  const key = JSON.stringify([rel.fromAnchor, rel.toAnchor, a, b, near]);
+  const hit = routeCache.get(key);
+  if (hit) return hit;
+  const froms = rel.fromAnchor ? [rel.fromAnchor] : SIDES;
+  const tos = rel.toAnchor ? [rel.toAnchor] : SIDES;
+  let best: Pt[] | null = null, bestCost = Infinity;
+  for (const fa of froms) {
+    for (const ta of tos) {
+      const p0 = anchorPoint(a, fa), p3 = anchorPoint(b, ta);
+      const n0 = anchorNormal(fa), n3 = anchorNormal(ta);
+      const base = elbowPoints(p0, n0, p3, n3);
+      const candidates: Pt[][] = [base];
+      const s = { x: p0.x + n0.x * ELBOW_STUB, y: p0.y + n0.y * ELBOW_STUB };
+      const e = { x: p3.x + n3.x * ELBOW_STUB, y: p3.y + n3.y * ELBOW_STUB };
+      // The middle leg moved past each nearby box (and past the ends' boxes).
+      const h0 = n0.x !== 0, h3 = n3.x !== 0;
+      const xs = [...near, a, b].flatMap((r) => [r.x - CLEAR, r.x + r.w + CLEAR]);
+      const ys = [...near, a, b].flatMap((r) => [r.y - CLEAR, r.y + r.h + CLEAR]);
+      if (h0 && h3) for (const mx of xs) candidates.push(simplify([p0, s, { x: mx, y: s.y }, { x: mx, y: e.y }, e, p3]));
+      else if (!h0 && !h3) for (const my of ys) candidates.push(simplify([p0, s, { x: s.x, y: my }, { x: e.x, y: my }, e, p3]));
+      // Three legs with a detour: out, across past a box, back.
+      if (h0 && h3) for (const my of ys) candidates.push(simplify([p0, s, { x: s.x, y: my }, { x: e.x, y: my }, e, p3]));
+      else if (!h0 && !h3) for (const mx of xs) candidates.push(simplify([p0, s, { x: mx, y: s.y }, { x: mx, y: e.y }, e, p3]));
+      for (const c of candidates) {
+        // A route may not run back through its own end boxes.
+        const own = [a, b].some((r) => c.slice(1, -1).some((pt, i, arr) => i > 0 && cutsRect(arr[i - 1], pt, r)));
+        const k = cost(c, near) + (own ? 50000 : 0);
+        if (k < bestCost) { bestCost = k; best = c; }
+      }
+    }
+  }
+  const out = best ?? elbowPoints(anchorPoint(a, SIDES[1]), anchorNormal(SIDES[1]), anchorPoint(b, SIDES[3]), anchorNormal(SIDES[3]));
+  if (routeCache.size > 2000) routeCache.clear();
+  routeCache.set(key, out);
+  return out;
+}
+
+/**
+ * The boxes an elbow arrow should go around: the other items of the canvas
+ * its ends live in. Canvases, containers and frames are backgrounds (an arrow
+ * crosses them freely), and so are the ends themselves and what holds them.
+ */
+export function routeObstacles(
+  sheet: Sheet,
+  placed: readonly { node: MindNode; x: number; y: number; w: number; h: number }[],
+  rel: Pick<Relationship, "fromId" | "toId">,
+): Rect[] {
+  const owner = freeformOwner(sheet, rel.fromId);
+  if (!owner || freeformOwner(sheet, rel.toId) === null) return [];
+  const holders = new Set<string>();
+  for (const id of [rel.fromId, rel.toId]) {
+    let p = sheet.nodes[id]?.parentId;
+    while (p) { holders.add(p); p = sheet.nodes[p]?.parentId ?? null; }
+  }
+  const out: Rect[] = [];
+  for (const p of placed) {
+    const n = p.node;
+    if (n.id === rel.fromId || n.id === rel.toId || holders.has(n.id) || n.style.freeform || n.style.frame) continue;
+    if (!freeformOwner(sheet, n.id)) continue;
+    out.push({ x: p.x, y: p.y, w: p.w, h: p.h });
+  }
+  return out;
 }

@@ -75,7 +75,7 @@ import { unzlibSync, zlibSync } from "fflate";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
 import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
-import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeYRange, type HeadShape } from "../layout/relationship";
+import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeObstacles, routeYRange, type HeadShape, type Rect } from "../layout/relationship";
 import {
   FONT_STACK,
   GALLERY_CAPTION_LINE_H,
@@ -520,6 +520,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   const margin = opts.margin ?? (phone ? 20 : DEFAULT_MARGIN);
   const withIndex = phone || opts.index === true;
   const placed = placeAll(sheet, opts.measurer);
+  // Elbow arrows go around the same boxes as on screen.
+  const obstaclesOf = (rel: Relationship): Rect[] | undefined => (rel.connector === "elbow" ? routeObstacles(sheet, placed, rel) : undefined);
   const resolveImage = imageResolver(sheet);
 
   if (placed.length === 0) {
@@ -1058,7 +1060,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     color: string,
     fr: Frame,
   ): void => {
-    const route = relationshipRoute(rel, a, b);
+    const route = relationshipRoute(rel, a, b, obstaclesOf(rel));
     const width = relWidth(rel);
     const line =
       route.path.kind === "curve"
@@ -1148,7 +1150,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
         const a = byId.get(rel.fromId);
         const b = byId.get(rel.toId);
         if (!a || !b) continue;
-        const span = routeYRange(relationshipRoute(rel, a, b));
+        const span = routeYRange(relationshipRoute(rel, a, b, obstaclesOf(rel)));
         if (span.lo >= pg.top + pg.height || span.hi <= pg.top) continue;
         const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
         drawRelationship(cmds, rel, a, b, color, fr);
