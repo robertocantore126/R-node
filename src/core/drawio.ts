@@ -27,6 +27,10 @@ export interface DrawioVertex {
   text: boolean;
   /** Holds other vertices (swimlane, container=1, or the parent of one). */
   container: boolean;
+  /** The id of the nearest container vertex holding this one, if any. */
+  parent?: string;
+  /** A swimlane's title band colour (its fillColor; the body is swimlaneFillColor). */
+  headerFill?: string;
   fill?: string;
   stroke?: string;
   textColor?: string;
@@ -340,8 +344,10 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
     const pos = absolute(c.id);
     const text = c.name === "text" || s.text === "1" || (s.strokeColor === "none" && (s.fillColor === "none" || s.fillColor === undefined) && c.name !== "swimlane");
     const fontStyle = num(s.fontStyle) ?? 0;
-    const container = kind === "swimlane" || c.name === "swimlane" || s.container === "1" || parentsOfVertices.has(c.id);
-    const fill = color(s.fillColor);
+    const swimlane = kind === "swimlane" || c.name === "swimlane";
+    const container = swimlane || s.container === "1" || parentsOfVertices.has(c.id);
+    // A swimlane's fillColor paints its header; its body is swimlaneFillColor (none by default).
+    const fill = swimlane ? color(s.swimlaneFillColor) ?? "transparent" : color(s.fillColor);
     const fillOpacity = num(s.fillOpacity);
     vertices.push({
       id: c.id,
@@ -350,10 +356,11 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       y: pos.y,
       w: Math.max(10, g.w),
       h: Math.max(10, g.h),
-      kind: c.name === "swimlane" ? "swimlane" : kind,
-      shape: text ? "none" : shapeFor(kind, s),
-      text,
+      kind: swimlane ? "swimlane" : kind,
+      shape: text ? "none" : container ? (s.rounded === "1" ? "rounded" : "rect") : shapeFor(kind, s),
+      text: text && !container,
       container,
+      headerFill: swimlane ? color(s.fillColor) ?? "transparent" : undefined,
       fill: fill && fillOpacity !== undefined && fillOpacity < 100 && fill.startsWith("#") && fill.length === 7
         ? fill + Math.round((fillOpacity / 100) * 255).toString(16).padStart(2, "0")
         : fill,
@@ -371,6 +378,23 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
   }
 
   const ids = new Set(vertices.map((v) => v.id));
+  // Which kept container holds each box: the nearest one up the parent chain
+  // (an invisible group in between only positions, it does not hold).
+  const containers = new Set(vertices.filter((v) => v.container).map((v) => v.id));
+  for (const v of vertices) {
+    let p = cells.get(v.id)?.parent;
+    const seen = new Set<string>();
+    while (p && !seen.has(p)) {
+      seen.add(p);
+      if (containers.has(p)) { v.parent = p; break; }
+      const pc = cells.get(p);
+      if (!pc?.vertex) break;
+      p = pc.parent;
+    }
+  }
+  // Holders before what they hold, whatever order the file listed them in.
+  const depth = (v: DrawioVertex): number => { let d = 0, p = v.parent; while (p && d < 64) { d++; p = vertices.find((o) => o.id === p)?.parent; } return d; };
+  vertices.sort((a, b) => depth(a) - depth(b));
   const edges: DrawioEdge[] = [];
   let skippedEdges = 0;
   for (const c of order) {

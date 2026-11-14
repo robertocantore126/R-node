@@ -29,6 +29,17 @@ describe("freeform double-click shapes", () => {
     expect(store.getSnapshot().editingId).toBe(id);
   });
 
+  it("a container is a nested canvas centred on the point that holds what is dropped in it", () => {
+    const { store, board } = setup();
+    const id = store.createFreeformContainer(board.id, board.position.x + 300, board.position.y + 220)!;
+    const c = store.doc.requireNode(id);
+    expect(c.parentId).toBe(board.id);
+    expect(c.style).toMatchObject({ freeform: true, container: { headerFill: "transparent" }, width: 260, height: 170 });
+    expect(c.style.freeformPosition).toEqual({ x: 300 - 130, y: 220 - 85 });
+    const item = store.createFreeformItem(id, c.position.x + 60, c.position.y + 80, "", undefined, "rect")!;
+    expect(store.doc.requireNode(item).parentId).toBe(id);
+  });
+
   it("plain text keeps the old behaviour: top-left at the point, no box", () => {
     const { store, board } = setup();
     const id = store.createFreeformItem(board.id, board.position.x + 300, board.position.y + 200)!;
@@ -53,7 +64,7 @@ describe("freeform double-click shapes", () => {
         </StoreContext.Provider>,
       ));
       const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".ff-insert-btn"));
-      expect(buttons.map((b) => b.title)).toEqual(["Text", ...FREEFORM_SHAPES.map((s) => s.label)]);
+      expect(buttons.map((b) => b.title)).toEqual(["Text", ...FREEFORM_SHAPES.map((s) => s.label), expect.stringMatching(/^Container/)]);
       expect(document.activeElement).toBe(buttons[0]); // Enter right away = text
       // Keys pressed in the picker must not reach the map's shortcuts (App
       // listens on window, bubble phase): Enter there would create a topic.

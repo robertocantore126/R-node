@@ -465,6 +465,22 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
 
   for (const p of placed) {
     if (!p.node.style.freeform) continue;
+    const box = p.node.style.container;
+    if (box) {
+      // A diagram container, as on screen: header band, centred title, no grid.
+      const rx = p.node.style.shape === "rect" ? 0 : 8;
+      const stroke = esc(p.node.style.stroke ?? "#94a3b8");
+      const dash = p.node.style.borderStyle === "dashed" ? ` stroke-dasharray="6 4"` : "";
+      parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${n3(p.h)}" rx="${rx}" fill="${esc(p.node.style.fill ?? "none")}"/>`);
+      if (box.headerFill) {
+        parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${FREEFORM_HEADER}" fill="${esc(box.headerFill)}"/>`);
+        parts.push(`<line x1="${n3(p.x)}" y1="${n3(p.y + FREEFORM_HEADER)}" x2="${n3(p.x + p.w)}" y2="${n3(p.y + FREEFORM_HEADER)}" stroke="${stroke}"/>`);
+      }
+      parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${n3(p.h)}" rx="${rx}" fill="none" stroke="${stroke}" stroke-width="${n3(p.node.style.borderWidth ?? 1)}"${dash}/>`);
+      const left = p.node.style.align === "left";
+      parts.push(`<text x="${n3(left ? p.x + 10 : p.x + p.w / 2)}" y="${n3(p.y + FREEFORM_HEADER / 2)}" text-anchor="${left ? "start" : "middle"}" dominant-baseline="middle" font-size="${p.node.style.fontSize ?? 13}" font-weight="600" fill="${esc(p.node.style.textColor ?? "#1a1a1a")}">${esc(p.node.title)}</text>`);
+      continue;
+    }
     parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${n3(p.h)}" rx="12" fill="${esc(p.node.style.fill ?? "#ffffff")}" stroke="${esc(p.node.style.stroke ?? "#94a3b8")}"/>`);
     parts.push(`<text x="${n3(p.x + 14)}" y="${n3(p.y + FREEFORM_HEADER / 2)}" dominant-baseline="middle" font-size="13" font-weight="600" fill="#1a1a1a">${esc(p.node.title || "Freeform")}</text>`);
   }

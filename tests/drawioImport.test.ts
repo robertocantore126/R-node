@@ -75,7 +75,12 @@ describe("draw.io reader", () => {
   it("reads boxes with absolute geometry, labels, colours and shapes", async () => {
     const d = (await parseDrawio(AI_ANSWER))!;
     const by = Object.fromEntries(d.vertices.map((v) => [v.id, v]));
-    expect(Object.keys(by)).toEqual(["vpc", "ec2", "db", "user", "note"]);
+    // Holders first: the VPC's contents come after every top-level box.
+    expect(Object.keys(by)).toEqual(["vpc", "user", "note", "ec2", "db"]);
+    expect(by.ec2.parent).toBe("vpc");
+    expect(by.user.parent).toBeUndefined();
+    // A swimlane: its fillColor is the header, its body is see-through.
+    expect(by.vpc).toMatchObject({ headerFill: "#f5f5f5", fill: "transparent", shape: "rect" });
     expect(by.ec2).toMatchObject({ x: 240, y: 160, w: 120, h: 60, label: "EC2\nweb", shape: "rounded", fill: "#dae8fc", stroke: "#6c8ebf", bold: true });
     expect(by.db).toMatchObject({ x: 440, y: 160, kind: "cylinder3", shape: "cylinder" });
     expect(by.vpc).toMatchObject({ container: true, kind: "swimlane" });
@@ -95,7 +100,7 @@ describe("draw.io reader", () => {
     const model = extractDrawioXml(AI_ANSWER)!.match(/<mxGraphModel[\s\S]*<\/mxGraphModel>/)![0];
     const text = `<mxfile><diagram id="x" name="P">${await compressed(model)}</diagram></mxfile>`;
     const d = (await parseDrawio(text))!;
-    expect(d.vertices.map((v) => v.id)).toEqual(["vpc", "ec2", "db", "user", "note"]);
+    expect(d.vertices.map((v) => v.id)).toEqual(["vpc", "user", "note", "ec2", "db"]);
     expect(d.edges).toHaveLength(2);
   });
 
@@ -130,16 +135,24 @@ describe("draw.io import into a canvas", () => {
     const before = Object.keys(store.sheet.nodes).length;
     const d = (await parseDrawio(AI_ANSWER))!;
     expect(store.importDrawio(board.id, d)).toEqual({ shapes: 5, arrows: 2 });
-    const items = board.childrenIds.map((id) => store.doc.requireNode(id));
-    expect(items).toHaveLength(5);
+    // Top level: VPC, User, note. EC2 and RDS live INSIDE the VPC container.
+    const [vpc, user] = board.childrenIds.map((id) => store.doc.requireNode(id));
+    expect(board.childrenIds).toHaveLength(3);
+    expect(vpc.style).toMatchObject({ freeform: true, container: { headerFill: "#f5f5f5" }, width: 400 });
     // The leftmost box (User, x=20) lands at the padding; the topmost (VPC, y=100) under the title band.
-    expect(items[3].style.freeformPosition!.x).toBe(FREEFORM_PADDING);
-    expect(items[0].style.freeformPosition!.y).toBe(FREEFORM_HEADER + FREEFORM_PADDING);
-    expect(items[1]).toMatchObject({ title: "EC2\nweb" });
-    expect(items[1].style).toMatchObject({ width: 120, height: 60, fill: "#dae8fc", stroke: "#6c8ebf", fontWeight: 700 });
-    const rels = store.sheet.relationships.filter((r) => board.childrenIds.includes(r.fromId));
+    expect(user.style.freeformPosition!.x).toBe(FREEFORM_PADDING);
+    expect(vpc.style.freeformPosition!.y).toBe(FREEFORM_HEADER + FREEFORM_PADDING);
+    const [ec2, db] = vpc.childrenIds.map((id) => store.doc.requireNode(id));
+    expect(ec2).toMatchObject({ title: "EC2\nweb" });
+    expect(ec2.style).toMatchObject({ width: 120, height: 60, fill: "#dae8fc", stroke: "#6c8ebf", fontWeight: 700 });
+    // Relative to the VPC, kept as drawn: 60px down clears the 36px title band.
+    expect(ec2.style.freeformPosition).toEqual({ x: 40, y: 60 });
+    expect(db.style.freeformPosition).toEqual({ x: 240, y: 60 });
+    expect(vpc.style.height).toBe(300);
+    const ids = new Set([...board.childrenIds, ...vpc.childrenIds]);
+    const rels = store.sheet.relationships.filter((r) => ids.has(r.fromId));
     expect(rels.map((r) => r.label)).toEqual(["HTTPS", "SQL"]);
-    expect(store.getSnapshot().selection).toHaveLength(5);
+    expect(store.getSnapshot().selection).toHaveLength(3);
     store.undo();
     expect(Object.keys(store.sheet.nodes).length).toBe(before);
     expect(store.sheet.relationships.some((r) => r.label === "HTTPS")).toBe(false);
@@ -172,8 +185,36 @@ describe("draw.io import into a canvas", () => {
     const root = store.sheet.rootNodeId;
     store.select(root);
     await store.paste(root, AI_ANSWER);
-    const canvas = Object.values(store.sheet.nodes).find((n) => n.style.freeform)!;
+    const canvas = Object.values(store.sheet.nodes).find((n) => n.style.freeform && !n.style.container)!;
     expect(canvas.parentId).toBe(root);
-    expect(canvas.childrenIds).toHaveLength(5);
+    expect(canvas.childrenIds).toHaveLength(3);
+  });
+
+  it("nested lanes: children under a short swimlane header move down and the lane grows", async () => {
+    const { store, board } = setup();
+    const xml = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+      <mxCell id="pool" value="Pool" style="swimlane;startSize=20;" vertex="1" parent="1"><mxGeometry x="0" y="0" width="300" height="200" as="geometry"/></mxCell>
+      <mxCell id="lane" value="Lane" style="swimlane;startSize=20;fillColor=#fff2cc;" vertex="1" parent="pool"><mxGeometry x="0" y="20" width="300" height="180" as="geometry"/></mxCell>
+      <mxCell id="t" value="Task" style="rounded=1;" vertex="1" parent="lane"><mxGeometry x="20" y="25" width="100" height="40" as="geometry"/></mxCell>
+      <mxCell id="g" value="" style="group" vertex="1" parent="lane"><mxGeometry x="150" y="30" width="100" height="100" as="geometry"/></mxCell>
+      <mxCell id="u" value="In a group" style="" vertex="1" parent="g"><mxGeometry x="0" y="10" width="100" height="40" as="geometry"/></mxCell>
+      </root></mxGraphModel>`;
+    store.importDrawio(board.id, (await parseDrawio(xml))!);
+    const pool = store.doc.requireNode(board.childrenIds[0]);
+    const lane = store.doc.requireNode(pool.childrenIds[0]);
+    expect(pool.childrenIds).toHaveLength(1);
+    // Lane at y=20 inside the pool: under the 36px band, so it moves down by 22.
+    // The lane itself grows by 17 (its task at y=25 moves to 42), so the pool
+    // ends at the lane's bottom, flush: 42 + 180 + 17.
+    expect(lane.style.freeformPosition).toEqual({ x: 0, y: 42 });
+    expect(lane.style.height).toBe(197);
+    expect(pool.style.height).toBe(239);
+    // The task (y=25) and the grouped box (group y=30 + 10) sit in the lane; the group itself is gone.
+    const inLane = lane.childrenIds.map((id) => store.doc.requireNode(id));
+    expect(inLane.map((n) => n.title)).toEqual(["Task", "In a group"]);
+    expect(inLane.map((n) => n.style.freeformPosition)).toEqual([{ x: 20, y: 42 }, { x: 150, y: 57 }]);
+    expect(lane.style.container).toEqual({ headerFill: "#fff2cc" });
+    // The canvas can grow, never shrink, past what the import holds.
+    expect(store.doc.requireNode(lane.id).style.height!).toBeGreaterThanOrEqual(197);
   });
 });

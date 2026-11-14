@@ -114,7 +114,9 @@ export function FreeformInsertMenu({ at, bounds, onClose }: { at: FreeformInsert
   };
 
   // Keep the menu inside the canvas area: open up/left of the point near the edges.
-  const W = 184, H = 100 + (library.length ? 30 + library.length * 28 : 0);
+  // Text + the shapes + Container, four to a row.
+  const rows = Math.ceil((FREEFORM_SHAPES.length + 2) / 4);
+  const W = 184, H = 24 + rows * 38 + (library.length ? 30 + library.length * 28 : 0);
   const maxX = bounds.w - W - 8;
   const maxY = bounds.h - H - 8;
   const left = Math.max(8, Math.min(at.screen.x, maxX));
@@ -139,6 +141,20 @@ export function FreeformInsertMenu({ at, bounds, onClose }: { at: FreeformInsert
             <ShapeIcon shape={shape} />
           </button>
         ))}
+        <button
+          role="menuitem"
+          className="ff-insert-btn"
+          title="Container (swimlane): a box that holds items and moves them with it"
+          onClick={() => {
+            onClose();
+            store.createFreeformContainer(at.parentId, at.world.x, at.world.y);
+          }}
+        >
+          <svg width="28" height="21" viewBox="0 0 28 21" aria-hidden="true">
+            <rect x="2" y="2" width="24" height="17" fill="none" stroke="currentColor" strokeWidth={1.6} />
+            <line x1="2" y1="7" x2="26" y2="7" stroke="currentColor" strokeWidth={1.6} />
+          </svg>
+        </button>
       </div>
       {library.length > 0 && (
         <>

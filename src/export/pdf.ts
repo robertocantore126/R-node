@@ -727,6 +727,23 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
 
   const drawFreeform = (cmds: string[], p: Placed, fr: Frame): void => {
     const fill=p.node.style.fill??theme.background;
+    const box=p.node.style.container;
+    if (box) {
+      // A diagram container, as on screen: header band, no grid, centred title.
+      const path=roundedPath(p.x,p.y,p.w,p.h,p.node.style.shape==="rect"?0:8,fr), stroke=p.node.style.stroke??theme.nodeBorder;
+      cmds.push("q");
+      if (fill!=="transparent"&&fill!=="none") cmds.push(opacityCommand(fill),`${rgb(fill)} rg`,path,"f");
+      if (box.headerFill&&box.headerFill!=="transparent") cmds.push(opacityCommand(box.headerFill),`${rgb(box.headerFill)} rg`,`${f(fr.X(p.x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} ${f(p.w*fr.s)} ${f(FREEFORM_HEADER*fr.s)} re`,"f");
+      cmds.push(opacityCommand(stroke),`${rgb(stroke)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,path,"S");
+      if (box.headerFill) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(p.y+FREEFORM_HEADER))} l`,"S");
+      cmds.push("Q");
+      const title=p.node.title, size=p.node.style.fontSize??13;
+      const width=advance(winAnsiText(title),true,false,size);
+      const x=p.node.style.align==="left"?p.x+10:p.x+Math.max(10,(p.w-Math.min(width,p.w-20))/2);
+      if (title) plainText(cmds,title,x,p.y+FREEFORM_HEADER/2+size*0.35,size,p.node.style.textColor??theme.text,fr,true,p.w-20);
+      ops+=10;
+      return;
+    }
     const path=roundedPath(p.x,p.y,p.w,p.h,12,fr);
     cmds.push("q",opacityCommand(fill),`${rgb(fill)} rg`,path,"f",opacityCommand(p.node.style.stroke??theme.nodeBorder),`${rgb(p.node.style.stroke??theme.nodeBorder)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,path,"S",opacityCommand("#000000"),path,"W n");
     // Composite the editor's 13% muted grid over its solid surface, losslessly.

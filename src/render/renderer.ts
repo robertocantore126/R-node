@@ -874,6 +874,32 @@ export class Renderer {
     ctx.fillStyle = p.node.style.fill ?? theme.background;
     ctx.strokeStyle = p.node.style.stroke ?? theme.nodeBorder;
     ctx.lineWidth = p.node.style.borderWidth ?? 1;
+    const box = p.node.style.container;
+    if (box) {
+      // A diagram container: its own corners, a header band, no grid or hint.
+      const radius = p.node.style.shape === "rect" ? 0 : 8;
+      ctx.beginPath();
+      ctx.roundRect(p.x, p.y, p.w, p.h, radius);
+      ctx.fill();
+      if (box.headerFill) {
+        ctx.save(); ctx.clip();
+        ctx.fillStyle = box.headerFill;
+        ctx.fillRect(p.x, p.y, p.w, FREEFORM_HEADER);
+        ctx.beginPath(); ctx.moveTo(p.x, p.y + FREEFORM_HEADER); ctx.lineTo(p.x + p.w, p.y + FREEFORM_HEADER); ctx.stroke();
+        ctx.restore();
+      }
+      ctx.beginPath();
+      ctx.roundRect(p.x, p.y, p.w, p.h, radius);
+      ctx.setLineDash(p.node.style.borderStyle === "dashed" ? [6, 4] : []);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = p.node.style.textColor ?? theme.text;
+      ctx.font = `600 ${p.node.style.fontSize ?? 13}px ${FONT_STACK}`;
+      ctx.textAlign = p.node.style.align === "left" ? "left" : "center"; ctx.textBaseline = "middle";
+      ctx.fillText(p.node.title, p.node.style.align === "left" ? p.x + 10 : p.x + p.w / 2, p.y + FREEFORM_HEADER / 2, p.w - 20);
+      ctx.restore();
+      return;
+    }
     ctx.beginPath();
     ctx.roundRect(p.x, p.y, p.w, p.h, 12);
     ctx.fill(); ctx.stroke();

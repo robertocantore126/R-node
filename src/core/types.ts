@@ -237,6 +237,13 @@ export interface InkStroke {
 export interface Style {
   /** Topic containing freely positioned document nodes. */
   freeform?: boolean;
+  /**
+   * A freeform canvas drawn as a diagram CONTAINER (draw.io swimlane / group
+   * box, a VPC around its subnets): no grid, no hint, the title centred in the
+   * band, which `headerFill` paints as a swimlane header. It is still a canvas
+   * in every other way: items live inside it, move with it, grow it.
+   */
+  container?: { headerFill?: string };
   /** Handwriting on a freeform canvas, oldest first (see core/ink.ts). */
   ink?: InkStroke[];
   /**

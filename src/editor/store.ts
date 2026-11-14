@@ -2484,6 +2484,28 @@ export class EditorStore {
   }
 
   /**
+   * A diagram container (swimlane) inside a canvas, centred on the point: a
+   * nested canvas drawn as a box with a title band. Items dropped or pasted
+   * into it live in it and move with it.
+   */
+  createFreeformContainer(parentId: string, x: number, y: number): string | null {
+    const parent = this.model.node(parentId);
+    if (!parent?.style.freeform) return null;
+    const id = uid("n"), w = 260, h = 170;
+    const px = Math.max(FREEFORM_PADDING, Math.round(x - w / 2 - parent.position.x));
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, Math.round(y - h / 2 - parent.position.y));
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
+      title: "Container", titleRuns: [{ text: "Container" }],
+      style: { freeform: true, container: { headerFill: "transparent" }, freeformPosition: { x: px, y: py }, width: w, height: h, shape: "rect", fill: "transparent", borderWidth: 1, fontSize: 13 },
+      position: { x: parent.position.x + px, y: parent.position.y + py, manual: false },
+    })]);
+    this.settleLayoutNow();
+    this.select(id);
+    return id;
+  }
+
+  /**
    * Real document nodes share editing, links, copy, undo and persistence.
    *
    * `shape` (the double-click picker, draw.io style) makes a box of a fixed
@@ -2534,21 +2556,46 @@ export class EditorStore {
     const minX = Math.min(...diagram.vertices.map((v) => v.x));
     const minY = Math.min(...diagram.vertices.map((v) => v.y));
     const dx = FREEFORM_PADDING - minX, dy = top - minY;
+    const byId = new Map(diagram.vertices.map((v) => [v.id, v]));
+    // A container's title band is FREEFORM_HEADER tall (a draw.io swimlane's is
+    // usually 23-40): what would sit under it moves down, and the container
+    // grows by the same amount, so nothing inside is covered or reshuffled.
+    const shift = new Map<string, number>();
+    for (const v of diagram.vertices) {
+      if (!v.container) continue;
+      const kids = diagram.vertices.filter((k) => k.parent === v.id);
+      const minRel = kids.length ? Math.min(...kids.map((k) => k.y - v.y)) : Infinity;
+      shift.set(v.id, Math.max(0, Math.ceil(FREEFORM_HEADER + 6 - minRel)));
+    }
     const idMap = new Map<string, string>();
+    const world = new Map<string, { x: number; y: number }>();
+    const nextIndex = new Map<string, number>([[canvasId, canvas.childrenIds.length]]);
     const ops: Op[] = [];
-    let index = canvas.childrenIds.length;
     for (const v of diagram.vertices) {
       const id = uid("n");
       idMap.set(v.id, id);
-      const px = Math.round(v.x + dx), py = Math.round(v.y + dy);
+      const holder = v.parent ? byId.get(v.parent) : undefined;
+      const parentId = holder ? idMap.get(holder.id) : canvasId;
+      if (!parentId) continue; // a holder that was not created (cannot happen: holders sort first)
+      const px = Math.round(holder ? v.x - holder.x : v.x + dx);
+      const py = Math.round(holder ? v.y - holder.y + (shift.get(holder.id) ?? 0) : v.y + dy);
+      const origin = holder ? world.get(parentId)! : canvas.position;
+      world.set(id, { x: origin.x + px, y: origin.y + py });
+      const index = nextIndex.get(parentId) ?? 0;
+      nextIndex.set(parentId, index + 1);
       const style: Style = {
         freeformPosition: { x: px, y: py },
         shape: v.shape,
         width: Math.round(v.w),
-        height: Math.round(v.h),
+        height: Math.round(v.h + (shift.get(v.id) ?? 0)),
         fontSize: v.fontSize ?? 12,
         align: v.align ?? "center",
       };
+      if (v.container) {
+        style.freeform = true;
+        style.container = v.headerFill ? { headerFill: v.headerFill } : {};
+        style.fontSize = v.fontSize ?? 13;
+      }
       if (!v.text) style.borderWidth = v.strokeWidth ?? 1;
       if (v.fill) style.fill = v.fill;
       if (v.stroke) style.stroke = v.stroke;
@@ -2559,10 +2606,10 @@ export class EditorStore {
       if (v.underline) style.underline = true;
       if (v.opacity !== undefined) style.opacity = v.opacity;
       ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
-        id, nodeType: "subtopic", parentId: canvasId, index: index++,
+        id, nodeType: "subtopic", parentId, index,
         title: v.label, titleRuns: v.label ? [{ text: v.label }] : [],
         style,
-        position: { x: canvas.position.x + px, y: canvas.position.y + py, manual: false },
+        position: { ...world.get(id)!, manual: false },
       }));
     }
     let arrows = 0;
@@ -2581,7 +2628,9 @@ export class EditorStore {
     }
     this.execOps(ops);
     this.settleLayoutNow();
-    this.selectMany([...idMap.values()]);
+    // The top level only: containers carry what they hold, and a selection
+    // spanning two canvases could not be dragged as one.
+    this.selectMany(diagram.vertices.filter((v) => !v.parent).map((v) => idMap.get(v.id)!));
     trace.applied("paste:drawio", { canvasId, shapes: idMap.size, arrows, skippedEdges: diagram.skippedEdges });
     return { shapes: idMap.size, arrows };
   }
@@ -4527,7 +4576,13 @@ export class EditorStore {
   private freeformMinimumSize(id: string): { w: number; h: number } {
     const resolve = imageResolver(this.sheet);
     const bounds = freeformContentBounds(this.sheet, id, (node) => measureNode(node, this.measurer, resolve));
-    return { w: Math.max(240, Math.ceil(bounds.maxX + FREEFORM_PADDING)), h: Math.max(160, Math.ceil(bounds.maxY + FREEFORM_PADDING)) };
+    // A diagram container may be as small as its title band and a little body;
+    // a canvas keeps room to work in.
+    // Its contents may also sit flush against its edge, as draw.io lanes do.
+    const box = !!this.model.node(id)?.style.container;
+    const floor = box ? { w: 40, h: FREEFORM_HEADER + 16 } : { w: 240, h: 160 };
+    const margin = box ? 0 : FREEFORM_PADDING;
+    return { w: Math.max(floor.w, Math.ceil(bounds.maxX + margin)), h: Math.max(floor.h, Math.ceil(bounds.maxY + margin)) };
   }
 
   /** A resize drag started on this node: capture the pre-drag style + position. */
