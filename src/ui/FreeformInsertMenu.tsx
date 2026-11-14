@@ -11,6 +11,7 @@ import { useEffect, useRef, type JSX } from "react";
 import { useStore } from "../editor/context";
 import { FREEFORM_SHAPES, type FreeformShape } from "../core/freeform";
 import { listShapes } from "../editor/shapeLibrary";
+import { diagramShapePath, svgPathData } from "../core/diagramShapes";
 
 export interface FreeformInsertAt {
   /** The canvas topic the item goes into. */
@@ -46,6 +47,16 @@ function ShapeIcon({ shape }: { shape: FreeformShape | "text" }): JSX.Element {
     case "hexagon":
       body = <polygon points="8,3 20,3 26,10.5 20,18 8,18 2,10.5" {...common} />;
       break;
+    default: {
+      // Diagram shapes draw from the same path list as the canvas.
+      const { outline, detail } = diagramShapePath(shape, 3, 3, 22, 15);
+      body = (
+        <>
+          <path d={svgPathData(outline, (n) => n.toFixed(2))} {...common} />
+          {detail.length > 0 && <path d={svgPathData(detail, (n) => n.toFixed(2))} {...common} />}
+        </>
+      );
+    }
   }
   return (
     <svg width="28" height="21" viewBox="0 0 28 21" aria-hidden="true">

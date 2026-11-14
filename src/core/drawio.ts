@@ -151,21 +151,61 @@ export function labelText(value: string, html: boolean): string {
  * Which R-node outline a draw.io shape gets. Shapes R-node does not draw yet
  * fall back to the closest box, so the content is always there.
  */
-export function shapeFor(kind: string, s: Record<string, string>, w: number, h: number): TopicShape {
-  switch (kind) {
+export function shapeFor(kind: string, s: Record<string, string>): TopicShape {
+  // The flowchart stencils ("mxgraph.flowchart.decision") name the same ideas.
+  const name = kind.replace(/^mxgraph\.(flowchart|basic)\./, "");
+  switch (name) {
     case "ellipse":
     case "doubleEllipse":
-      return Math.abs(w - h) <= 2 ? "circle" : "capsule";
+    case "start_1":
+    case "start_2":
+    case "on-page_reference":
+    case "or":
+    case "summing_function":
+      return "ellipse";
     case "rhombus":
+    case "decision":
       return "diamond";
     case "hexagon":
+    case "preparation":
       return "hexagon";
     case "cloud":
       return "cloud";
+    case "cylinder":
+    case "cylinder2":
+    case "cylinder3":
+    case "datastore":
+    case "database":
+    case "stored_data":
+    case "direct_data":
+      return "cylinder";
+    case "document":
+    case "multi-Document":
+    case "tape":
+      return "document";
+    case "parallelogram":
+    case "data":
+    case "manual_input":
+      return "parallelogram";
+    case "triangle":
+    case "extract_or_measurement":
+    case "merge_or_storage":
+      return "triangle";
+    case "process":
+    case "predefined_process":
+      return "process";
+    case "note":
+    case "card":
+    case "card2":
+      return "note";
+    case "terminator":
+    case "delay":
+    case "display":
+      return "capsule";
     case "text":
       return "none";
     default:
-      return s.rounded === "1" ? "rounded" : "rect";
+      return s.rounded === "1" ? (Number(s.arcSize) >= 50 ? "capsule" : "rounded") : "rect";
   }
 }
 
@@ -311,7 +351,7 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       w: Math.max(10, g.w),
       h: Math.max(10, g.h),
       kind: c.name === "swimlane" ? "swimlane" : kind,
-      shape: text ? "none" : shapeFor(kind, s, g.w, g.h),
+      shape: text ? "none" : shapeFor(kind, s),
       text,
       container,
       fill: fill && fillOpacity !== undefined && fillOpacity < 100 && fill.startsWith("#") && fill.length === 7

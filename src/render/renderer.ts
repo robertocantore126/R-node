@@ -1,4 +1,5 @@
 import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
+import { diagramShapePath, isDiagramShape, tracePath } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
 import { quizMistakeNodeIds } from "../core/quiz";
@@ -982,6 +983,16 @@ export class Renderer {
         ctx.lineWidth = border.width;
         ctx.stroke();
       }
+      // A diagram shape's inner linework (cylinder rim, process bars, note fold).
+      if (!isCode && isDiagramShape(shape)) {
+        const detail = diagramShapePath(shape, p.x, p.y, p.w, p.h).detail;
+        if (detail.length) {
+          ctx.beginPath();
+          tracePath(ctx, detail);
+          ctx.lineWidth = border.double ? border.width / 3 : border.width;
+          ctx.stroke();
+        }
+      }
       ctx.setLineDash([]);
       ctx.lineCap = "butt";
     }
@@ -1253,7 +1264,8 @@ export class Renderer {
         // Text-only topics (the central topic in the XMind-inspired theme).
         break;
       default:
-        this.roundRect(ctx, x, y, w, h, radius);
+        if (isDiagramShape(shape)) tracePath(ctx, diagramShapePath(shape, x, y, w, h).outline);
+        else this.roundRect(ctx, x, y, w, h, radius);
     }
   }
 

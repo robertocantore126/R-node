@@ -3,6 +3,7 @@ import { useStore } from "../editor/context";
 import type { ArrowHead, ConnectorStyle, Group, GroupShape, Relationship, Style, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
 import { relHeads, relWidth } from "../layout/relationship";
 import { BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_SHAPES } from "../core/types";
+import { DIAGRAM_SHAPES } from "../core/diagramShapes";
 import { BorderPicker } from "./BorderPicker";
 import { THEMES } from "../render/theme";
 import { makeOp, type Op } from "../core/ops";
@@ -13,7 +14,7 @@ import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W
 import { InkControls } from "./InkControls";
 const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
 
-const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
+const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", ...DIAGRAM_SHAPES, "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
 const PRIORITIES: Priority[] = ["none", "low", "medium", "high", "urgent"];
 /** Cell shapes offered for a gallery grid, as width ÷ height. */

@@ -4,14 +4,24 @@ export const FREEFORM_HEADER = 36;
 export const FREEFORM_PADDING = 16;
 
 /** The base shapes the double-click picker offers in a canvas (draw.io style). */
-export type FreeformShape = Extract<TopicShape, "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon">;
+export type FreeformShape = Extract<
+  TopicShape,
+  "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon" | "ellipse" | "cylinder" | "document" | "parallelogram" | "triangle" | "process" | "note"
+>;
 export const FREEFORM_SHAPES: { shape: FreeformShape; label: string }[] = [
   { shape: "rect", label: "Rectangle" },
   { shape: "rounded", label: "Rounded" },
-  { shape: "capsule", label: "Capsule" },
+  { shape: "capsule", label: "Capsule (start / end)" },
   { shape: "circle", label: "Circle" },
-  { shape: "diamond", label: "Diamond" },
+  { shape: "ellipse", label: "Ellipse" },
+  { shape: "diamond", label: "Diamond (decision)" },
   { shape: "hexagon", label: "Hexagon" },
+  { shape: "parallelogram", label: "Data (parallelogram)" },
+  { shape: "process", label: "Process" },
+  { shape: "document", label: "Document" },
+  { shape: "cylinder", label: "Database" },
+  { shape: "triangle", label: "Triangle" },
+  { shape: "note", label: "Note" },
 ];
 /** Starting box of each shape; the user resizes it like any item. */
 export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number }> = {
@@ -21,6 +31,13 @@ export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number 
   circle: { w: 80, h: 80 },
   diamond: { w: 120, h: 80 },
   hexagon: { w: 120, h: 70 },
+  ellipse: { w: 120, h: 70 },
+  cylinder: { w: 70, h: 90 },
+  document: { w: 120, h: 70 },
+  parallelogram: { w: 130, h: 60 },
+  triangle: { w: 90, h: 80 },
+  process: { w: 130, h: 60 },
+  note: { w: 110, h: 80 },
 };
 /** Nearest enclosing canvas, excluding the topic itself. */
 export function freeformOwner(sheet: Sheet, id: string): string | null {

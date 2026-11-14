@@ -53,6 +53,14 @@ export type TopicShape =
   | "diamond"
   | "hexagon"
   | "cloud"
+  // Diagram outlines (src/core/diagramShapes.ts), draw.io's basic set.
+  | "ellipse"
+  | "cylinder"
+  | "document"
+  | "parallelogram"
+  | "triangle"
+  | "process"
+  | "note"
   | "underline"
   | "none";
 

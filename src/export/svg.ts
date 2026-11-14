@@ -1,4 +1,5 @@
 import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { diagramShapePath, isDiagramShape, svgPathData } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 /**
  * SVG export — the whole map as one vector document.
@@ -130,15 +131,21 @@ function shapeOf(p: Placed, fill: string, border: ResolvedBorder | null): string
   const outlined = shape === "none" ? "rounded" : shape;
   const dash = border.dash.length > 0 ? ` stroke-dasharray="${border.dash.map(n3).join(" ")}"` : "";
   const cap = border.cap === "round" ? ` stroke-linecap="round"` : "";
+  // A diagram shape's inner linework, stroked like the border, never filled.
+  const detail = (width: number): string => {
+    if (!isDiagramShape(outlined)) return "";
+    const d = diagramShapePath(outlined, p.x, p.y, p.w, p.h).detail;
+    return d.length ? `<path d="${svgPathData(d, n3)}" fill="none" stroke="${esc(border.color)}" stroke-width="${n3(width)}"${dash}${cap}/>` : "";
+  };
   if (!border.double) {
     const f = shape === "none" ? `none` : esc(fill);
-    return shapeEl(p, outlined, radius, ` fill="${f}" stroke="${esc(border.color)}" stroke-width="${n3(border.width)}"${dash}${cap}`);
+    return shapeEl(p, outlined, radius, ` fill="${f}" stroke="${esc(border.color)}" stroke-width="${n3(border.width)}"${dash}${cap}`) + detail(border.width);
   }
   const t = border.width / 3;
   const lines = [t, -t].map((d) =>
     shapeEl({ x: p.x - d, y: p.y - d, w: p.w + d * 2, h: p.h + d * 2 }, outlined, Math.max(0, radius + d), ` fill="none" stroke="${esc(border.color)}" stroke-width="${n3(t)}"${dash}${cap}`)
   );
-  return (shape === "none" ? "" : shapeEl(p, shape, radius, ` fill="${esc(fill)}"`)) + lines.join("");
+  return (shape === "none" ? "" : shapeEl(p, shape, radius, ` fill="${esc(fill)}"`)) + lines.join("") + detail(t);
 }
 
 function shapeEl(p: { x: number; y: number; w: number; h: number }, shape: string, radius: number, f: string): string {
@@ -157,6 +164,7 @@ function shapeEl(p: { x: number; y: number; w: number; h: number }, shape: strin
     case "rect":
       return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}"${f}/>`;
     default:
+      if (isDiagramShape(shape)) return `<path d="${svgPathData(diagramShapePath(shape, x, y, w, h).outline, n3)}"${f}/>`;
       return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}" rx="${n3(radius)}"${f}/>`;
   }
 }

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
-import { extractDrawioXml, looksLikeDrawio, parseDrawio } from "../src/core/drawio";
+import { extractDrawioXml, looksLikeDrawio, parseDrawio, shapeFor } from "../src/core/drawio";
+import { measureNode } from "../src/layout/measure";
 import { FREEFORM_HEADER, FREEFORM_PADDING } from "../src/core/freeform";
 import { EditorStore } from "../src/editor/store";
 
@@ -76,9 +77,9 @@ describe("draw.io reader", () => {
     const by = Object.fromEntries(d.vertices.map((v) => [v.id, v]));
     expect(Object.keys(by)).toEqual(["vpc", "ec2", "db", "user", "note"]);
     expect(by.ec2).toMatchObject({ x: 240, y: 160, w: 120, h: 60, label: "EC2\nweb", shape: "rounded", fill: "#dae8fc", stroke: "#6c8ebf", bold: true });
-    expect(by.db).toMatchObject({ x: 440, y: 160, kind: "cylinder3" });
+    expect(by.db).toMatchObject({ x: 440, y: 160, kind: "cylinder3", shape: "cylinder" });
     expect(by.vpc).toMatchObject({ container: true, kind: "swimlane" });
-    expect(by.user).toMatchObject({ shape: "circle", dashed: true });
+    expect(by.user).toMatchObject({ shape: "ellipse", dashed: true });
     expect(by.note).toMatchObject({ text: true, shape: "none", textColor: "#990000" });
   });
 
@@ -96,6 +97,19 @@ describe("draw.io reader", () => {
     const d = (await parseDrawio(text))!;
     expect(d.vertices.map((v) => v.id)).toEqual(["vpc", "ec2", "db", "user", "note"]);
     expect(d.edges).toHaveLength(2);
+  });
+
+  it("maps draw.io and flowchart-stencil names onto R-node outlines", () => {
+    const cases: [string, string][] = [
+      ["ellipse", "ellipse"], ["rhombus", "diamond"], ["mxgraph.flowchart.decision", "diamond"],
+      ["cylinder3", "cylinder"], ["mxgraph.flowchart.database", "cylinder"], ["document", "document"],
+      ["parallelogram", "parallelogram"], ["mxgraph.flowchart.data", "parallelogram"], ["triangle", "triangle"],
+      ["process", "process"], ["mxgraph.flowchart.predefined_process", "process"], ["note", "note"],
+      ["mxgraph.flowchart.terminator", "capsule"], ["somethingUnknown", "rect"],
+    ];
+    for (const [kind, shape] of cases) expect([kind, shapeFor(kind, {})]).toEqual([kind, shape]);
+    expect(shapeFor("", { rounded: "1" })).toBe("rounded");
+    expect(shapeFor("", { rounded: "1", arcSize: "50" })).toBe("capsule");
   });
 
   it("returns null for broken XML", async () => {
@@ -129,6 +143,18 @@ describe("draw.io import into a canvas", () => {
     store.undo();
     expect(Object.keys(store.sheet.nodes).length).toBe(before);
     expect(store.sheet.relationships.some((r) => r.label === "HTTPS")).toBe(false);
+  });
+
+  it("imported boxes keep draw.io's size, even small ones and diamonds", async () => {
+    const { store, board } = setup();
+    const xml = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+      <mxCell id="a" value="db" style="shape=cylinder3;" vertex="1" parent="1"><mxGeometry x="0" y="0" width="40" height="60" as="geometry"/></mxCell>
+      <mxCell id="b" value="?" style="rhombus;" vertex="1" parent="1"><mxGeometry x="100" y="0" width="100" height="80" as="geometry"/></mxCell>
+      <mxCell id="c" value="h" style="shape=hexagon;" vertex="1" parent="1"><mxGeometry x="300" y="0" width="120" height="70" as="geometry"/></mxCell>
+      </root></mxGraphModel>`;
+    store.importDrawio(board.id, (await parseDrawio(xml))!);
+    const sizes = board.childrenIds.map((id) => measureNode(store.doc.requireNode(id)));
+    expect(sizes.map((s) => [s.w, s.h])).toEqual([[40, 60], [100, 80], [120, 70]]);
   });
 
   it("a second import goes below what the canvas already holds", async () => {

@@ -1,5 +1,6 @@
 import { phoneMapPages } from "./pdfPhone";
 import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { diagramShapePath, isDiagramShape, pdfPathOps } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
 import { THEMES, readableOn, type RenderTheme } from "../render/theme";
@@ -663,6 +664,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   };
   const boxPath = (r: {x:number;y:number;w:number;h:number}, shape: string, corner: number, fr: Frame): string => {
     const {x,y,w,h} = r;
+    if (isDiagramShape(shape)) return pdfPathOps(diagramShapePath(shape,x,y,w,h).outline, fr.X, fr.Y, f);
     if (shape === "diamond" || shape === "hexagon") {
       const points = shape === "diamond" ? [[x+w/2,y],[x+w,y+h/2],[x+w/2,y+h],[x,y+h/2]] : [[x+w*.25,y],[x+w*.75,y],[x+w,y+h/2],[x+w*.75,y+h],[x+w*.25,y+h],[x,y+h/2]];
       return points.map(([a,b],i)=>`${f(fr.X(a))} ${f(fr.Y(b))} ${i ? "l" : "m"}`).join("\n")+" h";
@@ -701,6 +703,11 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
         cmds.push(`${f(t*fr.s)} w`);
         for (const d of [t,-t]) cmds.push(boxPath({x:p.x-d,y:p.y-d,w:p.w+d*2,h:p.h+d*2},outlined,corner+d,fr),"S");
       } else cmds.push(`${f(border.width*fr.s)} w`,path,"S");
+      // A diagram shape's inner linework (cylinder rim, process bars, note fold).
+      if (isDiagramShape(outlined)) {
+        const detail = diagramShapePath(outlined,p.x,p.y,p.w,p.h).detail;
+        if (detail.length) cmds.push(pdfPathOps(detail, fr.X, fr.Y, f),"S");
+      }
     }
     cmds.push("Q"); ops+=8;
   };

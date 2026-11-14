@@ -124,6 +124,8 @@ export const MAX_CODE_W = 720;
  */
 export const BLOCK_GAP_FACTOR = 0.6;
 export const MIN_TOPIC_W = 84;
+/** The floor for a fixed-size diagram shape inside a freeform canvas. */
+export const FREEFORM_MIN_W = 16;
 export const MAX_TOPIC_W = 280;
 /** Default display width of a node image in world units (Xmind-style cap). */
 export const MAX_IMAGE_W = 240;
@@ -1396,7 +1398,10 @@ function measureTopicUncached(
   const sidePadW = insets.left + insets.right;
   // An explicit width fixes the box and re-wraps the text at it (Xmind-style
   // resize); the height always follows the wrapped content.
-  const maxW = style.width ? Math.max(MIN_TOPIC_W, style.width) : MAX_TOPIC_W;
+  // A fixed box in a freeform canvas (width AND height set: a diagram shape)
+  // may be narrower than a map topic — draw.io icons and small symbols are.
+  const minW = style.width && style.height && style.freeformPosition ? FREEFORM_MIN_W : MIN_TOPIC_W;
+  const maxW = style.width ? Math.max(minW, style.width) : MAX_TOPIC_W;
   const textW = Math.max(24, maxW - pad * 2 - TEXT_INSET - sidePadW);
   const runs = nodeRuns(n.title, n.titleRuns);
   let lines = wrapRunLines(runs, textW, measurer, style);
@@ -1408,7 +1413,7 @@ function measureTopicUncached(
   // push the box wider than MAX_TOPIC_W, exactly like the top image already
   // could. With no side images sidePadW is 0 and this is the old formula.
   let w = style.width
-    ? Math.max(MIN_TOPIC_W, style.width)
+    ? Math.max(minW, style.width)
     : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET)) + sidePadW;
   // The middle column must fit the top/bottom images and the gallery grid
   // (the side columns are already part of sidePadW). The grid's own width is
