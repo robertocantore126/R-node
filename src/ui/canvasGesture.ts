@@ -33,6 +33,12 @@ export type CanvasGesture =
   /** A gallery cell in hand; `to` is the gap it would drop into. */
   | { kind: "move-cell"; from: { nodeId: string; index: number }; to: { nodeId: string; index: number } | null }
   | { kind: "connect"; grip: ConnectGrip }
+  /**
+   * Reshaping the selected relationship (draw.io): moving a bend, pulling a
+   * new one out, sliding an elbow segment, or carrying the label. `base` is
+   * the bends (world) - or, for the label, its offset - when the press began.
+   */
+  | { kind: "rel-bend"; relId: string; mode: "point" | "insert" | "segment" | "label"; index: number; base: { x: number; y: number }[]; startWorldX: number; startWorldY: number }
   /** A pen stroke being written; the origin converts world points to canvas-local. */
   | { kind: "ink-stroke"; canvasId: string; originX: number; originY: number; stroke: InkStroke }
   /** The eraser passing over a canvas; `erased` is removed on release. */
@@ -45,7 +51,7 @@ const BACK_TO_IDLE = ["idle"] as const;
 
 /** A gesture only ever starts from idle and only ever ends there. */
 export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
-  idle: ["pan", "marquee", "node-drag", "group-drag", "resize-topic", "resize-freeform", "resize-item", "resize-image", "move-image", "move-cell", "connect", "chart-grow", "ink-stroke", "ink-erase"],
+  idle: ["pan", "marquee", "node-drag", "group-drag", "resize-topic", "resize-freeform", "resize-item", "resize-image", "move-image", "move-cell", "connect", "rel-bend", "chart-grow", "ink-stroke", "ink-erase"],
   pan: BACK_TO_IDLE,
   marquee: BACK_TO_IDLE,
   "node-drag": BACK_TO_IDLE,
@@ -57,6 +63,7 @@ export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
   "move-image": BACK_TO_IDLE,
   "move-cell": BACK_TO_IDLE,
   connect: BACK_TO_IDLE,
+  "rel-bend": BACK_TO_IDLE,
   "chart-grow": BACK_TO_IDLE,
   "ink-stroke": BACK_TO_IDLE,
   "ink-erase": BACK_TO_IDLE,

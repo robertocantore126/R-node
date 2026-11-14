@@ -2674,6 +2674,15 @@ export class EditorStore {
       if (e.lineStyle) rel.lineStyle = e.lineStyle;
       if (e.fromAnchor) rel.fromAnchor = e.fromAnchor;
       if (e.toAnchor) rel.toAnchor = e.toAnchor;
+      if (e.points?.length) {
+        // Waypoints are measured from the canvas holding the source: this
+        // canvas (where the diagram was moved by dx, dy) or an imported
+        // container (its own origin, plus the room made under its header).
+        const src = byId.get(e.source);
+        const holder = src?.parent ? byId.get(src.parent) : undefined;
+        const ox = holder ? -holder.x : dx, oy = holder ? -holder.y + (shift.get(holder.id) ?? 0) : dy;
+        rel.waypoints = e.points.map((p) => ({ x: Math.round(p.x + ox), y: Math.round(p.y + oy) }));
+      }
       ops.push(makeOp<Op & { type: "createRelationship" }>("createRelationship", { relationship: rel }));
       arrows++;
     }

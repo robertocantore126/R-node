@@ -535,6 +535,15 @@ export interface Relationship {
   startArrow?: ArrowHead;
   /** Stroke width in world units. Absent = 1.5 (REL_WIDTH). */
   width?: number;
+  /**
+   * Bend points the line passes through (draw.io waypoints), in order from
+   * source to target. Relative to the canvas holding the source item (its
+   * top-left), or, off a canvas, to the midpoint of the two boxes' centres —
+   * see `waypointOrigin`. Absent/empty = the automatic route.
+   */
+  waypoints?: RelAnchor[];
+  /** Where the label sits, as an offset from the route's midpoint. Absent = on it. */
+  labelOffset?: RelAnchor;
 }
 
 /** A point on a box border, as fractions of the box's width and height. */

@@ -13,7 +13,7 @@ import { editorMapToPdf } from "../export/editorPdf";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
-import { anchorAt } from "../layout/relationship";
+import { anchorAt, borderAnchor, dragElbowSegment, innerPoints, worldWaypoints } from "../layout/relationship";
 import { createCanvasTextMeasurer, chartGrowDelta, chartGrowPitch, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
@@ -676,6 +676,48 @@ export function CanvasView(): JSX.Element {
     return null;
   };
 
+  /**
+   * The selected relationship as the bend gesture would leave it with the
+   * pointer at `world`. Bends snap to the grid (Alt: free); waypoints are
+   * stored relative to their origin (the source's canvas).
+   */
+  const bentRelationship = (g: CanvasGesture & { kind: "rel-bend" }, world: { x: number; y: number }, free: boolean): Relationship | null => {
+    const renderer = rendererRef.current!;
+    const rs = currentRenderState();
+    const rel = store.sheet.relationships.find((r) => r.id === g.relId);
+    const a = rel && renderer.nodeWorldRect(rs, rel.fromId);
+    const b = rel && renderer.nodeWorldRect(rs, rel.toId);
+    if (!rel || !a || !b) return null;
+    if (g.mode === "label") {
+      const o = g.base[0];
+      return { ...rel, labelOffset: { x: o.x + world.x - g.startWorldX, y: o.y + world.y - g.startWorldY } };
+    }
+    // On the canvas's own grid, the one its items snap to.
+    const origin = renderer.relOrigin(rs, rel);
+    const snap = (v: number, o: number): number => (free ? v : o + Math.round((v - o) / GRID) * GRID);
+    const p = { x: snap(world.x, origin.x), y: snap(world.y, origin.y) };
+    const rel0 = { ...rel, waypoints: g.base.length ? g.base.map((q) => ({ x: q.x - origin.x, y: q.y - origin.y })) : undefined };
+    let wps: { x: number; y: number }[];
+    let pin: Partial<Relationship> = {};
+    if (g.mode === "segment") {
+      // Slid on the route as it stood when the press began.
+      const moved = dragElbowSegment(renderer.relRoute(rs, rel.waypoints?.length ? rel0 : rel, a, b), g.index, p, a, b);
+      if (!moved) return null;
+      wps = moved.waypoints;
+      pin = { fromAnchor: moved.fromAnchor, toAnchor: moved.toAnchor };
+    } else {
+      wps = g.base.map((q) => ({ ...q }));
+      if (g.mode === "insert") wps.splice(g.index, 0, p);
+      else wps[g.index] = p;
+      // An elbow line's corners are now fixed points: keep its ends where they are.
+      if (rel.connector === "elbow") {
+        const route = renderer.relRoute(rs, rel, a, b);
+        pin = { fromAnchor: borderAnchor(a, route.start.tip), toAnchor: borderAnchor(b, route.end.tip) };
+      }
+    }
+    return { ...rel, ...pin, waypoints: wps.map((q) => ({ x: q.x - origin.x, y: q.y - origin.y })) };
+  };
+
   /** Marquee hits; a canvas-scoped box picks only that canvas's own items, wholly inside. */
   const marqueeIds = (scope: string | undefined, w0: { x: number; y: number }, w1: { x: number; y: number }): string[] => {
     const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y, !!scope);
@@ -799,6 +841,25 @@ export function CanvasView(): JSX.Element {
         gesture.to({ kind: "connect", grip: { kind: "end", relId: s.relSel, end } }, "pointerdown");
         trace.applied("pointerdown:rel-end", { id: s.relSel, end });
         return;
+      }
+      // On the label chip a handle must be hit squarely, so a bend sitting
+      // under the label still leaves the rest of the chip to grab.
+      const onLabel = !!s.relSel && renderer.hitTestRelLabel(rs, world.x, world.y);
+      const bend = s.relSel ? renderer.hitTestBend(rs, world.x, world.y, onLabel ? 3 : undefined) : null;
+      const relS = s.relSel ? store.sheet.relationships.find((r) => r.id === s.relSel) : undefined;
+      if (relS && (bend || onLabel)) {
+        const a = renderer.nodeWorldRect(rs, relS.fromId), b = renderer.nodeWorldRect(rs, relS.toId);
+        if (a && b) {
+          const elbow = relS.connector === "elbow";
+          const base = !bend
+            ? [relS.labelOffset ?? { x: 0, y: 0 }]
+            : elbow
+              ? innerPoints(renderer.relRoute(rs, relS, a, b))
+              : worldWaypoints(relS, a, b, renderer.relOrigin(rs, relS));
+          gesture.to({ kind: "rel-bend", relId: relS.id, mode: bend ? bend.kind : "label", index: bend?.index ?? 0, base, startWorldX: world.x, startWorldY: world.y }, "pointerdown");
+          trace.applied("pointerdown:rel-bend", { id: relS.id, mode: bend ? bend.kind : "label", index: bend?.index ?? 0 });
+          return;
+        }
       }
       const con = s.editingId ? null : renderer.hitTestConnectHandle(rs, world.x, world.y);
       if (con) {
@@ -1063,6 +1124,16 @@ export function CanvasView(): JSX.Element {
       const rel: Relationship =
         moving === "to" ? { ...base, toId: target ?? "", toAnchor: anchor } : { ...base, fromId: target ?? "", fromAnchor: anchor };
       relDraftRef.current = { rel, pointer: world, replaces: c.kind === "end" ? c.relId : undefined, target };
+      schedule();
+      return;
+    }
+    if (gs.kind === "rel-bend") {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const rel = bentRelationship(gs, world, e.altKey);
+      if (rel) relDraftRef.current = { rel, pointer: world, replaces: rel.id, target: null };
       schedule();
       return;
     }
@@ -1337,6 +1408,13 @@ export function CanvasView(): JSX.Element {
       }
       return;
     }
+    if (gs.kind === "rel-bend") {
+      if (!drag.moved || !draft) return void trace.ignored("pointerup:rel-bend", "no drag", { id: gs.relId });
+      const r = draft.rel;
+      store.setRelationship(gs.relId, { waypoints: r.waypoints, labelOffset: r.labelOffset, fromAnchor: r.fromAnchor, toAnchor: r.toAnchor });
+      trace.applied("pointerup:rel-bend", { id: gs.relId, mode: gs.mode, bends: r.waypoints?.length ?? 0 });
+      return;
+    }
     if (gs.kind === "chart-grow") {
       const g = gs;
       // A click without a drag keeps the old "+": one more.
@@ -1422,6 +1500,16 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     // Two quick pen dots (a colon, an umlaut) are writing, not a double click.
     if (s.mode === "ink" && inkCanvasAt(world.x, world.y)) return trace.ignored("dblclick", "writing with the pen");
+    // Double click on a bend of the selected relationship removes it (draw.io);
+    // on an elbow line's segment, it gives the line back its automatic route.
+    const bend = s.relSel ? renderer.hitTestBend(currentRenderState(), world.x, world.y) : null;
+    const relB = s.relSel ? store.sheet.relationships.find((r) => r.id === s.relSel) : undefined;
+    if (bend && relB && bend.kind !== "insert") {
+      const wps = relB.connector === "elbow" ? [] : (relB.waypoints ?? []).filter((_, i) => i !== bend.index);
+      store.setRelationship(relB.id, { waypoints: wps.length ? wps : undefined });
+      trace.applied("dblclick:rel-bend-remove", { id: relB.id, left: wps.length });
+      return;
+    }
     const hit = renderer.hitTest(currentRenderState(), world.x, world.y);
     if (hit) {
       if (store.doc.node(hit)?.style.freeform) {

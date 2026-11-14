@@ -170,6 +170,23 @@ describe("draw.io import into a canvas", () => {
     expect(sizes.map((s) => [s.w, s.h])).toEqual([[40, 60], [100, 80], [120, 70]]);
   });
 
+  it("an edge's bend points become waypoints, in the canvas's frame", async () => {
+    const { store, board } = setup();
+    const xml = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+      <mxCell id="a" value="A" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="100" y="100" width="80" height="40" as="geometry"/></mxCell>
+      <mxCell id="b" value="B" style="rounded=0;" vertex="1" parent="1"><mxGeometry x="400" y="100" width="80" height="40" as="geometry"/></mxCell>
+      <mxCell id="e" edge="1" source="a" target="b" parent="1" style="edgeStyle=orthogonalEdgeStyle;"><mxGeometry relative="1" as="geometry">
+        <Array as="points"><mxPoint x="260" y="40"/><mxPoint x="320" y="40"/></Array></mxGeometry></mxCell>
+      </root></mxGraphModel>`;
+    const d = (await parseDrawio(xml))!;
+    expect(d.edges[0].points).toEqual([{ x: 260, y: 40 }, { x: 320, y: 40 }]);
+    store.importDrawio(board.id, d);
+    const rel = store.sheet.relationships.find((r) => r.fromId === board.childrenIds[0])!;
+    // The diagram's top-left (100, 100) lands at (PADDING, HEADER + PADDING).
+    const dx = FREEFORM_PADDING - 100, dy = FREEFORM_HEADER + FREEFORM_PADDING - 100;
+    expect(rel.waypoints).toEqual([{ x: 260 + dx, y: 40 + dy }, { x: 320 + dx, y: 40 + dy }]);
+  });
+
   it("a second import goes below what the canvas already holds", async () => {
     const { store, board } = setup();
     const d = (await parseDrawio(AI_ANSWER))!;

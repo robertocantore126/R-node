@@ -65,6 +65,8 @@ export interface DrawioEdge {
   startArrow: ArrowHead;
   fromAnchor?: RelAnchor;
   toAnchor?: RelAnchor;
+  /** The edge's bend points (draw.io waypoints), absolute like the vertices. */
+  points?: { x: number; y: number }[];
 }
 
 export interface DrawioDiagram {
@@ -465,6 +467,14 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
     const s = c.style;
     const dash = s.dashPattern ?? "";
     const label = [value(c), ...(edgeLabels.get(c.id) ?? [])].filter(Boolean).join("\n");
+    // Bend points live in <Array as="points"> inside the geometry, in the
+    // frame of the edge's parent (a layer: 0,0; a group: its origin).
+    const g = el?.getElementsByTagName("mxGeometry")[0];
+    const arr = g ? Array.from(g.getElementsByTagName("Array")).find((x) => x.getAttribute("as") === "points") : undefined;
+    const base = absolute(c.parent);
+    const points = arr
+      ? Array.from(arr.getElementsByTagName("mxPoint")).map((p) => ({ x: base.x + (num(p.getAttribute("x") ?? undefined) ?? 0), y: base.y + (num(p.getAttribute("y") ?? undefined) ?? 0) }))
+      : [];
     edges.push({
       id: c.id,
       source,
@@ -480,6 +490,7 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       startArrow: arrowHead(s.startArrow, s.startFill, "none"),
       fromAnchor: anchor(s.exitX, s.exitY),
       toAnchor: anchor(s.entryX, s.entryY),
+      ...(points.length ? { points } : {}),
     });
   }
   const pages = (found.xml.match(/<diagram[\s>]/g) ?? []).length;

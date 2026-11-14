@@ -766,12 +766,16 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
       <div className="inspector-actions">
         <button className="btn small" title="Swap source and target" onClick={() => store.setRelationship(rel.id, {
           fromId: rel.toId, toId: rel.fromId, fromAnchor: rel.toAnchor, toAnchor: rel.fromAnchor, startArrow: heads.end, endArrow: heads.start, bidirectional: undefined,
+          waypoints: rel.waypoints ? [...rel.waypoints].reverse() : undefined,
         })}>⇄ Reverse</button>
         {(rel.fromAnchor || rel.toAnchor) && (
           <button className="btn small" title="Let both ends float to the nearest side again" onClick={() => store.setRelationship(rel.id, { fromAnchor: undefined, toAnchor: undefined })}>Unpin ends</button>
         )}
+        {(rel.waypoints?.length || rel.labelOffset) && (
+          <button className="btn small" title="Remove the bends and put the label back in the middle" onClick={() => store.setRelationship(rel.id, { waypoints: undefined, labelOffset: undefined })}>Reset route</button>
+        )}
       </div>
-      <p className="muted">Drag an end of the selected line onto another topic, or onto another side of the same one, to move it.</p>
+      <p className="muted">Drag an end onto another topic or side to move it. Drag a handle on the line to bend it (double-click a bend to remove it); drag the label to move it. Hold Alt to place off the grid.</p>
       <button className="btn small danger" onClick={() => store.deleteSelectedRelationship()}>Delete relationship</button>
     </div>
   );

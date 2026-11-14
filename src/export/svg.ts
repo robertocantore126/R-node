@@ -41,7 +41,7 @@ import {
   wrapRunLines,
   type TextMeasurer,
 } from "../layout/measure";
-import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeObstacles, type HeadShape, type Rect } from "../layout/relationship";
+import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeEnv, type HeadShape, type RouteEnv } from "../layout/relationship";
 
 export interface SvgExportOptions {
   measurer: TextMeasurer;
@@ -215,11 +215,11 @@ function arrowHead(shape: HeadShape | null, color: string, width: number): strin
  * pinned to anchors) and the same heads, tip on the border and angled along
  * the line's real direction there.
  */
-function relationship(rel: Relationship, byId: Map<string, Placed>, color: string, obstacles?: Rect[]): string {
+function relationship(rel: Relationship, byId: Map<string, Placed>, color: string, env: RouteEnv = {}): string {
   const a = byId.get(rel.fromId);
   const b = byId.get(rel.toId);
   if (!a || !b) return "";
-  const route = relationshipRoute(rel, a, b, obstacles);
+  const route = relationshipRoute(rel, a, b, env.obstacles, env.origin);
   const width = relWidth(rel);
   const dash =
     rel.lineStyle === "dashed" ? ` stroke-dasharray="7 5"` : rel.lineStyle === "dotted" ? ` stroke-dasharray="2 4"` : "";
@@ -431,7 +431,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   const pad = opts.pad ?? 40;
   const placed = placeAll(sheet, opts.measurer);
   // Elbow arrows go around the same boxes as on screen.
-  const obstaclesOf = (rel: Relationship): Rect[] | undefined => (rel.connector === "elbow" ? routeObstacles(sheet, placed, rel) : undefined);
+  const obstaclesOf = (rel: Relationship): RouteEnv => routeEnv(sheet, placed, rel);
   if (placed.length === 0) {
     const empty = `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>`;
     const report = buildReport({ format: "svg", sheet, ms: 0, bytes: empty.length, emitted: {}, honoured: [], units: {} });
