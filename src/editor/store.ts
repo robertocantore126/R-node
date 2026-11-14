@@ -1,5 +1,6 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, type FreeformShape } from "../core/freeform";
 import { looksLikeDrawio, parseDrawio, type DrawioDiagram } from "../core/drawio";
+import { diagramPrompt, type DiagramKind } from "../core/diagramPrompt";
 import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
@@ -231,6 +232,8 @@ export interface EditorState {
   /** The quiz window that is open — the topic and the quiz id within it — or
    *  null. Opened from the topic's right-click menu; never drawn on the canvas. */
   quizOpen: { nodeId: string; quizId: string } | null;
+  /** The "Diagram from AI" window: the canvas (or topic) the diagram goes into. */
+  aiDiagramOpen: { nodeId: string } | null;
   /** The flashcard window that is open — the topic and the deck id — or null. */
   flashcardsOpen: { nodeId: string; deckId: string } | null;
   /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
@@ -457,6 +460,7 @@ export class EditorStore {
       searchIndex: 0,
       searchOpen: false,
       quizOpen: null,
+      aiDiagramOpen: null,
       flashcardsOpen: null,
       pendingInsert: null,
       sync: "saved",
@@ -2640,14 +2644,19 @@ export class EditorStore {
    * canvas under the selected topic. Returns false when the text is not one.
    */
   private async pasteDrawio(text: string, target: MindNode | null): Promise<boolean> {
-    if (!looksLikeDrawio(text)) return false;
+    return (await this.drawioInto(text, target)) !== "none";
+  }
+
+  /** "none": not a diagram; "failed": a diagram that could not be read; "done": imported. */
+  private async drawioInto(text: string, target: MindNode | null): Promise<"none" | "failed" | "done"> {
+    if (!looksLikeDrawio(text)) return "none";
     const sheet = this.sheet;
     const diagram = await parseDrawio(text);
-    if (this.sheet !== sheet) return true;
+    if (this.sheet !== sheet) return "failed";
     if (!diagram || diagram.vertices.length === 0) {
       this.toast("This draw.io diagram could not be read");
       trace.ignored("paste:drawio", "unreadable or empty diagram");
-      return true;
+      return "failed";
     }
     let canvasId = target?.style.freeform ? target.id : target ? freeformOwner(this.sheet, target.id) : null;
     if (!canvasId) {
@@ -2656,10 +2665,10 @@ export class EditorStore {
       canvasId = this.state.selection[0] ?? null;
     }
     const done = canvasId ? this.importDrawio(canvasId, diagram) : null;
-    if (!done) return true;
+    if (!done) return "failed";
     const skipped = diagram.skippedEdges ? ` (${diagram.skippedEdges} loose arrow${diagram.skippedEdges === 1 ? "" : "s"} skipped)` : "";
     this.toast(`Imported ${done.shapes} shape${done.shapes === 1 ? "" : "s"} and ${done.arrows} arrow${done.arrows === 1 ? "" : "s"}${skipped}`);
-    return true;
+    return "done";
   }
 
   async addFreeformImageFile(parentId: string, file: Blob & { name?: string }, x: number, y: number): Promise<void> {
@@ -5946,6 +5955,47 @@ export class EditorStore {
     this.notify();
   }
 
+  /** Open the "Diagram from AI" window for a canvas or topic. */
+  openAiDiagram(nodeId: string): void {
+    if (!this.model.node(nodeId)) return;
+    this.state.aiDiagramOpen = { nodeId };
+    trace.mark("ui", "ui:modal", { open: true, aiDiagram: nodeId });
+    this.notify();
+  }
+
+  closeAiDiagram(): void {
+    if (this.state.aiDiagramOpen === null) return;
+    this.state.aiDiagramOpen = null;
+    trace.mark("ui", "ui:modal", { open: false });
+    this.notify();
+  }
+
+  /** Put the diagram prompt (with the user's material) on the clipboard. */
+  async copyDiagramPrompt(material: string, kind: DiagramKind): Promise<boolean> {
+    const text = diagramPrompt(material, kind);
+    try {
+      await navigator.clipboard.writeText(text);
+      this.toast("Copied the diagram prompt: paste it into any AI chat");
+      return true;
+    } catch {
+      this.toast("The clipboard is blocked: select the prompt and copy it by hand");
+      return false;
+    }
+  }
+
+  /**
+   * Import an AI's answer (or any draw.io XML) given as text: into the canvas,
+   * or a new canvas under the topic. False when the text holds no diagram.
+   */
+  async importDiagramText(text: string, nodeId: string): Promise<boolean> {
+    const target = this.model.node(nodeId) ?? null;
+    if (!looksLikeDrawio(text)) {
+      this.toast("No draw.io diagram found in that text: it needs an <mxGraphModel> block");
+      return false;
+    }
+    return (await this.drawioInto(text, target)) === "done";
+  }
+
   closeQuiz(): void {
     if (this.state.quizOpen === null) return;
     this.state.quizOpen = null;
@@ -6419,6 +6469,7 @@ export class EditorStore {
     this.state.searchResults = [];
     this.state.searchOpen = false;
     this.state.quizOpen = null;
+    this.state.aiDiagramOpen = null;
     this.state.flashcardsOpen = null;
     // Each document keeps its own unsaved state: coming back to a map edited
     // earlier must still say so (this used to reset to "saved" on every switch).

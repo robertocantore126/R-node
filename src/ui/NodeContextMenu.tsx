@@ -133,6 +133,9 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
       <button role="menuitem" onClick={act(() => store.createFreeformTopic(node.id))}>
         New freeform topic
       </button>
+      <button role="menuitem" title="Ask any AI chat for a draw.io diagram and import it" onClick={act(() => store.openAiDiagram(node.id))}>
+        {node.style.freeform ? "Diagram from AI…" : "New diagram from AI…"}
+      </button>
       <button role="menuitem" onClick={act(() => store.createChartTopic(node.id))}>
         New chart topic
       </button>
