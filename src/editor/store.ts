@@ -3438,6 +3438,126 @@ export class EditorStore {
     return { canvasId, roots };
   }
 
+  /** True when the selection is items of one freeform canvas (the arrows nudge them). */
+  canNudgeSelection(): boolean {
+    const sel = this.state.selection;
+    if (sel.length === 0 || this.state.editingId) return false;
+    if (sel.length === 1) return !!freeformOwner(this.sheet, sel[0]) && !this.model.node(sel[0])?.style.chartNote;
+    return !!this.freeformGroup(sel);
+  }
+
+  /** Move the selected canvas items by (dx, dy) in one undo step; the canvas grows if they cross an edge. */
+  nudgeSelection(dx: number, dy: number): void {
+    const sel = this.state.selection;
+    const roots = sel.length === 1 ? sel : this.freeformGroup(sel)?.roots ?? [];
+    const ops: Op[] = [];
+    for (const id of roots) {
+      const n = this.model.node(id);
+      const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+      if (!n || !parent || !freeformOwner(this.sheet, id)) continue;
+      const at = freeformOffset(n, parent.childrenIds.indexOf(id));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: n.style }));
+    }
+    if (!ops.length) return;
+    this.execOps(ops);
+    this.settleLayoutNow();
+  }
+
+  /**
+   * Exact geometry of a canvas item (the Inspector's X / Y / W / H): X and Y
+   * from the canvas's top-left corner, W and H the box. Setting W or H fixes
+   * both sides, so a text item becomes a box of that size.
+   */
+  itemGeometry(id: string): { x: number; y: number; w: number; h: number } | null {
+    const n = this.model.node(id);
+    const canvasId = freeformOwner(this.sheet, id);
+    const canvas = canvasId ? this.model.node(canvasId) : undefined;
+    if (!n || !canvas) return null;
+    const size = measureNode(n, this.measurer, imageResolver(this.sheet));
+    return { x: Math.round(n.position.x - canvas.position.x), y: Math.round(n.position.y - canvas.position.y), w: Math.round(size.w), h: Math.round(size.h) };
+  }
+
+  setItemGeometry(id: string, patch: Partial<{ x: number; y: number; w: number; h: number }>): void {
+    const n = this.model.node(id);
+    const now = this.itemGeometry(id);
+    const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+    if (!n || !now || !parent) return;
+    const at = freeformOffset(n, parent.childrenIds.indexOf(id));
+    const style: Style = { ...n.style };
+    if (patch.x !== undefined || patch.y !== undefined) {
+      style.freeformPosition = { x: at.x + ((patch.x ?? now.x) - now.x), y: at.y + ((patch.y ?? now.y) - now.y) };
+    }
+    if (patch.w !== undefined || patch.h !== undefined) {
+      style.width = Math.max(16, Math.round(patch.w ?? now.w));
+      style.height = Math.max(16, Math.round(patch.h ?? now.h));
+    }
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: n.style })]);
+    this.settleLayoutNow();
+  }
+
+  /**
+   * Item corner resize (draw.io): the corner follows the pointer, the
+   * opposite corner stays, width AND height change. Shift keeps the shape's
+   * proportions. A live draft, one undo step on release.
+   */
+  private itemResize: { id: string; corner: "nw" | "ne" | "sw" | "se"; style: Style; w: number; h: number; at: { x: number; y: number } } | null = null;
+
+  beginItemResize(id: string, corner: "nw" | "ne" | "sw" | "se"): void {
+    const n = this.model.node(id);
+    const g = this.itemGeometry(id);
+    const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+    if (!n || !g || !parent) return;
+    this.itemResize = { id, corner, style: n.style, w: g.w, h: g.h, at: freeformOffset(n, parent.childrenIds.indexOf(id)) };
+  }
+
+  setItemResizeDraft(dx: number, dy: number, keepRatio = false): void {
+    const r = this.itemResize;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    const west = r.corner === "nw" || r.corner === "sw", north = r.corner === "nw" || r.corner === "ne";
+    let w = Math.max(16, r.w + (west ? -dx : dx));
+    let h = Math.max(16, r.h + (north ? -dy : dy));
+    if (keepRatio && r.w > 0 && r.h > 0) {
+      const k = Math.max(w / r.w, h / r.h);
+      w = Math.max(16, r.w * k); h = Math.max(16, r.h * k);
+    }
+    w = Math.round(w); h = Math.round(h);
+    n.style = {
+      ...r.style,
+      width: w,
+      height: h,
+      freeformPosition: { x: r.at.x + (west ? r.w - w : 0), y: r.at.y + (north ? r.h - h : 0) },
+    };
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  commitItemResize(): void {
+    const r = this.itemResize;
+    this.itemResize = null;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    const style = n.style;
+    n.style = r.style;
+    if (style.width === r.style.width && style.height === r.style.height && style.freeformPosition?.x === r.style.freeformPosition?.x && style.freeformPosition?.y === r.style.freeformPosition?.y) {
+      applyLayout(this.sheet, false, this.measurer);
+      this.notify();
+      return;
+    }
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: r.id, style, prev: r.style })]);
+    this.settleLayoutNow();
+  }
+
+  cancelItemResize(): void {
+    const r = this.itemResize;
+    this.itemResize = null;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    n.style = r.style;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
   private groupDragState: { roots: string[]; orig: Map<string, Style> } | null = null;
 
   /**

@@ -202,7 +202,22 @@ export function Inspector(): JSX.Element {
             </div>
             {freeformOwner(store.sheet, node.id) && !node.style.freeform && (() => {
               const ids = snap.selection.includes(node.id) ? snap.selection : [node.id];
+              const g = store.itemGeometry(node.id);
               return <>
+                {g && (
+                  <div className="field geometry-fields" title="Position from the canvas's top-left corner, and size, in pixels">
+                    <span>Position</span>
+                    <GeometryInput label="X" value={g.x} onCommit={(v) => store.setItemGeometry(node.id, { x: v })} />
+                    <GeometryInput label="Y" value={g.y} onCommit={(v) => store.setItemGeometry(node.id, { y: v })} />
+                  </div>
+                )}
+                {g && (
+                  <div className="field geometry-fields">
+                    <span>Size</span>
+                    <GeometryInput label="W" value={g.w} onCommit={(v) => store.setItemGeometry(node.id, { w: v })} />
+                    <GeometryInput label="H" value={g.h} onCommit={(v) => store.setItemGeometry(node.id, { h: v })} />
+                  </div>
+                )}
                 <div className="field">
                   <span>Label</span>
                   <select
@@ -849,5 +864,29 @@ function SummarySection({ sum }: { sum: Summary }): JSX.Element {
       </div>
       <button className="btn small danger" onClick={() => store.deleteSummary(sum.id)}>Delete summary</button>
     </div>
+  );
+}
+
+/** A number field that writes once, on Enter or when it loses focus (one undo step). */
+function GeometryInput({ label, value, onCommit }: { label: string; value: number; onCommit: (v: number) => void }): JSX.Element {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = (): void => {
+    const v = Number(draft);
+    if (Number.isFinite(v) && v !== value) onCommit(v);
+    else setDraft(String(value));
+  };
+  return (
+    <label className="geometry-input">
+      <span>{label}</span>
+      <input
+        type="number"
+        value={draft}
+        aria-label={label}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      />
+    </label>
   );
 }

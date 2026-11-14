@@ -2584,3 +2584,15 @@ textarea:focus {
   margin: 0;
   font-size: 13px;
 }
+
+/* Inspector X / Y / W / H of a canvas item. */
+.geometry-fields .geometry-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-muted, inherit);
+}
+.geometry-fields .geometry-input input {
+  width: 58px;
+}

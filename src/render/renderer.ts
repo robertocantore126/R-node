@@ -1060,6 +1060,12 @@ export class Renderer {
         ctx.lineWidth = 1.6;
         ctx.stroke();
       }
+      // An item of a canvas also resizes from its corners (width AND height).
+      if (freeformOwner(state.sheet, n.id) && !n.style.chartNote) {
+        const cs = 8 / state.camera.scale;
+        ctx.fillStyle = theme.selection;
+        for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) ctx.fillRect(cx - cs / 2, cy - cs / 2, cs, cs);
+      }
       // A selected chart grows from its edges: "+" pills just outside the box,
       // to the right (a column) and underneath (a row). Same outline style as
       // the width handles; the rects come from chartGrowHandles, which the hit

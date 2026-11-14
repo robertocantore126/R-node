@@ -25,6 +25,8 @@ export type CanvasGesture =
   | { kind: "resize-topic"; nodeId: string; side: "left" | "right"; startWorldX: number; startWidth: number; startX: number }
   /** A canvas resized from one of its four corners; the start is in screen pixels. */
   | { kind: "resize-freeform"; nodeId: string; corner: "nw" | "ne" | "sw" | "se"; startScreenX: number; startScreenY: number }
+  /** An item of a canvas resized from a corner: width and height together. */
+  | { kind: "resize-item"; nodeId: string; corner: "nw" | "ne" | "sw" | "se"; startScreenX: number; startScreenY: number }
   | { kind: "resize-image"; nodeId: string; startWorldX: number; startWidth: number }
   /** A picture carried to another topic; `dropSlot` is the side it would take. */
   | { kind: "move-image"; nodeId: string; slot: ImageSlot; dropSlot: ImageSlot }
@@ -43,13 +45,14 @@ const BACK_TO_IDLE = ["idle"] as const;
 
 /** A gesture only ever starts from idle and only ever ends there. */
 export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
-  idle: ["pan", "marquee", "node-drag", "group-drag", "resize-topic", "resize-freeform", "resize-image", "move-image", "move-cell", "connect", "chart-grow", "ink-stroke", "ink-erase"],
+  idle: ["pan", "marquee", "node-drag", "group-drag", "resize-topic", "resize-freeform", "resize-item", "resize-image", "move-image", "move-cell", "connect", "chart-grow", "ink-stroke", "ink-erase"],
   pan: BACK_TO_IDLE,
   marquee: BACK_TO_IDLE,
   "node-drag": BACK_TO_IDLE,
   "group-drag": BACK_TO_IDLE,
   "resize-topic": BACK_TO_IDLE,
   "resize-freeform": BACK_TO_IDLE,
+  "resize-item": BACK_TO_IDLE,
   "resize-image": BACK_TO_IDLE,
   "move-image": BACK_TO_IDLE,
   "move-cell": BACK_TO_IDLE,
@@ -74,5 +77,5 @@ export function gestureHoldsKeyboard(gesture: CanvasGesture): boolean {
 }
 
 export function isResizeGesture(kind: CanvasGesture["kind"]): boolean {
-  return kind === "resize-topic" || kind === "resize-freeform" || kind === "resize-image";
+  return kind === "resize-topic" || kind === "resize-freeform" || kind === "resize-item" || kind === "resize-image";
 }
