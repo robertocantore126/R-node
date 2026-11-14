@@ -81,3 +81,29 @@ export function trimRuns(runs: TextRun[]): TextRun[] {
   last.text = last.text.slice(0, last.text.length - trailing.length);
   return normalizeRuns(out);
 }
+
+/**
+ * Lines of a plain label wrapped at `maxWidth` (word by word, a too-long word
+ * kept whole), for labels R-node paints itself (Style.titleAt: frames, the
+ * actor). The canvas renderer and both exporters wrap through this one
+ * function, each with its own width measure, so they break the same way.
+ */
+export function wrapPlainLines(text: string, maxWidth: number, width: (s: string) => number): string[] {
+  const out: string[] = [];
+  for (const para of text.split(/\r?\n/)) {
+    const words = para.split(/\s+/).filter(Boolean);
+    if (words.length === 0) { out.push(""); continue; }
+    let line = words[0];
+    for (const w of words.slice(1)) {
+      const next = `${line} ${w}`;
+      if (width(next) <= maxWidth) line = next;
+      else { out.push(line); line = w; }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/** Padding between a self-painted label and its box edge, and its line height factor. */
+export const OWN_LABEL_PAD = 8;
+export const OWN_LABEL_LINE = 1.25;

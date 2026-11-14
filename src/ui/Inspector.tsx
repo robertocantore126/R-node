@@ -3,6 +3,7 @@ import { useStore } from "../editor/context";
 import type { ArrowHead, ConnectorStyle, Group, GroupShape, Relationship, Style, Summary, TaskStatus, Priority, TopicShape } from "../core/types";
 import { relHeads, relWidth } from "../layout/relationship";
 import { BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_SHAPES } from "../core/types";
+import { DIAGRAM_SHAPES } from "../core/diagramShapes";
 import { BorderPicker } from "./BorderPicker";
 import { THEMES } from "../render/theme";
 import { makeOp, type Op } from "../core/ops";
@@ -11,9 +12,12 @@ import { plainToRuns } from "../core/text";
 import { chartSlotNote } from "../core/chartNotes";
 import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
 import { InkControls } from "./InkControls";
+import { freeformOwner } from "../core/freeform";
+import { ColorControls, ColorSwatch } from "./ColorControls";
+import { DIAGRAM_PALETTE } from "../core/paint";
 const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
 
-const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "underline", "none"];
+const SHAPES: TopicShape[] = ["rounded", "rect", "capsule", "circle", "diamond", "hexagon", ...DIAGRAM_SHAPES, "underline", "none"];
 const STATUSES: TaskStatus[] = ["not-started", "in-progress", "blocked", "completed", "cancelled"];
 const PRIORITIES: Priority[] = ["none", "low", "medium", "high", "urgent"];
 /** Cell shapes offered for a gallery grid, as width ÷ height. */
@@ -121,6 +125,7 @@ export function Inspector(): JSX.Element {
         <div className="inspector-label">Style</div>
         {node.style.freeform && <>
           <p className="muted">Double-click inside to add text. Drag topics, text or images into this canvas.</p>
+          <button className="btn small" title="Ask any AI chat for a draw.io diagram and import it here" onClick={() => store.openAiDiagram(node.id)}>✦ Diagram from AI…</button>
           <div className="field"><span>Canvas width</span><input type="number" min={240} max={6000} value={node.style.width ?? 720} onChange={(e) => store.setNodeStyle(node.id, { width: Math.max(240, Math.min(6000, Number(e.target.value) || 720)) })} /></div>
           <div className="field"><span>Canvas height</span><input type="number" min={160} max={6000} value={node.style.height ?? 480} onChange={(e) => store.setNodeStyle(node.id, { height: Math.max(160, Math.min(6000, Number(e.target.value) || 480)) })} /></div>
           <InkControls canvasId={node.id} />
@@ -131,14 +136,6 @@ export function Inspector(): JSX.Element {
           </p>
         ) : (
           <>
-            <div className="field">
-              <span>Fill</span>
-              <input type="color" value={node.style.fill ?? "#4f46e5"} onChange={(e) => store.setNodeStyle(node.id, { fill: e.target.value })} />
-            </div>
-            <div className="field">
-              <span>Text</span>
-              <input type="color" value={node.style.textColor ?? "#ffffff"} onChange={(e) => store.setNodeStyle(node.id, { textColor: e.target.value })} />
-            </div>
             <div className="field">
               <span>Font size</span>
               <input type="number" min={10} max={48} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
@@ -203,12 +200,80 @@ export function Inspector(): JSX.Element {
                 {SHAPES.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
-            <button className="btn small" onClick={() => store.setNodeStyle(node.id, { fill: undefined, textColor: undefined })}>
-              Reset to branch color
-            </button>
+            {freeformOwner(store.sheet, node.id) && !node.style.freeform && (() => {
+              const ids = snap.selection.includes(node.id) ? snap.selection : [node.id];
+              const g = store.itemGeometry(node.id);
+              return <>
+                {g && (
+                  <div className="field geometry-fields" title="Position from the canvas's top-left corner, and size, in pixels">
+                    <span>Position</span>
+                    <GeometryInput label="X" value={g.x} onCommit={(v) => store.setItemGeometry(node.id, { x: v })} />
+                    <GeometryInput label="Y" value={g.y} onCommit={(v) => store.setItemGeometry(node.id, { y: v })} />
+                  </div>
+                )}
+                {g && (
+                  <div className="field geometry-fields">
+                    <span>Size</span>
+                    <GeometryInput label="W" value={g.w} onCommit={(v) => store.setItemGeometry(node.id, { w: v })} />
+                    <GeometryInput label="H" value={g.h} onCommit={(v) => store.setItemGeometry(node.id, { h: v })} />
+                  </div>
+                )}
+                <div className="field">
+                  <span>Label</span>
+                  <select
+                    value={node.style.titleAt ?? "center"}
+                    title="Where the label sits in the box. Top/bottom labels are renamed in the Topic field above."
+                    onChange={(e) => store.setSelectionStyle({ titleAt: e.target.value === "center" ? undefined : (e.target.value as "top" | "bottom") }, ids)}
+                  >
+                    <option value="center">centre</option>
+                    <option value="top">top</option>
+                    <option value="bottom">bottom</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <span>Frame</span>
+                  <input
+                    type="checkbox"
+                    checked={!!node.style.frame}
+                    title="A visual box behind other items: it holds nothing, and clicks inside it reach the canvas"
+                    onChange={(e) => store.setSelectionStyle((n) => (e.target.checked ? { frame: true, titleAt: n.style.titleAt ?? "top" } : { frame: undefined }), ids)}
+                  />
+                </div>
+              </>;
+            })()}
           </>
         )}
       </div>
+
+      {!node.style.code && (!node.style.freeform || node.style.container) && (
+        <ColorControls node={node} ids={snap.selection.includes(node.id) ? snap.selection : [node.id]} />
+      )}
+
+      {freeformOwner(store.sheet, node.id) && !node.style.chartNote && (
+        <div className="inspector-section">
+          <div className="inspector-label" data-help="Arrange" data-help-more="Align and distribute act on the selected items of this canvas; Front/Back change which item is drawn on top.">Arrange</div>
+          {snap.selection.length >= 2 && (
+            <div className="arrange-row" role="group" aria-label="Align">
+              {([
+                ["left", "⇤", "Align left edges"], ["center", "↔", "Align centres horizontally"], ["right", "⇥", "Align right edges"],
+                ["top", "⤒", "Align top edges"], ["middle", "↕", "Align centres vertically"], ["bottom", "⤓", "Align bottom edges"],
+              ] as const).map(([edge, icon, title]) => (
+                <button key={edge} className="btn small" title={title} aria-label={title} onClick={() => store.alignSelection(edge)}>{icon}</button>
+              ))}
+            </div>
+          )}
+          {snap.selection.length >= 3 && (
+            <div className="arrange-row" role="group" aria-label="Distribute">
+              <button className="btn small" title="Equal horizontal gaps" onClick={() => store.distributeSelection("h")}>Distribute ↔</button>
+              <button className="btn small" title="Equal vertical gaps" onClick={() => store.distributeSelection("v")}>Distribute ↕</button>
+            </div>
+          )}
+          <div className="arrange-row">
+            <button className="btn small" title="Draw in front of the other items" onClick={() => store.reorderSelection("front")}>To front</button>
+            <button className="btn small" title="Draw behind the other items" onClick={() => store.reorderSelection("back")}>To back</button>
+          </div>
+        </div>
+      )}
 
       {!node.style.code && !node.style.freeform && (
         <div className="inspector-section">
@@ -654,6 +719,16 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
         />
       </div>
       <div className="field">
+        <span>Colour</span>
+        <ColorSwatch value={rel.color} fallback="#4f46e5" title="Arrow colour" onPick={(hex) => store.setRelationship(rel.id, { color: hex })} />
+        <button className="btn small" title="The theme's arrow colour" aria-pressed={rel.color === undefined} onClick={() => store.setRelationship(rel.id, { color: undefined })}>Auto</button>
+      </div>
+      <div className="color-presets" role="group" aria-label="Arrow colours">
+        {DIAGRAM_PALETTE.map((p) => (
+          <button key={p.name} className="color-preset color-preset-line" title={p.name} aria-label={`${p.name} arrow`} style={{ background: p.stroke }} onClick={() => store.setRelationship(rel.id, { color: p.stroke })} />
+        ))}
+      </div>
+      <div className="field">
         <span>Line</span>
         <select value={rel.connector ?? "curved"} onChange={(e) => store.setRelationship(rel.id, { connector: e.target.value as ConnectorStyle })}>
           <option value="curved">curved</option>
@@ -691,12 +766,16 @@ function RelationshipSection({ rel }: { rel: Relationship }): JSX.Element {
       <div className="inspector-actions">
         <button className="btn small" title="Swap source and target" onClick={() => store.setRelationship(rel.id, {
           fromId: rel.toId, toId: rel.fromId, fromAnchor: rel.toAnchor, toAnchor: rel.fromAnchor, startArrow: heads.end, endArrow: heads.start, bidirectional: undefined,
+          waypoints: rel.waypoints ? [...rel.waypoints].reverse() : undefined,
         })}>⇄ Reverse</button>
         {(rel.fromAnchor || rel.toAnchor) && (
           <button className="btn small" title="Let both ends float to the nearest side again" onClick={() => store.setRelationship(rel.id, { fromAnchor: undefined, toAnchor: undefined })}>Unpin ends</button>
         )}
+        {(rel.waypoints?.length || rel.labelOffset) && (
+          <button className="btn small" title="Remove the bends and put the label back in the middle" onClick={() => store.setRelationship(rel.id, { waypoints: undefined, labelOffset: undefined })}>Reset route</button>
+        )}
       </div>
-      <p className="muted">Drag an end of the selected line onto another topic, or onto another side of the same one, to move it.</p>
+      <p className="muted">Drag an end onto another topic or side to move it. Drag a handle on the line to bend it (double-click a bend to remove it); drag the label to move it. Hold Alt to place off the grid.</p>
       <button className="btn small danger" onClick={() => store.deleteSelectedRelationship()}>Delete relationship</button>
     </div>
   );
@@ -815,5 +894,29 @@ function SummarySection({ sum }: { sum: Summary }): JSX.Element {
       </div>
       <button className="btn small danger" onClick={() => store.deleteSummary(sum.id)}>Delete summary</button>
     </div>
+  );
+}
+
+/** A number field that writes once, on Enter or when it loses focus (one undo step). */
+function GeometryInput({ label, value, onCommit }: { label: string; value: number; onCommit: (v: number) => void }): JSX.Element {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = (): void => {
+    const v = Number(draft);
+    if (Number.isFinite(v) && v !== value) onCommit(v);
+    else setDraft(String(value));
+  };
+  return (
+    <label className="geometry-input">
+      <span>{label}</span>
+      <input
+        type="number"
+        value={draft}
+        aria-label={label}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      />
+    </label>
   );
 }

@@ -1,4 +1,6 @@
 import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, type FreeformShape } from "../core/freeform";
+import { looksLikeDrawio, parseDrawio, type DrawioDiagram } from "../core/drawio";
+import { diagramPrompt } from "../core/diagramPrompt";
 import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
 import { chartPlaceholderFile } from "./chartPlaceholder";
 import { fetchImageAsFile, resolveFetcher, type FetchFn } from "./externalImage";
@@ -230,6 +232,8 @@ export interface EditorState {
   /** The quiz window that is open — the topic and the quiz id within it — or
    *  null. Opened from the topic's right-click menu; never drawn on the canvas. */
   quizOpen: { nodeId: string; quizId: string } | null;
+  /** The "Diagram from AI" window: the canvas (or topic) the diagram goes into. */
+  aiDiagramOpen: { nodeId: string } | null;
   /** The flashcard window that is open — the topic and the deck id — or null. */
   flashcardsOpen: { nodeId: string; deckId: string } | null;
   /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
@@ -456,6 +460,7 @@ export class EditorStore {
       searchIndex: 0,
       searchOpen: false,
       quizOpen: null,
+      aiDiagramOpen: null,
       flashcardsOpen: null,
       pendingInsert: null,
       sync: "saved",
@@ -781,16 +786,60 @@ export class EditorStore {
       while (n?.parentId && !seen.has(n.id)) { seen.add(n.id); count++; n = this.model.node(n.parentId); }
       return count;
     };
+    const apply = (op: Op): void => {
+      inverses.push(applyWithInverse(this.sheet, op));
+      ops.push(op);
+    };
+    // A canvas laid out by the map cannot move its own left/top edge, so when
+    // it grows that way its content would jump on screen; the camera follows
+    // the content instead (measured after the layout, below).
+    const follow: { id: string; before: { x: number; y: number }; dx: number; dy: number }[] = [];
     for (const id of [...canvases].sort((a, b) => depth(b) - depth(a))) {
       const node = this.model.node(id);
       if (!node?.style.freeform) continue;
+      // Content past the left edge or above the title band: the canvas grows on
+      // that side. Its items shift right/down by the same amount and the canvas
+      // itself moves left/up, so nothing moves in the world.
+      const margin = node.style.container ? 0 : FREEFORM_PADDING;
+      const resolve = imageResolver(this.sheet);
+      const tight = freeformContentBounds(this.sheet, id, (n) => measureNode(n, this.measurer, resolve), true);
+      const dx = Number.isFinite(tight.minX) && tight.minX < margin ? Math.ceil(margin - tight.minX) : 0;
+      const dy = Number.isFinite(tight.minY) && tight.minY < FREEFORM_HEADER + margin ? Math.ceil(FREEFORM_HEADER + margin - tight.minY) : 0;
+      if (dx || dy) {
+        node.childrenIds.forEach((childId, index) => {
+          const child = this.model.node(childId);
+          if (!child) return;
+          const at = freeformOffset(child, index);
+          apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: childId, style: { ...child.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: child.style }));
+        });
+        const style: Style = { ...node.style, width: (node.style.width ?? 720) + dx, height: (node.style.height ?? 480) + dy };
+        if (node.style.ink?.length) style.ink = node.style.ink.map((s) => ({ ...s, path: s.path.map((v, i) => v + (i % 2 ? dy : dx)) }));
+        if (freeformOwner(this.sheet, id)) {
+          const at = freeformOffset(node, this.model.node(node.parentId!)?.childrenIds.indexOf(id) ?? 0);
+          style.freeformPosition = { x: at.x - dx, y: at.y - dy };
+        } else if (node.position.manual) {
+          apply(makeOp<Op & { type: "setPosition" }>("setPosition", { id, x: node.position.x - dx, y: node.position.y - dy, manual: true, prev: { ...node.position } }));
+        } else {
+          follow.push({ id, before: { x: node.position.x, y: node.position.y }, dx, dy });
+        }
+        apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: node.style }));
+        trace.applied("freeform:grow-left-up", { id, dx, dy, moved: follow.at(-1)?.id === id ? "camera" : "canvas" });
+      }
+      const grown = this.model.node(id)!;
       const min = this.freeformMinimumSize(id);
-      const width = Math.max(node.style.width ?? 720, min.w);
-      const height = Math.max(node.style.height ?? 480, min.h);
-      if (width === node.style.width && height === node.style.height) continue;
-      const op = makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, width, height }, prev: node.style });
-      inverses.push(applyWithInverse(this.sheet, op));
-      ops.push(op);
+      const width = Math.max(grown.style.width ?? 720, min.w);
+      const height = Math.max(grown.style.height ?? 480, min.h);
+      if (width === grown.style.width && height === grown.style.height) continue;
+      apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...grown.style, width, height }, prev: grown.style }));
+    }
+    if (follow.length) {
+      applyLayout(this.sheet, false, this.measurer);
+      const f = follow[0];
+      const after = this.model.node(f.id)?.position;
+      if (after) {
+        const cam = this.state.camera;
+        this.state.camera = { ...cam, x: cam.x + (after.x + f.dx - f.before.x), y: cam.y + (after.y + f.dy - f.before.y) };
+      }
     }
     if (!opts?.skipHistory) this.history.push(ops, inverses);
     trace.op(ops.map((o) => o.type).join(","), ops.length, (typeof performance !== "undefined" ? performance.now() : 0) - t);
@@ -2051,11 +2100,11 @@ export class EditorStore {
     // would be indistinguishable from a defect (§4bis). A CHART is the
     // exception: its title is a heading over a fixed board, and the overlay
     // sits above the board exactly as it sits above any topic's images.
-    if (node.style.code || (node.style.gallery && !node.style.gallery.chart) || node.style.freeform) {
+    if (node.style.code || (node.style.gallery && !node.style.gallery.chart) || node.style.freeform || node.style.titleAt) {
       this.setSelectionTarget({ kind: "nodes", ids: [id] });
       this.state.editingId = null;
       this.state.pendingInsert = null;
-      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : node.style.titleAt ? "a top/bottom label is renamed in the Inspector" : "gallery topic is a grid of pictures";
       return trace.ignored("edit:start", why, { nodeId: id });
     }
     this.setSelectionTarget({ kind: "nodes", ids: [id] });
@@ -2483,6 +2532,28 @@ export class EditorStore {
   }
 
   /**
+   * A diagram container (swimlane) inside a canvas, centred on the point: a
+   * nested canvas drawn as a box with a title band. Items dropped or pasted
+   * into it live in it and move with it.
+   */
+  createFreeformContainer(parentId: string, x: number, y: number): string | null {
+    const parent = this.model.node(parentId);
+    if (!parent?.style.freeform) return null;
+    const id = uid("n"), w = 260, h = 170;
+    const px = Math.max(FREEFORM_PADDING, Math.round(x - w / 2 - parent.position.x));
+    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, Math.round(y - h / 2 - parent.position.y));
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
+      title: "Container", titleRuns: [{ text: "Container" }],
+      style: { freeform: true, container: { headerFill: "transparent" }, freeformPosition: { x: px, y: py }, width: w, height: h, shape: "rect", fill: "transparent", borderWidth: 1, fontSize: 13 },
+      position: { x: parent.position.x + px, y: parent.position.y + py, manual: false },
+    })]);
+    this.settleLayoutNow();
+    this.select(id);
+    return id;
+  }
+
+  /**
    * Real document nodes share editing, links, copy, undo and persistence.
    *
    * `shape` (the double-click picker, draw.io style) makes a box of a fixed
@@ -2502,7 +2573,7 @@ export class EditorStore {
     const look: Partial<Style> = imageId
       ? { image: imageId, imageWidth: 180 }
       : size && shape
-        ? { shape, width: size.w, height: size.h, borderWidth: 1.5 }
+        ? { shape, width: size.w, height: size.h, borderWidth: 1.5, ...(shape === "actor" ? { titleAt: "bottom" as const } : {}) }
         : { shape: "none", align: "left" };
     this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
       id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
@@ -2513,6 +2584,148 @@ export class EditorStore {
     this.settleLayoutNow();
     if (!text && !imageId) this.startEdit(id); else this.select(id);
     return id;
+  }
+
+  /**
+   * Import a draw.io diagram into a canvas: every box becomes an item, every
+   * connected edge an arrow, in ONE history entry (one Ctrl+Z removes it all)
+   * and the canvas grows to hold it (execOps). An empty canvas takes it at its
+   * top-left; one with content takes it below what is already there. The new
+   * items end up selected, so a drag moves the whole diagram.
+   */
+  importDrawio(canvasId: string, diagram: DrawioDiagram): { shapes: number; arrows: number } | null {
+    const canvas = this.model.node(canvasId);
+    if (!canvas?.style.freeform || diagram.vertices.length === 0) return null;
+    const resolve = imageResolver(this.sheet);
+    let top = FREEFORM_HEADER + FREEFORM_PADDING;
+    if (canvas.childrenIds.length || (canvas.style.ink?.length ?? 0) > 0) {
+      top = Math.max(top, freeformContentBounds(this.sheet, canvasId, (n) => measureNode(n, this.measurer, resolve)).maxY + 32);
+    }
+    const minX = Math.min(...diagram.vertices.map((v) => v.x));
+    const minY = Math.min(...diagram.vertices.map((v) => v.y));
+    const dx = FREEFORM_PADDING - minX, dy = top - minY;
+    const byId = new Map(diagram.vertices.map((v) => [v.id, v]));
+    // A container's title band is FREEFORM_HEADER tall (a draw.io swimlane's is
+    // usually 23-40): what would sit under it moves down, and the container
+    // grows by the same amount, so nothing inside is covered or reshuffled.
+    const shift = new Map<string, number>();
+    for (const v of diagram.vertices) {
+      if (!v.container) continue;
+      const kids = diagram.vertices.filter((k) => k.parent === v.id);
+      const minRel = kids.length ? Math.min(...kids.map((k) => k.y - v.y)) : Infinity;
+      shift.set(v.id, Math.max(0, Math.ceil(FREEFORM_HEADER + 6 - minRel)));
+    }
+    const idMap = new Map<string, string>();
+    const world = new Map<string, { x: number; y: number }>();
+    const nextIndex = new Map<string, number>([[canvasId, canvas.childrenIds.length]]);
+    const ops: Op[] = [];
+    for (const v of diagram.vertices) {
+      const id = uid("n");
+      idMap.set(v.id, id);
+      const holder = v.parent ? byId.get(v.parent) : undefined;
+      const parentId = holder ? idMap.get(holder.id) : canvasId;
+      if (!parentId) continue; // a holder that was not created (cannot happen: holders sort first)
+      const px = Math.round(holder ? v.x - holder.x : v.x + dx);
+      const py = Math.round(holder ? v.y - holder.y + (shift.get(holder.id) ?? 0) : v.y + dy);
+      const origin = holder ? world.get(parentId)! : canvas.position;
+      world.set(id, { x: origin.x + px, y: origin.y + py });
+      const index = nextIndex.get(parentId) ?? 0;
+      nextIndex.set(parentId, index + 1);
+      const style: Style = {
+        freeformPosition: { x: px, y: py },
+        shape: v.shape,
+        width: Math.round(v.w),
+        height: Math.round(v.h + (shift.get(v.id) ?? 0)),
+        fontSize: v.fontSize ?? 12,
+        align: v.align ?? "center",
+      };
+      if (v.frame) style.frame = true;
+      if (v.rotation) style.rotation = v.rotation;
+      if (v.titleAt) style.titleAt = v.titleAt;
+      if (v.container) {
+        style.freeform = true;
+        style.container = v.headerFill ? { headerFill: v.headerFill } : {};
+        style.fontSize = v.fontSize ?? 13;
+      }
+      if (!v.text) style.borderWidth = v.strokeWidth ?? 1;
+      if (v.fill) style.fill = v.fill;
+      if (v.stroke) style.stroke = v.stroke;
+      if (v.textColor) style.textColor = v.textColor;
+      if (v.dashed) style.borderStyle = "dashed";
+      if (v.bold) style.fontWeight = 700;
+      if (v.italic) style.italic = true;
+      if (v.underline) style.underline = true;
+      if (v.opacity !== undefined) style.opacity = v.opacity;
+      ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
+        id, nodeType: "subtopic", parentId, index,
+        title: v.label, titleRuns: v.label ? [{ text: v.label }] : [],
+        style,
+        position: { ...world.get(id)!, manual: false },
+      }));
+    }
+    let arrows = 0;
+    for (const e of diagram.edges) {
+      const fromId = idMap.get(e.source), toId = idMap.get(e.target);
+      if (!fromId || !toId) continue;
+      const rel: Relationship = { id: uid("rel"), fromId, toId, connector: e.connector, endArrow: e.endArrow, startArrow: e.startArrow };
+      if (e.label) rel.label = e.label;
+      if (e.color && e.color !== "transparent") rel.color = e.color;
+      if (e.width) rel.width = e.width;
+      if (e.lineStyle) rel.lineStyle = e.lineStyle;
+      if (e.fromAnchor) rel.fromAnchor = e.fromAnchor;
+      if (e.toAnchor) rel.toAnchor = e.toAnchor;
+      if (e.points?.length) {
+        // Waypoints are measured from the canvas holding the source: this
+        // canvas (where the diagram was moved by dx, dy) or an imported
+        // container (its own origin, plus the room made under its header).
+        const src = byId.get(e.source);
+        const holder = src?.parent ? byId.get(src.parent) : undefined;
+        const ox = holder ? -holder.x : dx, oy = holder ? -holder.y + (shift.get(holder.id) ?? 0) : dy;
+        rel.waypoints = e.points.map((p) => ({ x: Math.round(p.x + ox), y: Math.round(p.y + oy) }));
+      }
+      ops.push(makeOp<Op & { type: "createRelationship" }>("createRelationship", { relationship: rel }));
+      arrows++;
+    }
+    this.execOps(ops);
+    this.settleLayoutNow();
+    // The top level only: containers carry what they hold, and a selection
+    // spanning two canvases could not be dragged as one.
+    this.selectMany(diagram.vertices.filter((v) => !v.parent).map((v) => idMap.get(v.id)!));
+    trace.applied("paste:drawio", { canvasId, shapes: idMap.size, arrows, skippedEdges: diagram.skippedEdges });
+    return { shapes: idMap.size, arrows };
+  }
+
+  /**
+   * Paste route for a draw.io diagram: into the selected canvas, or into a new
+   * canvas under the selected topic. Returns false when the text is not one.
+   */
+  private async pasteDrawio(text: string, target: MindNode | null): Promise<boolean> {
+    return (await this.drawioInto(text, target)) !== "none";
+  }
+
+  /** "none": not a diagram; "failed": a diagram that could not be read; "done": imported. */
+  private async drawioInto(text: string, target: MindNode | null): Promise<"none" | "failed" | "done"> {
+    if (!looksLikeDrawio(text)) return "none";
+    const sheet = this.sheet;
+    const diagram = await parseDrawio(text);
+    if (this.sheet !== sheet) return "failed";
+    if (!diagram || diagram.vertices.length === 0) {
+      this.toast("This draw.io diagram could not be read");
+      trace.ignored("paste:drawio", "unreadable or empty diagram");
+      return "failed";
+    }
+    let canvasId = target?.style.freeform ? target.id : target ? freeformOwner(this.sheet, target.id) : null;
+    if (!canvasId) {
+      const parent = target ?? this.model.rootNode;
+      this.createFreeformTopic(parent.id);
+      canvasId = this.state.selection[0] ?? null;
+    }
+    const done = canvasId ? this.importDrawio(canvasId, diagram) : null;
+    if (!done) return "failed";
+    const skipped = diagram.skippedEdges ? ` (${diagram.skippedEdges} loose arrow${diagram.skippedEdges === 1 ? "" : "s"} skipped)` : "";
+    const cut = (diagram.truncated ? " — the diagram was cut off, so its end is missing" : "") + (diagram.pages ? ` (page 1 of ${diagram.pages})` : "");
+    this.toast(`Imported ${done.shapes} shape${done.shapes === 1 ? "" : "s"} and ${done.arrows} arrow${done.arrows === 1 ? "" : "s"}${skipped}${cut}`);
+    return "done";
   }
 
   async addFreeformImageFile(parentId: string, file: Blob & { name?: string }, x: number, y: number): Promise<void> {
@@ -2528,12 +2741,9 @@ export class EditorStore {
   moveIntoFreeform(id: string, parentId: string, x: number, y: number): void {
     const node = this.model.node(id), parent = this.model.node(parentId);
     if (!node || !parent?.style.freeform || node.type === "central" || id === parentId || this.isDescendant(id, parentId)) return;
-    const resolve = imageResolver(this.sheet);
-    const ext = measureNode(node, this.measurer, resolve);
-    const bounds = node.style.freeform ? { minX: 0, minY: 0, maxX: ext.w, maxY: ext.h } : freeformContentBounds(this.sheet, id, (n) => measureNode(n, this.measurer, resolve));
-    const box = measureNode(parent, this.measurer);
-    const px = Math.max(FREEFORM_PADDING - bounds.minX, Math.min(x - parent.position.x, box.w - Math.max(ext.w, bounds.maxX) - FREEFORM_PADDING));
-    const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING - bounds.minY, Math.min(y - parent.position.y, box.h - Math.max(ext.h, bounds.maxY) - FREEFORM_PADDING));
+    // No clamp: dropped past any edge, the canvas grows on that side (execOps).
+    const px = x - parent.position.x;
+    const py = y - parent.position.y;
     const internal = freeformOwner(this.sheet, id) === parentId;
     const actualParent = internal && node.parentId ? this.model.requireNode(node.parentId) : parent;
     const offset = { x: parent.position.x + px - actualParent.position.x, y: parent.position.y + py - actualParent.position.y };
@@ -3216,6 +3426,328 @@ export class EditorStore {
     this.notify();
   }
 
+  /**
+   * A multi-selection that lives inside ONE freeform canvas, reduced to the
+   * items that move: a selected topic whose ancestor is also selected rides
+   * along with it (offsets are parent-relative), so moving both would move it
+   * twice. Null when the selection is not such a group.
+   */
+  freeformGroup(ids: string[]): { canvasId: string; roots: string[] } | null {
+    if (ids.length < 2) return null;
+    const canvasId = freeformOwner(this.sheet, ids[0]);
+    if (!canvasId || ids.some((id) => freeformOwner(this.sheet, id) !== canvasId || this.model.node(id)?.style.chartNote)) return null;
+    const set = new Set(ids);
+    const roots = ids.filter((id) => {
+      let p = this.model.node(id)?.parentId;
+      while (p && p !== canvasId) {
+        if (set.has(p)) return false;
+        p = this.model.node(p)?.parentId;
+      }
+      return true;
+    });
+    return { canvasId, roots };
+  }
+
+  /** The selected items of one canvas that arrange together (a selected item's descendants ride along). */
+  private arrangeRoots(): string[] {
+    const sel = this.state.selection;
+    if (sel.length === 1) return freeformOwner(this.sheet, sel[0]) ? sel : [];
+    return this.freeformGroup(sel)?.roots ?? [];
+  }
+
+  /** Move each item so its box lands at (x, y) in canvas coordinates; one batch. */
+  private placeItems(targets: Map<string, { x: number; y: number }>): void {
+    const ops: Op[] = [];
+    for (const [id, to] of targets) {
+      const n = this.model.node(id), g = this.itemGeometry(id);
+      const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+      if (!n || !g || !parent) continue;
+      if (Math.round(to.x) === g.x && Math.round(to.y) === g.y) continue;
+      const at = freeformOffset(n, parent.childrenIds.indexOf(id));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, freeformPosition: { x: Math.round(at.x + to.x - g.x), y: Math.round(at.y + to.y - g.y) } }, prev: n.style }));
+    }
+    if (!ops.length) return;
+    this.execOps(ops);
+    this.settleLayoutNow();
+  }
+
+  /** Align the selected canvas items (draw.io's Arrange > Align): to the selection's own edge or centre. */
+  alignSelection(edge: "left" | "center" | "right" | "top" | "middle" | "bottom"): void {
+    const items = this.arrangeRoots().map((id) => ({ id, g: this.itemGeometry(id)! })).filter((i) => i.g);
+    if (items.length < 2) return;
+    const minX = Math.min(...items.map((i) => i.g.x)), maxX = Math.max(...items.map((i) => i.g.x + i.g.w));
+    const minY = Math.min(...items.map((i) => i.g.y)), maxY = Math.max(...items.map((i) => i.g.y + i.g.h));
+    const targets = new Map<string, { x: number; y: number }>();
+    for (const { id, g } of items) {
+      const x = edge === "left" ? minX : edge === "right" ? maxX - g.w : edge === "center" ? (minX + maxX) / 2 - g.w / 2 : g.x;
+      const y = edge === "top" ? minY : edge === "bottom" ? maxY - g.h : edge === "middle" ? (minY + maxY) / 2 - g.h / 2 : g.y;
+      targets.set(id, { x, y });
+    }
+    this.placeItems(targets);
+  }
+
+  /** Equal gaps between the selected items, keeping the outermost two where they are. */
+  distributeSelection(axis: "h" | "v"): void {
+    const items = this.arrangeRoots().map((id) => ({ id, g: this.itemGeometry(id)! })).filter((i) => i.g);
+    if (items.length < 3) return;
+    const pos = (g: { x: number; y: number }): number => (axis === "h" ? g.x : g.y);
+    const len = (g: { w: number; h: number }): number => (axis === "h" ? g.w : g.h);
+    items.sort((a, b) => pos(a.g) - pos(b.g));
+    const first = items[0].g, last = items[items.length - 1].g;
+    const total = pos(last) + len(last) - pos(first);
+    const gap = (total - items.reduce((sum, i) => sum + len(i.g), 0)) / (items.length - 1);
+    const targets = new Map<string, { x: number; y: number }>();
+    let at = pos(first);
+    for (const { id, g } of items) {
+      targets.set(id, axis === "h" ? { x: at, y: g.y } : { x: g.x, y: at });
+      at += len(g) + gap;
+    }
+    this.placeItems(targets);
+  }
+
+  /** Bring the selected canvas items in front of their siblings, or send them behind (draw order). */
+  reorderSelection(where: "front" | "back"): void {
+    const roots = this.arrangeRoots();
+    const ops: Op[] = [];
+    const ordered = where === "front" ? roots : [...roots].reverse();
+    for (const id of ordered) {
+      const n = this.model.node(id);
+      const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+      if (!n || !parent) continue;
+      const from = parent.childrenIds.indexOf(id);
+      const to = where === "front" ? parent.childrenIds.length - 1 : 0;
+      if (from === to) continue;
+      const op = makeOp<Op & { type: "moveNode" }>("moveNode", { id, fromParentId: parent.id, fromIndex: from, toParentId: parent.id, toIndex: to });
+      ops.push(op);
+      // Later ops read the order this one leaves.
+      parent.childrenIds.splice(from, 1);
+      parent.childrenIds.splice(to, 0, id);
+    }
+    // Undo the preview splices: execOps applies the same moves itself.
+    for (const op of [...ops].reverse()) {
+      const m = op as Op & { type: "moveNode" };
+      const parent = this.model.requireNode(m.toParentId!);
+      parent.childrenIds.splice(m.toIndex, 1);
+      parent.childrenIds.splice(m.fromIndex, 0, m.id);
+    }
+    if (!ops.length) return;
+    this.execOps(ops);
+    this.settleLayoutNow();
+  }
+
+  /** True when the selection is items of one freeform canvas (the arrows nudge them). */
+  canNudgeSelection(): boolean {
+    const sel = this.state.selection;
+    if (sel.length === 0 || this.state.editingId) return false;
+    if (sel.length === 1) return !!freeformOwner(this.sheet, sel[0]) && !this.model.node(sel[0])?.style.chartNote;
+    return !!this.freeformGroup(sel);
+  }
+
+  /** Move the selected canvas items by (dx, dy) in one undo step; the canvas grows if they cross an edge. */
+  nudgeSelection(dx: number, dy: number): void {
+    const sel = this.state.selection;
+    const roots = sel.length === 1 ? sel : this.freeformGroup(sel)?.roots ?? [];
+    const ops: Op[] = [];
+    for (const id of roots) {
+      const n = this.model.node(id);
+      const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+      if (!n || !parent || !freeformOwner(this.sheet, id)) continue;
+      const at = freeformOffset(n, parent.childrenIds.indexOf(id));
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...n.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: n.style }));
+    }
+    if (!ops.length) return;
+    this.execOps(ops);
+    this.settleLayoutNow();
+  }
+
+  /**
+   * Exact geometry of a canvas item (the Inspector's X / Y / W / H): X and Y
+   * from the canvas's top-left corner, W and H the box. Setting W or H fixes
+   * both sides, so a text item becomes a box of that size.
+   */
+  itemGeometry(id: string): { x: number; y: number; w: number; h: number } | null {
+    const n = this.model.node(id);
+    const canvasId = freeformOwner(this.sheet, id);
+    const canvas = canvasId ? this.model.node(canvasId) : undefined;
+    if (!n || !canvas) return null;
+    const size = measureNode(n, this.measurer, imageResolver(this.sheet));
+    return { x: Math.round(n.position.x - canvas.position.x), y: Math.round(n.position.y - canvas.position.y), w: Math.round(size.w), h: Math.round(size.h) };
+  }
+
+  setItemGeometry(id: string, patch: Partial<{ x: number; y: number; w: number; h: number }>): void {
+    const n = this.model.node(id);
+    const now = this.itemGeometry(id);
+    const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+    if (!n || !now || !parent) return;
+    const at = freeformOffset(n, parent.childrenIds.indexOf(id));
+    const style: Style = { ...n.style };
+    if (patch.x !== undefined || patch.y !== undefined) {
+      style.freeformPosition = { x: at.x + ((patch.x ?? now.x) - now.x), y: at.y + ((patch.y ?? now.y) - now.y) };
+    }
+    if (patch.w !== undefined || patch.h !== undefined) {
+      style.width = Math.max(16, Math.round(patch.w ?? now.w));
+      style.height = Math.max(16, Math.round(patch.h ?? now.h));
+    }
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: n.style })]);
+    this.settleLayoutNow();
+  }
+
+  /**
+   * Item corner resize (draw.io): the corner follows the pointer, the
+   * opposite corner stays, width AND height change. Shift keeps the shape's
+   * proportions. A live draft, one undo step on release.
+   */
+  private itemResize: { id: string; corner: "nw" | "ne" | "sw" | "se"; style: Style; w: number; h: number; at: { x: number; y: number }; g: { x: number; y: number } } | null = null;
+
+  beginItemResize(id: string, corner: "nw" | "ne" | "sw" | "se"): void {
+    const n = this.model.node(id);
+    const g = this.itemGeometry(id);
+    const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
+    if (!n || !g || !parent) return;
+    this.itemResize = { id, corner, style: n.style, w: g.w, h: g.h, at: freeformOffset(n, parent.childrenIds.indexOf(id)), g: { x: g.x, y: g.y } };
+  }
+
+  setItemResizeDraft(dx: number, dy: number, keepRatio = false, snap = 0): void {
+    const r = this.itemResize;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    const west = r.corner === "nw" || r.corner === "sw", north = r.corner === "nw" || r.corner === "ne";
+    let w = Math.max(16, r.w + (west ? -dx : dx));
+    let h = Math.max(16, r.h + (north ? -dy : dy));
+    if (keepRatio && r.w > 0 && r.h > 0) {
+      const k = Math.max(w / r.w, h / r.h);
+      w = Math.max(16, r.w * k); h = Math.max(16, r.h * k);
+    } else if (snap > 0) {
+      // The moving edges land on the canvas grid (measured from its corner).
+      const q = (v: number): number => Math.round(v / snap) * snap;
+      w = Math.max(16, west ? r.g.x + r.w - q(r.g.x + r.w - w) : q(r.g.x + w) - r.g.x);
+      h = Math.max(16, north ? r.g.y + r.h - q(r.g.y + r.h - h) : q(r.g.y + h) - r.g.y);
+    }
+    w = Math.round(w); h = Math.round(h);
+    n.style = {
+      ...r.style,
+      width: w,
+      height: h,
+      freeformPosition: { x: r.at.x + (west ? r.w - w : 0), y: r.at.y + (north ? r.h - h : 0) },
+    };
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  commitItemResize(): void {
+    const r = this.itemResize;
+    this.itemResize = null;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    const style = n.style;
+    n.style = r.style;
+    if (style.width === r.style.width && style.height === r.style.height && style.freeformPosition?.x === r.style.freeformPosition?.x && style.freeformPosition?.y === r.style.freeformPosition?.y) {
+      applyLayout(this.sheet, false, this.measurer);
+      this.notify();
+      return;
+    }
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: r.id, style, prev: r.style })]);
+    this.settleLayoutNow();
+  }
+
+  cancelItemResize(): void {
+    const r = this.itemResize;
+    this.itemResize = null;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    n.style = r.style;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  private groupDragState: { roots: string[]; orig: Map<string, Style>; start: Map<string, { x: number; y: number }> } | null = null;
+
+  /** The drag delta that puts the grabbed item's top-left corner on the canvas grid. */
+  snapGroupDelta(anchorId: string, dx: number, dy: number, snap: number): { dx: number; dy: number } {
+    const g0 = this.groupDragState?.start.get(anchorId);
+    if (!g0 || snap <= 0) return { dx, dy };
+    return { dx: Math.round((g0.x + dx) / snap) * snap - g0.x, dy: Math.round((g0.y + dy) / snap) * snap - g0.y };
+  }
+
+  /**
+   * Capture the group's pre-drag styles. It may go past any edge of its
+   * canvas: on release the canvas grows on that side (execOps).
+   */
+  beginGroupDrag(ids: string[]): void {
+    const group = this.freeformGroup(ids);
+    if (!group || !this.model.node(group.canvasId)) { this.groupDragState = null; return; }
+    const orig = new Map<string, Style>();
+    const start = new Map<string, { x: number; y: number }>();
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n) continue;
+      if (group.roots.includes(id)) orig.set(id, n.style);
+      const g = this.itemGeometry(id);
+      if (g) start.set(id, { x: g.x, y: g.y });
+    }
+    this.groupDragState = { roots: group.roots, orig, start };
+  }
+
+  private groupStyles(cx: number, cy: number): Map<string, Style> {
+    const d = this.groupDragState!;
+    const out = new Map<string, Style>();
+    for (const id of d.roots) {
+      const node = this.model.requireNode(id);
+      const style = d.orig.get(id)!;
+      const parent = node.parentId ? this.model.node(node.parentId) : undefined;
+      const base = style.freeformPosition ?? freeformOffset(node, parent ? parent.childrenIds.indexOf(id) : 0);
+      out.set(id, { ...style, freeformPosition: { x: base.x + cx, y: base.y + cy } });
+    }
+    return out;
+  }
+
+  /** Live preview: the group follows the pointer; no op, no history. */
+  setGroupDragDraft(dx: number, dy: number): void {
+    if (!this.groupDragState) return;
+    for (const [id, style] of this.groupStyles(dx, dy)) this.model.requireNode(id).style = style;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  /** Release: one batch, so one Ctrl+Z puts every item back; execOps grows the canvas. */
+  commitGroupDrag(dx: number, dy: number): void {
+    const d = this.groupDragState;
+    if (!d) return;
+    const next = this.groupStyles(dx, dy);
+    this.groupDragState = null;
+    const ops: Op[] = [];
+    for (const id of d.roots) {
+      const node = this.model.node(id);
+      if (!node) continue;
+      node.style = d.orig.get(id)!;
+      const style = next.get(id)!;
+      if (style.freeformPosition?.x === node.style.freeformPosition?.x && style.freeformPosition?.y === node.style.freeformPosition?.y) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: node.style }));
+    }
+    if (ops.length) this.execOps(ops);
+    if (this.layoutTimer) {
+      clearTimeout(this.layoutTimer);
+      this.layoutTimer = null;
+    }
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  /** The press ended without a move, or Escape: put everything back. */
+  cancelGroupDrag(): void {
+    const d = this.groupDragState;
+    this.groupDragState = null;
+    if (!d) return;
+    let moved = false;
+    for (const id of d.roots) {
+      const node = this.model.node(id);
+      if (node && node.style !== d.orig.get(id)) { node.style = d.orig.get(id)!; moved = true; }
+    }
+    if (!moved) return;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
   // -------------------------------------------------------------------------
   // Style / tasks
   // -------------------------------------------------------------------------
@@ -3256,6 +3788,29 @@ export class EditorStore {
     }
     if (ops.length === 0) return;
     addRecentColor(color);
+    this.execOps(ops);
+  }
+
+  /**
+   * Restyle every selected topic in one batch (one Ctrl+Z): the Inspector's
+   * Colours section. `patch` may depend on the topic (a container takes a
+   * quick style on its header band, a box on its body). A key present with
+   * `undefined` clears that field, handing it back to the theme. Code topics
+   * are view only and are skipped, as everywhere.
+   */
+  setSelectionStyle(patch: Partial<Style> | ((n: MindNode) => Partial<Style>), ids: string[] = this.state.selection): void {
+    const ops: Op[] = [];
+    for (const id of ids) {
+      const n = this.model.node(id);
+      if (!n || n.style.code) continue;
+      const p = typeof patch === "function" ? patch(n) : patch;
+      const style = this.topicStyle(n, p);
+      for (const [k, v] of Object.entries(p)) if (v === undefined) delete (style as Record<string, unknown>)[k];
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: n.style }));
+    }
+    if (ops.length === 0) return;
+    const fill = typeof patch === "function" ? undefined : patch.fill;
+    if (typeof fill === "string" && fill !== "transparent") addRecentColor(fill);
     this.execOps(ops);
   }
 
@@ -4318,7 +4873,141 @@ export class EditorStore {
   private freeformMinimumSize(id: string): { w: number; h: number } {
     const resolve = imageResolver(this.sheet);
     const bounds = freeformContentBounds(this.sheet, id, (node) => measureNode(node, this.measurer, resolve));
-    return { w: Math.max(240, Math.ceil(bounds.maxX + FREEFORM_PADDING)), h: Math.max(160, Math.ceil(bounds.maxY + FREEFORM_PADDING)) };
+    // A diagram container may be as small as its title band and a little body;
+    // a canvas keeps room to work in.
+    // Its contents may also sit flush against its edge, as draw.io lanes do.
+    const box = !!this.model.node(id)?.style.container;
+    const floor = box ? { w: 40, h: FREEFORM_HEADER + 16 } : { w: 240, h: 160 };
+    const margin = box ? 0 : FREEFORM_PADDING;
+    return { w: Math.max(floor.w, Math.ceil(bounds.maxX + margin)), h: Math.max(floor.h, Math.ceil(bounds.maxY + margin)) };
+  }
+
+  /**
+   * Canvas corner resize (all four corners, draw.io style). The right/bottom
+   * edges simply move. A left/top edge moves by shifting the items (and ink)
+   * the other way and moving the canvas, so its content stays put while the
+   * edge follows the pointer: inside another canvas through its offset, a
+   * free-positioned canvas through its position, and a canvas placed by the
+   * map layout (whose edge the layout owns) through the camera. The draft is
+   * rebuilt from the originals on every move; one batch commits it.
+   */
+  private canvasResize: {
+    id: string;
+    corner: "nw" | "ne" | "sw" | "se";
+    style: Style;
+    pos: Position;
+    kids: Map<string, Style>;
+    camera: { x: number; y: number; scale: number };
+  } | null = null;
+
+  beginCanvasResize(id: string, corner: "nw" | "ne" | "sw" | "se"): void {
+    const node = this.model.node(id);
+    if (!node?.style.freeform) return;
+    const kids = new Map<string, Style>();
+    for (const k of node.childrenIds) { const c = this.model.node(k); if (c) kids.set(k, c.style); }
+    this.canvasResize = { id, corner, style: node.style, pos: { ...node.position }, kids, camera: { ...this.state.camera } };
+  }
+
+  private restoreCanvasResize(): void {
+    const r = this.canvasResize!;
+    const node = this.model.node(r.id);
+    if (!node) return;
+    node.style = r.style;
+    node.position = { ...r.pos };
+    for (const [k, s] of r.kids) { const c = this.model.node(k); if (c) c.style = s; }
+    this.state.camera = { ...this.state.camera, x: r.camera.x, y: r.camera.y };
+  }
+
+  /** dx/dy: how far the pointer moved, in world units at the drag's start. */
+  setCanvasResizeDraft(dx: number, dy: number): void {
+    const r = this.canvasResize;
+    if (!r) return;
+    this.restoreCanvasResize();
+    applyLayout(this.sheet, false, this.measurer);
+    const node = this.model.requireNode(r.id);
+    const before = { ...node.position };
+    const w0 = node.style.width ?? 720, h0 = node.style.height ?? 480;
+    const box = !!node.style.container;
+    const margin = box ? 0 : FREEFORM_PADDING;
+    const floor = box ? { w: 40, h: FREEFORM_HEADER + 16 } : { w: 240, h: 160 };
+    const resolve = imageResolver(this.sheet);
+    const tight = freeformContentBounds(this.sheet, r.id, (n) => measureNode(n, this.measurer, resolve), true);
+    const min = this.freeformMinimumSize(r.id);
+    const west = r.corner === "nw" || r.corner === "sw", north = r.corner === "nw" || r.corner === "ne";
+    // How far the left/top edge moves outward (negative: inward), never
+    // past the content or below the smallest canvas.
+    let ex = 0, ey = 0, w = w0, h = h0;
+    if (west) {
+      ex = Math.max(-dx, floor.w - w0, Number.isFinite(tight.minX) ? margin - tight.minX : -Infinity);
+      ex = Math.min(ex, 6000 - w0);
+      w = w0 + Math.round(ex); ex = Math.round(ex);
+    } else w = Math.round(Math.max(min.w, Math.min(6000, w0 + dx)));
+    if (north) {
+      ey = Math.max(-dy, floor.h - h0, Number.isFinite(tight.minY) ? FREEFORM_HEADER + margin - tight.minY : -Infinity);
+      ey = Math.min(ey, 6000 - h0);
+      h = h0 + Math.round(ey); ey = Math.round(ey);
+    } else h = Math.round(Math.max(min.h, Math.min(6000, h0 + dy)));
+    const style: Style = { ...node.style, width: w, height: h };
+    if (ex || ey) {
+      node.childrenIds.forEach((k, i) => {
+        const c = this.model.node(k);
+        if (!c) return;
+        const at = freeformOffset(c, i);
+        c.style = { ...c.style, freeformPosition: { x: at.x + ex, y: at.y + ey } };
+      });
+      if (node.style.ink?.length) style.ink = node.style.ink.map((s) => ({ ...s, path: s.path.map((v, i) => v + (i % 2 ? ey : ex)) }));
+      if (freeformOwner(this.sheet, r.id)) {
+        const at = freeformOffset(node, this.model.node(node.parentId!)?.childrenIds.indexOf(r.id) ?? 0);
+        style.freeformPosition = { x: at.x - ex, y: at.y - ey };
+      } else if (node.position.manual) {
+        node.position = { ...node.position, x: node.position.x - ex, y: node.position.y - ey };
+      }
+    }
+    node.style = style;
+    applyLayout(this.sheet, false, this.measurer);
+    if ((ex || ey) && !freeformOwner(this.sheet, r.id) && !r.pos.manual) {
+      // The layout keeps this canvas's place: follow the content with the view.
+      const after = node.position;
+      this.state.camera = { ...this.state.camera, x: r.camera.x + (after.x + ex - before.x), y: r.camera.y + (after.y + ey - before.y) };
+    }
+    this.notify();
+  }
+
+  /** Release: one batch (canvas style, items, position), so one Ctrl+Z undoes it. */
+  commitCanvasResize(): void {
+    const r = this.canvasResize;
+    this.canvasResize = null;
+    if (!r) return;
+    const node = this.model.node(r.id);
+    if (!node) return;
+    const draft = { style: node.style, pos: { ...node.position }, kids: new Map(node.childrenIds.map((k) => [k, this.model.node(k)?.style])) };
+    const camera = { ...this.state.camera };
+    this.canvasResize = r;
+    this.restoreCanvasResize();
+    this.canvasResize = null;
+    const ops: Op[] = [];
+    if (draft.style !== r.style) ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: r.id, style: draft.style, prev: r.style }));
+    for (const [k, s] of draft.kids) {
+      const prev = r.kids.get(k);
+      if (s && prev && s !== prev) ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: k, style: s, prev }));
+    }
+    if (draft.pos.x !== r.pos.x || draft.pos.y !== r.pos.y) {
+      if (r.pos.manual) ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", { id: r.id, x: draft.pos.x, y: draft.pos.y, manual: true, prev: r.pos }));
+    }
+    if (ops.length === 0) { applyLayout(this.sheet, false, this.measurer); this.notify(); return; }
+    this.execOps(ops);
+    this.settleLayoutNow();
+    this.state.camera = { ...this.state.camera, x: camera.x, y: camera.y };
+    this.notifyView();
+  }
+
+  /** Escape or a lost pointer: everything back as it was, the view included. */
+  cancelCanvasResize(): void {
+    if (!this.canvasResize) return;
+    this.restoreCanvasResize();
+    this.canvasResize = null;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
   }
 
   /** A resize drag started on this node: capture the pre-drag style + position. */
@@ -4929,6 +5618,9 @@ export class EditorStore {
     // typed into the topic as raw JSON (and then show up in Ctrl+F).
     // parseQuiz tolerates a ```json fence, which an LLM adds often enough.
     // A flashcard deck takes the same route; `kind` decides which strip.
+    // A draw.io diagram (what an AI writes when asked for one, or a copy out
+    // of draw.io itself) becomes boxes and arrows in a freeform canvas.
+    if (await this.pasteDrawio(text, destination ?? null)) return;
     if (parseQuiz(text) || parseFlashcards(text)) {
       const target = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
       if (!target) return trace.ignored("paste:quiz", "no topic selected to attach the quiz or flashcards to");
@@ -5656,6 +6348,47 @@ export class EditorStore {
     this.notify();
   }
 
+  /** Open the "Diagram from AI" window for a canvas or topic. */
+  openAiDiagram(nodeId: string): void {
+    if (!this.model.node(nodeId)) return;
+    this.state.aiDiagramOpen = { nodeId };
+    trace.mark("ui", "ui:modal", { open: true, aiDiagram: nodeId });
+    this.notify();
+  }
+
+  closeAiDiagram(): void {
+    if (this.state.aiDiagramOpen === null) return;
+    this.state.aiDiagramOpen = null;
+    trace.mark("ui", "ui:modal", { open: false });
+    this.notify();
+  }
+
+  /** Put the diagram prompt (with the user's material) on the clipboard. */
+  async copyDiagramPrompt(material: string): Promise<boolean> {
+    const text = diagramPrompt(material);
+    try {
+      await navigator.clipboard.writeText(text);
+      this.toast("Copied the diagram prompt: paste it into any AI chat");
+      return true;
+    } catch {
+      this.toast("The clipboard is blocked: select the prompt and copy it by hand");
+      return false;
+    }
+  }
+
+  /**
+   * Import an AI's answer (or any draw.io XML) given as text: into the canvas,
+   * or a new canvas under the topic. False when the text holds no diagram.
+   */
+  async importDiagramText(text: string, nodeId: string): Promise<boolean> {
+    const target = this.model.node(nodeId) ?? null;
+    if (!looksLikeDrawio(text)) {
+      this.toast("No draw.io diagram found in that text: it needs an <mxGraphModel> block");
+      return false;
+    }
+    return (await this.drawioInto(text, target)) === "done";
+  }
+
   closeQuiz(): void {
     if (this.state.quizOpen === null) return;
     this.state.quizOpen = null;
@@ -6129,6 +6862,7 @@ export class EditorStore {
     this.state.searchResults = [];
     this.state.searchOpen = false;
     this.state.quizOpen = null;
+    this.state.aiDiagramOpen = null;
     this.state.flashcardsOpen = null;
     // Each document keeps its own unsaved state: coming back to a map edited
     // earlier must still say so (this used to reset to "saved" on every switch).

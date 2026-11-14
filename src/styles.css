@@ -2465,3 +2465,142 @@ textarea:focus {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+/* Inspector Colours section (src/ui/ColorControls.tsx). */
+.color-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 2px 0 10px;
+}
+.color-preset {
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: 1.5px solid;
+  border-radius: 4px;
+  font: 600 10px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+.color-preset:hover {
+  outline: 2px solid var(--accent, #4f46e5);
+  outline-offset: 1px;
+}
+.color-preset-clear {
+  background: transparent;
+  border-color: var(--border, #94a3b8);
+  border-style: dashed;
+  color: inherit;
+  font-size: 13px;
+}
+.color-preset-line {
+  height: 8px;
+  border: none;
+  margin-top: 7px;
+}
+.color-swatch {
+  position: relative;
+  display: inline-flex;
+}
+.color-swatch[data-state] input[type="color"] {
+  opacity: 0.25;
+}
+.color-swatch-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  pointer-events: none;
+}
+
+/* "Diagram from AI" window (src/ui/AiDiagramWindow.tsx). */
+.ai-diagram-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.ai-diagram-window {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 100%);
+  max-height: min(760px, 92vh);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+.ai-diagram-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+.ai-diagram-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  overflow: auto;
+}
+.ai-diagram-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+}
+.ai-diagram-window textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: 13px/1.4 system-ui, sans-serif;
+  background: var(--bg, transparent);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+.ai-diagram-window textarea.ai-diagram-prompt {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+.ai-diagram-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-diagram-note {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* Inspector X / Y / W / H of a canvas item. */
+.geometry-fields .geometry-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-muted, inherit);
+}
+.geometry-fields .geometry-input input {
+  width: 58px;
+}
+
+/* Inspector Arrange section (align / distribute / order). */
+.arrange-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}

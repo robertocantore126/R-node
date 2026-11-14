@@ -1,5 +1,6 @@
 import { phoneMapPages } from "./pdfPhone";
-import { FREEFORM_HEADER } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { diagramShapePath, isDiagramShape, pdfPathOps } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
 import { THEMES, readableOn, type RenderTheme } from "../render/theme";
@@ -73,8 +74,8 @@ import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET } from "../layout/me
 import { unzlibSync, zlibSync } from "fflate";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
-import { nodeRuns } from "../core/text";
-import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeYRange, type HeadShape } from "../layout/relationship";
+import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
+import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeEnv, routeYRange, type HeadShape, type RelRoute, type RouteEnv } from "../layout/relationship";
 import {
   FONT_STACK,
   GALLERY_CAPTION_LINE_H,
@@ -519,6 +520,11 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   const margin = opts.margin ?? (phone ? 20 : DEFAULT_MARGIN);
   const withIndex = phone || opts.index === true;
   const placed = placeAll(sheet, opts.measurer);
+  // Elbow arrows go around the same boxes as on screen.
+  const routeOf = (rel: Relationship, a: Placed, b: Placed): RelRoute => {
+    const env: RouteEnv = routeEnv(sheet, placed, rel);
+    return relationshipRoute(rel, a, b, env.obstacles, env.origin);
+  };
   const resolveImage = imageResolver(sheet);
 
   if (placed.length === 0) {
@@ -663,6 +669,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   };
   const boxPath = (r: {x:number;y:number;w:number;h:number}, shape: string, corner: number, fr: Frame): string => {
     const {x,y,w,h} = r;
+    if (isDiagramShape(shape)) return pdfPathOps(diagramShapePath(shape,x,y,w,h).outline, fr.X, fr.Y, f);
     if (shape === "diamond" || shape === "hexagon") {
       const points = shape === "diamond" ? [[x+w/2,y],[x+w,y+h/2],[x+w/2,y+h],[x,y+h/2]] : [[x+w*.25,y],[x+w*.75,y],[x+w,y+h/2],[x+w*.75,y+h],[x+w*.25,y+h],[x,y+h/2]];
       return points.map(([a,b],i)=>`${f(fr.X(a))} ${f(fr.Y(b))} ${i ? "l" : "m"}`).join("\n")+" h";
@@ -692,15 +699,22 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     const outlined = shape === "none" ? "rounded" : shape;
     const path = boxPath(p, outlined, corner, fr);
     cmds.push("q");
-    if (shape !== "none" && fill !== "transparent" && fill !== "none") cmds.push(opacityCommand(fill),`${rgb(fill)} rg`,path,"f");
+    // The item's own opacity scales its box (fill and outline), as on screen.
+    const alpha = p.node.style.opacity ?? 1;
+    if (shape !== "none" && fill !== "transparent" && fill !== "none") cmds.push(opacityCommand(fill, alpha),`${rgb(fill)} rg`,path,"f");
     if (border) {
       const dash=`[${border.dash.map(d=>f(d*fr.s)).join(" ")}]`;
-      cmds.push(opacityCommand(border.color),`${rgb(border.color)} RG`,`${border.cap === "round" ? 1 : 0} J`,`${dash} 0 d`);
+      cmds.push(opacityCommand(border.color, alpha),`${rgb(border.color)} RG`,`${border.cap === "round" ? 1 : 0} J`,`${dash} 0 d`);
       if (border.double) {
         const t=border.width/3;
         cmds.push(`${f(t*fr.s)} w`);
         for (const d of [t,-t]) cmds.push(boxPath({x:p.x-d,y:p.y-d,w:p.w+d*2,h:p.h+d*2},outlined,corner+d,fr),"S");
       } else cmds.push(`${f(border.width*fr.s)} w`,path,"S");
+      // A diagram shape's inner linework (cylinder rim, process bars, note fold).
+      if (isDiagramShape(outlined)) {
+        const detail = diagramShapePath(outlined,p.x,p.y,p.w,p.h).detail;
+        if (detail.length) cmds.push(pdfPathOps(detail, fr.X, fr.Y, f),"S");
+      }
     }
     cmds.push("Q"); ops+=8;
   };
@@ -720,6 +734,23 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
 
   const drawFreeform = (cmds: string[], p: Placed, fr: Frame): void => {
     const fill=p.node.style.fill??theme.background;
+    const box=p.node.style.container;
+    if (box) {
+      // A diagram container, as on screen: header band, no grid, centred title.
+      const path=roundedPath(p.x,p.y,p.w,p.h,p.node.style.shape==="rect"?0:8,fr), stroke=p.node.style.stroke??theme.nodeBorder;
+      cmds.push("q");
+      if (fill!=="transparent"&&fill!=="none") cmds.push(opacityCommand(fill),`${rgb(fill)} rg`,path,"f");
+      if (box.headerFill&&box.headerFill!=="transparent") cmds.push(opacityCommand(box.headerFill),`${rgb(box.headerFill)} rg`,`${f(fr.X(p.x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} ${f(p.w*fr.s)} ${f(FREEFORM_HEADER*fr.s)} re`,"f");
+      cmds.push(opacityCommand(stroke),`${rgb(stroke)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,path,"S");
+      if (box.headerFill) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(p.y+FREEFORM_HEADER))} l`,"S");
+      cmds.push("Q");
+      const title=p.node.title, size=p.node.style.fontSize??13;
+      const width=advance(winAnsiText(title),true,false,size);
+      const x=p.node.style.align==="left"?p.x+10:p.x+Math.max(10,(p.w-Math.min(width,p.w-20))/2);
+      if (title) plainText(cmds,title,x,p.y+FREEFORM_HEADER/2+size*0.35,size,p.node.style.textColor??theme.text,fr,true,p.w-20);
+      ops+=10;
+      return;
+    }
     const path=roundedPath(p.x,p.y,p.w,p.h,12,fr);
     cmds.push("q",opacityCommand(fill),`${rgb(fill)} rg`,path,"f",opacityCommand(p.node.style.stroke??theme.nodeBorder),`${rgb(p.node.style.stroke??theme.nodeBorder)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,path,"S",opacityCommand("#000000"),path,"W n");
     // Composite the editor's 13% muted grid over its solid surface, losslessly.
@@ -1032,7 +1063,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     color: string,
     fr: Frame,
   ): void => {
-    const route = relationshipRoute(rel, a, b);
+    const route = routeOf(rel, a, b);
     const width = relWidth(rel);
     const line =
       route.path.kind === "curve"
@@ -1115,25 +1146,51 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       ops += 2;
     }
 
-    for (const rel of sheet.relationships) {
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
-      if (!a || !b) continue;
-      const span = routeYRange(relationshipRoute(rel, a, b));
-      if (span.lo >= pg.top + pg.height || span.hi <= pg.top) continue;
-      const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
-      drawRelationship(cmds, rel, a, b, color, fr);
-      cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
-    }
+    // Diagram arrows (both ends inside a canvas) go over the boxes, as on screen.
+    const paintRels = (over: boolean): void => {
+      for (const rel of sheet.relationships) {
+        if ((!!freeformOwner(sheet, rel.fromId) && !!freeformOwner(sheet, rel.toId)) !== over) continue;
+        const a = byId.get(rel.fromId);
+        const b = byId.get(rel.toId);
+        if (!a || !b) continue;
+        const span = routeYRange(routeOf(rel, a, b));
+        if (span.lo >= pg.top + pg.height || span.hi <= pg.top) continue;
+        const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
+        drawRelationship(cmds, rel, a, b, color, fr);
+        cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
+      }
+    };
+    paintRels(false);
 
     for (const p of pg.nodes) {
       if (p.node.style.freeform) continue;
       const colors = opts.colorOf(p.node.id);
+      // Rotation around the item's centre, as on screen (PDF's y axis points up,
+      // so a clockwise turn on screen is a negative angle here).
+      const turn = p.node.style.rotation ?? 0;
+      if (turn) {
+        const t = (-turn * Math.PI) / 180, c = Math.cos(t), sn = Math.sin(t);
+        const X = fr.X(p.x + p.w / 2), Y = fr.Y(p.y + p.h / 2);
+        cmds.push("q", `${f(c)} ${f(sn)} ${f(-sn)} ${f(c)} ${f(X - X * c + Y * sn)} ${f(Y - X * sn - Y * c)} cm`);
+      }
       drawBox(cmds, p, colors?.fill ?? "#ffffff", fr);
       drawImages(cmds, p, fr);
       drawCaptions(cmds, p, colors?.text ?? "#111111", fr);
-      drawTitle(cmds, p, colors?.text ?? "#111111", fr);
+      if (p.node.style.titleAt) {
+        // A label painted at the top or bottom of its box, as on screen.
+        const n = p.node, size = n.style.fontSize ?? 14, bold = (n.style.fontWeight ?? 400) >= 600;
+        const lines = n.title.trim() ? wrapPlainLines(n.title, Math.max(20, p.w - OWN_LABEL_PAD * 2), (t) => advance(winAnsiText(t), bold, !!n.style.italic, size)) : [];
+        const lh = size * OWN_LABEL_LINE;
+        const top = n.style.titleAt === "bottom" ? p.y + p.h - OWN_LABEL_PAD - lines.length * lh : p.y + OWN_LABEL_PAD;
+        lines.forEach((l, i) => {
+          const w = advance(winAnsiText(l), bold, !!n.style.italic, size);
+          const x = n.style.align === "left" ? p.x + OWN_LABEL_PAD : p.x + (p.w - w) / 2;
+          plainText(cmds, l, x, top + i * lh + size * 0.8, size, n.style.textColor ?? colors?.text ?? "#111111", fr, bold);
+        });
+      } else drawTitle(cmds, p, colors?.text ?? "#111111", fr);
+      if (turn) cmds.push("Q");
     }
+    paintRels(true);
     // Handwriting over the items on its canvas, as on screen.
     for (const p of pg.nodes) {
       if (!p.node.style.freeform) continue;

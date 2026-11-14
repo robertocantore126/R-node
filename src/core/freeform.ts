@@ -4,14 +4,25 @@ export const FREEFORM_HEADER = 36;
 export const FREEFORM_PADDING = 16;
 
 /** The base shapes the double-click picker offers in a canvas (draw.io style). */
-export type FreeformShape = Extract<TopicShape, "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon">;
+export type FreeformShape = Extract<
+  TopicShape,
+  "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon" | "ellipse" | "cylinder" | "document" | "parallelogram" | "triangle" | "process" | "note" | "actor"
+>;
 export const FREEFORM_SHAPES: { shape: FreeformShape; label: string }[] = [
   { shape: "rect", label: "Rectangle" },
   { shape: "rounded", label: "Rounded" },
-  { shape: "capsule", label: "Capsule" },
+  { shape: "capsule", label: "Capsule (start / end)" },
   { shape: "circle", label: "Circle" },
-  { shape: "diamond", label: "Diamond" },
+  { shape: "ellipse", label: "Ellipse" },
+  { shape: "diamond", label: "Diamond (decision)" },
   { shape: "hexagon", label: "Hexagon" },
+  { shape: "parallelogram", label: "Data (parallelogram)" },
+  { shape: "process", label: "Process" },
+  { shape: "document", label: "Document" },
+  { shape: "cylinder", label: "Database" },
+  { shape: "triangle", label: "Triangle" },
+  { shape: "note", label: "Note" },
+  { shape: "actor", label: "Actor (person)" },
 ];
 /** Starting box of each shape; the user resizes it like any item. */
 export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number }> = {
@@ -21,6 +32,14 @@ export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number 
   circle: { w: 80, h: 80 },
   diamond: { w: 120, h: 80 },
   hexagon: { w: 120, h: 70 },
+  ellipse: { w: 120, h: 70 },
+  cylinder: { w: 70, h: 90 },
+  document: { w: 120, h: 70 },
+  parallelogram: { w: 130, h: 60 },
+  triangle: { w: 90, h: 80 },
+  process: { w: 130, h: 60 },
+  note: { w: 110, h: 80 },
+  actor: { w: 60, h: 100 },
 };
 /** Nearest enclosing canvas, excluding the topic itself. */
 export function freeformOwner(sheet: Sheet, id: string): string | null {
@@ -42,8 +61,14 @@ export function freeformOffset(node: MindNode, index: number): { x: number; y: n
 }
 
 /** Local bounds of all content. Nested canvases occupy their own rectangle. */
-export function freeformContentBounds(sheet: Sheet, id: string, size: (node: MindNode) => { w: number; h: number }): { minX: number; minY: number; maxX: number; maxY: number } {
-  const bounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+export function freeformContentBounds(
+  sheet: Sheet,
+  id: string,
+  size: (node: MindNode) => { w: number; h: number },
+  /** Bounds of the content alone (±Infinity when empty) instead of always including the origin. */
+  tight = false,
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const bounds = tight ? { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity } : { minX: 0, minY: 0, maxX: 0, maxY: 0 };
   const visited = new Set<string>();
   const visit = (parentId: string, x: number, y: number): void => {
     if (visited.has(parentId)) return;

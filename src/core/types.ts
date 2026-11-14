@@ -53,6 +53,15 @@ export type TopicShape =
   | "diamond"
   | "hexagon"
   | "cloud"
+  // Diagram outlines (src/core/diagramShapes.ts), draw.io's basic set.
+  | "ellipse"
+  | "cylinder"
+  | "document"
+  | "parallelogram"
+  | "triangle"
+  | "process"
+  | "note"
+  | "actor"
   | "underline"
   | "none";
 
@@ -229,6 +238,27 @@ export interface InkStroke {
 export interface Style {
   /** Topic containing freely positioned document nodes. */
   freeform?: boolean;
+  /**
+   * A purely visual frame in a canvas (an "AWS Cloud" or "VPC" box drawn
+   * behind other items): it holds nothing, and only its border and title
+   * strip take clicks — inside it the pointer reaches the canvas and the
+   * items under it, so a marquee or a click works through it.
+   */
+  frame?: boolean;
+  /**
+   * The label is painted by R-node at the top or bottom of the box (plain,
+   * wrapped, aligned by `align`) instead of centred rich text: a frame's
+   * title, an actor's name. Such a label is renamed in the Inspector, not in
+   * place, so no second renderer draws it.
+   */
+  titleAt?: "top" | "bottom";
+  /**
+   * A freeform canvas drawn as a diagram CONTAINER (draw.io swimlane / group
+   * box, a VPC around its subnets): no grid, no hint, the title centred in the
+   * band, which `headerFill` paints as a swimlane header. It is still a canvas
+   * in every other way: items live inside it, move with it, grow it.
+   */
+  container?: { headerFill?: string };
   /** Handwriting on a freeform canvas, oldest first (see core/ink.ts). */
   ink?: InkStroke[];
   /**
@@ -505,6 +535,15 @@ export interface Relationship {
   startArrow?: ArrowHead;
   /** Stroke width in world units. Absent = 1.5 (REL_WIDTH). */
   width?: number;
+  /**
+   * Bend points the line passes through (draw.io waypoints), in order from
+   * source to target. Relative to the canvas holding the source item (its
+   * top-left), or, off a canvas, to the midpoint of the two boxes' centres —
+   * see `waypointOrigin`. Absent/empty = the automatic route.
+   */
+  waypoints?: RelAnchor[];
+  /** Where the label sits, as an offset from the route's midpoint. Absent = on it. */
+  labelOffset?: RelAnchor;
 }
 
 /** A point on a box border, as fractions of the box's width and height. */

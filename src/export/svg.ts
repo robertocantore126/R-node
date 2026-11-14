@@ -1,4 +1,5 @@
-import { FREEFORM_HEADER } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { diagramShapePath, isDiagramShape, svgPathData } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 /**
  * SVG export — the whole map as one vector document.
@@ -24,7 +25,7 @@ import { inkPolyline, inkStrokes } from "../core/ink";
  * the browser under the canvas one.
  */
 import type { MindNode, Relationship, ResolvedBorder, Sheet, TextRun } from "../core/types";
-import { nodeRuns } from "../core/text";
+import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
 import { positionedImageSlots } from "../layout/measure";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import {
@@ -40,7 +41,7 @@ import {
   wrapRunLines,
   type TextMeasurer,
 } from "../layout/measure";
-import { headLen, headShape, relationshipRoute, relHeads, relWidth, type HeadShape } from "../layout/relationship";
+import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeEnv, type HeadShape, type RouteEnv } from "../layout/relationship";
 
 export interface SvgExportOptions {
   measurer: TextMeasurer;
@@ -130,15 +131,21 @@ function shapeOf(p: Placed, fill: string, border: ResolvedBorder | null): string
   const outlined = shape === "none" ? "rounded" : shape;
   const dash = border.dash.length > 0 ? ` stroke-dasharray="${border.dash.map(n3).join(" ")}"` : "";
   const cap = border.cap === "round" ? ` stroke-linecap="round"` : "";
+  // A diagram shape's inner linework, stroked like the border, never filled.
+  const detail = (width: number): string => {
+    if (!isDiagramShape(outlined)) return "";
+    const d = diagramShapePath(outlined, p.x, p.y, p.w, p.h).detail;
+    return d.length ? `<path d="${svgPathData(d, n3)}" fill="none" stroke="${esc(border.color)}" stroke-width="${n3(width)}"${dash}${cap}/>` : "";
+  };
   if (!border.double) {
     const f = shape === "none" ? `none` : esc(fill);
-    return shapeEl(p, outlined, radius, ` fill="${f}" stroke="${esc(border.color)}" stroke-width="${n3(border.width)}"${dash}${cap}`);
+    return shapeEl(p, outlined, radius, ` fill="${f}" stroke="${esc(border.color)}" stroke-width="${n3(border.width)}"${dash}${cap}`) + detail(border.width);
   }
   const t = border.width / 3;
   const lines = [t, -t].map((d) =>
     shapeEl({ x: p.x - d, y: p.y - d, w: p.w + d * 2, h: p.h + d * 2 }, outlined, Math.max(0, radius + d), ` fill="none" stroke="${esc(border.color)}" stroke-width="${n3(t)}"${dash}${cap}`)
   );
-  return (shape === "none" ? "" : shapeEl(p, shape, radius, ` fill="${esc(fill)}"`)) + lines.join("");
+  return (shape === "none" ? "" : shapeEl(p, shape, radius, ` fill="${esc(fill)}"`)) + lines.join("") + detail(t);
 }
 
 function shapeEl(p: { x: number; y: number; w: number; h: number }, shape: string, radius: number, f: string): string {
@@ -157,6 +164,7 @@ function shapeEl(p: { x: number; y: number; w: number; h: number }, shape: strin
     case "rect":
       return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}"${f}/>`;
     default:
+      if (isDiagramShape(shape)) return `<path d="${svgPathData(diagramShapePath(shape, x, y, w, h).outline, n3)}"${f}/>`;
       return `<rect x="${n3(x)}" y="${n3(y)}" width="${n3(w)}" height="${n3(h)}" rx="${n3(radius)}"${f}/>`;
   }
 }
@@ -207,11 +215,11 @@ function arrowHead(shape: HeadShape | null, color: string, width: number): strin
  * pinned to anchors) and the same heads, tip on the border and angled along
  * the line's real direction there.
  */
-function relationship(rel: Relationship, byId: Map<string, Placed>, color: string): string {
+function relationship(rel: Relationship, byId: Map<string, Placed>, color: string, env: RouteEnv = {}): string {
   const a = byId.get(rel.fromId);
   const b = byId.get(rel.toId);
   if (!a || !b) return "";
-  const route = relationshipRoute(rel, a, b);
+  const route = relationshipRoute(rel, a, b, env.obstacles, env.origin);
   const width = relWidth(rel);
   const dash =
     rel.lineStyle === "dashed" ? ` stroke-dasharray="7 5"` : rel.lineStyle === "dotted" ? ` stroke-dasharray="2 4"` : "";
@@ -247,6 +255,21 @@ function relationship(rel: Relationship, byId: Map<string, Placed>, color: strin
  * always left aligned. Deviating anywhere here reintroduces exactly the
  * divergence the parity harness was built to close.
  */
+/** A label painted at the top or bottom of its box (Style.titleAt), as the canvas paints it. */
+function ownLabel(p: Placed, color: string, measurer: TextMeasurer): string {
+  const n = p.node;
+  if (!n.title.trim()) return "";
+  const size = n.style.fontSize ?? 14;
+  const font = { fontSize: size, fontWeight: n.style.fontWeight ?? 400, italic: !!n.style.italic };
+  const lines = wrapPlainLines(n.title, Math.max(20, p.w - OWN_LABEL_PAD * 2), (t) => measurer.measure(t, font).width);
+  const lh = size * OWN_LABEL_LINE;
+  const top = n.style.titleAt === "bottom" ? p.y + p.h - OWN_LABEL_PAD - lines.length * lh : p.y + OWN_LABEL_PAD;
+  const left = n.style.align === "left";
+  const x = left ? p.x + OWN_LABEL_PAD : p.x + p.w / 2;
+  const attrs = `font-size="${n3(size)}" font-weight="${font.fontWeight}"${font.italic ? ` font-style="italic"` : ""} fill="${esc(color)}" text-anchor="${left ? "start" : "middle"}" dominant-baseline="hanging"`;
+  return lines.map((l, i) => `<text x="${n3(x)}" y="${n3(top + i * lh)}" ${attrs}>${esc(l)}</text>`).join("");
+}
+
 function title(
   p: Placed,
   color: string,
@@ -407,6 +430,8 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   const t0 = performance.now();
   const pad = opts.pad ?? 40;
   const placed = placeAll(sheet, opts.measurer);
+  // Elbow arrows go around the same boxes as on screen.
+  const obstaclesOf = (rel: Relationship): RouteEnv => routeEnv(sheet, placed, rel);
   if (placed.length === 0) {
     const empty = `<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>`;
     const report = buildReport({ format: "svg", sheet, ms: 0, bytes: empty.length, emitted: {}, honoured: [], units: {} });
@@ -457,6 +482,22 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
 
   for (const p of placed) {
     if (!p.node.style.freeform) continue;
+    const box = p.node.style.container;
+    if (box) {
+      // A diagram container, as on screen: header band, centred title, no grid.
+      const rx = p.node.style.shape === "rect" ? 0 : 8;
+      const stroke = esc(p.node.style.stroke ?? "#94a3b8");
+      const dash = p.node.style.borderStyle === "dashed" ? ` stroke-dasharray="6 4"` : "";
+      parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${n3(p.h)}" rx="${rx}" fill="${esc(p.node.style.fill ?? "none")}"/>`);
+      if (box.headerFill) {
+        parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${FREEFORM_HEADER}" fill="${esc(box.headerFill)}"/>`);
+        parts.push(`<line x1="${n3(p.x)}" y1="${n3(p.y + FREEFORM_HEADER)}" x2="${n3(p.x + p.w)}" y2="${n3(p.y + FREEFORM_HEADER)}" stroke="${stroke}"/>`);
+      }
+      parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${n3(p.h)}" rx="${rx}" fill="none" stroke="${stroke}" stroke-width="${n3(p.node.style.borderWidth ?? 1)}"${dash}/>`);
+      const left = p.node.style.align === "left";
+      parts.push(`<text x="${n3(left ? p.x + 10 : p.x + p.w / 2)}" y="${n3(p.y + FREEFORM_HEADER / 2)}" text-anchor="${left ? "start" : "middle"}" dominant-baseline="middle" font-size="${p.node.style.fontSize ?? 13}" font-weight="600" fill="${esc(p.node.style.textColor ?? "#1a1a1a")}">${esc(p.node.title)}</text>`);
+      continue;
+    }
     parts.push(`<rect x="${n3(p.x)}" y="${n3(p.y)}" width="${n3(p.w)}" height="${n3(p.h)}" rx="12" fill="${esc(p.node.style.fill ?? "#ffffff")}" stroke="${esc(p.node.style.stroke ?? "#94a3b8")}"/>`);
     parts.push(`<text x="${n3(p.x + 14)}" y="${n3(p.y + FREEFORM_HEADER / 2)}" dominant-baseline="middle" font-size="13" font-weight="600" fill="#1a1a1a">${esc(p.node.title || "Freeform")}</text>`);
   }
@@ -471,11 +512,19 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   parts.push("</g>");
 
   let relationships = 0;
+  // Diagram arrows (both ends inside a canvas) are painted over the boxes, as on screen.
+  const inCanvas = (rel: Relationship): boolean => !!freeformOwner(sheet, rel.fromId) && !!freeformOwner(sheet, rel.toId);
+  const overRels: string[] = [];
   if (sheet.relationships.length > 0) {
     parts.push("<g>");
     for (const rel of sheet.relationships) {
+      if (inCanvas(rel)) {
+        const el = relationship(rel, byId, opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5", obstaclesOf(rel));
+        if (el) { overRels.push(el); relationships++; }
+        continue;
+      }
       const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
-      const el = relationship(rel, byId, color);
+      const el = relationship(rel, byId, color, obstaclesOf(rel));
       if (el) {
         parts.push(el);
         relationships++;
@@ -492,7 +541,10 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     const colors = opts.colorOf(n.id);
     const fill = colors?.fill ?? "#ffffff";
     const text = colors?.text ?? "#1a1a1a";
-    parts.push(`<g>`);
+    // The item's own opacity, over box, pictures and text alike, as on screen.
+    const alpha = n.style.opacity ?? 1;
+    const turn = n.style.rotation ? ` transform="rotate(${n3(n.style.rotation)} ${n3(p.x + p.w / 2)} ${n3(p.y + p.h / 2)})"` : "";
+    parts.push(alpha < 1 ? `<g opacity="${n3(alpha)}"${turn}>` : `<g${turn}>`);
     const shape = shapeOf(p, fill, opts.borderOf ? opts.borderOf(n.id) : null);
     if (shape) parts.push(shape);
 
@@ -557,9 +609,10 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
         }
       }
     }
-    parts.push(title(p, text, pos, opts.measurer));
+    parts.push(n.style.titleAt ? ownLabel(p, text, opts.measurer) : title(p, text, pos, opts.measurer));
     parts.push(`</g>`);
   }
+  if (overRels.length) parts.push("<g>", ...overRels, "</g>");
   // Handwriting last, over the items on its canvas, as on screen.
   for (const p of placed) {
     if (!p.node.style.freeform) continue;

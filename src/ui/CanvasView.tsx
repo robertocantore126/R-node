@@ -13,7 +13,7 @@ import { editorMapToPdf } from "../export/editorPdf";
 import { getAssetStore } from "../persist/assets";
 import { screenToWorld, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
-import { anchorAt } from "../layout/relationship";
+import { anchorAt, borderAnchor, dragElbowSegment, innerPoints, worldWaypoints } from "../layout/relationship";
 import { createCanvasTextMeasurer, chartGrowDelta, chartGrowPitch, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
@@ -96,6 +96,9 @@ interface PressTrack {
 
 /** What an arrow dragged out of a connection handle looks like: draw.io's
  *  default edge — solid, straight, one head at the target. */
+/** draw.io's grid: items snap to it while dragged or resized in a canvas (Alt: free). */
+const GRID = 10;
+
 const NEW_ARROW: Pick<Relationship, "connector" | "lineStyle" | "endArrow"> = { connector: "straight", lineStyle: "solid", endArrow: "triangle" };
 
 /** Extra box width some shapes add beyond the text width (mirrors measure.ts). */
@@ -258,7 +261,10 @@ export function CanvasView(): JSX.Element {
     if (g.kind === "idle") return;
     endGesture(`cancel:${reason}`);
     if (g.kind === "node-drag") store.cancelNodeDrag();
-    else if (g.kind === "resize-topic" || g.kind === "resize-freeform") store.cancelResize();
+    else if (g.kind === "group-drag") store.cancelGroupDrag();
+    else if (g.kind === "resize-topic") store.cancelResize();
+    else if (g.kind === "resize-freeform") store.cancelCanvasResize();
+    else if (g.kind === "resize-item") store.cancelItemResize();
     else if (g.kind === "resize-image") store.cancelImageResize();
     else if (g.kind === "move-image") store.setDrop(null);
     trace.applied("gesture:cancel", { kind: g.kind, reason });
@@ -624,9 +630,9 @@ export function CanvasView(): JSX.Element {
   };
 
   const writeAt = (g: CanvasGesture & { kind: "ink-stroke" }, wx: number, wy: number): void => {
-    // Never above the title band or left of the canvas: it only grows right and down.
-    const x = Math.max(0, wx - g.originX);
-    const y = Math.max(FREEFORM_HEADER, wy - g.originY);
+    // Anywhere: past an edge, the canvas grows on that side when the pen lifts.
+    const x = wx - g.originX;
+    const y = wy - g.originY;
     appendInkSample(g.stroke.path, x, y, 0.6 / store.getSnapshot().camera.scale);
   };
 
@@ -637,6 +643,98 @@ export function CanvasView(): JSX.Element {
     for (const stroke of inkStrokes(canvas.style)) {
       if (!g.erased.has(stroke) && inkStrokeHit(stroke, wx - g.originX, wy - g.originY, tolerance)) g.erased.add(stroke);
     }
+  };
+
+  /**
+   * A dragged item's top-left corner on the canvas grid (10 px, draw.io's),
+   * measured from the canvas's own corner. Alt places it freely.
+   */
+  const snapInCanvas = (canvasId: string | null, wx: number, wy: number, alt: boolean): { x: number; y: number } => {
+    const canvas = canvasId ? store.doc.node(canvasId) : null;
+    if (alt || !canvas?.style.freeform) return { x: wx, y: wy };
+    const o = canvas.position;
+    return { x: o.x + Math.round((wx - o.x) / GRID) * GRID, y: o.y + Math.round((wy - o.y) / GRID) * GRID };
+  };
+
+  /** The corner handle of a selected canvas under a world point, if any (all four corners). */
+  const canvasCornerAt = (wx: number, wy: number): { id: string; corner: "nw" | "ne" | "sw" | "se"; item: boolean } | null => {
+    const s = store.getSnapshot();
+    if (s.editingId) return null;
+    const renderer = rendererRef.current!;
+    const rs = currentRenderState();
+    const reach = 12 / s.camera.scale;
+    // Canvas corners, and the corners of selected items inside a canvas.
+    for (const id of s.selection) {
+      const n = store.doc.node(id);
+      const item = !!n && !n.style.freeform && !!freeformOwner(store.sheet, id) && !n.style.chartNote;
+      const r = n?.style.freeform || item ? renderer.nodeWorldRect(rs, id) : null;
+      if (!r) continue;
+      const west = Math.abs(wx - r.x) < reach, east = Math.abs(wx - r.x - r.w) < reach;
+      const north = Math.abs(wy - r.y) < reach, south = Math.abs(wy - r.y - r.h) < reach;
+      if ((west || east) && (north || south)) return { id, item, corner: `${north ? "n" : "s"}${west ? "w" : "e"}` as "nw" | "ne" | "sw" | "se" };
+    }
+    return null;
+  };
+
+  /**
+   * The selected relationship as the bend gesture would leave it with the
+   * pointer at `world`. Bends snap to the grid (Alt: free); waypoints are
+   * stored relative to their origin (the source's canvas).
+   */
+  const bentRelationship = (g: CanvasGesture & { kind: "rel-bend" }, world: { x: number; y: number }, free: boolean): Relationship | null => {
+    const renderer = rendererRef.current!;
+    const rs = currentRenderState();
+    const rel = store.sheet.relationships.find((r) => r.id === g.relId);
+    const a = rel && renderer.nodeWorldRect(rs, rel.fromId);
+    const b = rel && renderer.nodeWorldRect(rs, rel.toId);
+    if (!rel || !a || !b) return null;
+    if (g.mode === "label") {
+      const o = g.base[0];
+      return { ...rel, labelOffset: { x: o.x + world.x - g.startWorldX, y: o.y + world.y - g.startWorldY } };
+    }
+    // On the canvas's own grid, the one its items snap to.
+    const origin = renderer.relOrigin(rs, rel);
+    const snap = (v: number, o: number): number => (free ? v : o + Math.round((v - o) / GRID) * GRID);
+    const p = { x: snap(world.x, origin.x), y: snap(world.y, origin.y) };
+    const rel0 = { ...rel, waypoints: g.base.length ? g.base.map((q) => ({ x: q.x - origin.x, y: q.y - origin.y })) : undefined };
+    let wps: { x: number; y: number }[];
+    let pin: Partial<Relationship> = {};
+    if (g.mode === "segment") {
+      // Slid on the route as it stood when the press began.
+      const moved = dragElbowSegment(renderer.relRoute(rs, rel.waypoints?.length ? rel0 : rel, a, b), g.index, p, a, b);
+      if (!moved) return null;
+      wps = moved.waypoints;
+      pin = { fromAnchor: moved.fromAnchor, toAnchor: moved.toAnchor };
+    } else {
+      wps = g.base.map((q) => ({ ...q }));
+      if (g.mode === "insert") wps.splice(g.index, 0, p);
+      else wps[g.index] = p;
+      // An elbow line's corners are now fixed points: keep its ends where they are.
+      if (rel.connector === "elbow") {
+        const route = renderer.relRoute(rs, rel, a, b);
+        pin = { fromAnchor: borderAnchor(a, route.start.tip), toAnchor: borderAnchor(b, route.end.tip) };
+      }
+    }
+    return { ...rel, ...pin, waypoints: wps.map((q) => ({ x: q.x - origin.x, y: q.y - origin.y })) };
+  };
+
+  /** Marquee hits; a canvas-scoped box picks only that canvas's own items, wholly inside. */
+  const marqueeIds = (scope: string | undefined, w0: { x: number; y: number }, w1: { x: number; y: number }): string[] => {
+    const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y, !!scope);
+    return scope ? ids.filter((id) => freeformOwner(store.sheet, id) === scope && !store.sheet.nodes[id]?.style.chartNote) : ids;
+  };
+
+  /**
+   * Pressing on an item of a multi-selection inside one canvas grabs the whole
+   * selection (draw.io). A release without a move narrows it to that item.
+   */
+  const startGroupDrag = (id: string, world: { x: number; y: number }, additive: boolean): boolean => {
+    const sel = store.getSnapshot().selection;
+    if (additive || sel.length < 2 || !sel.includes(id) || !store.freeformGroup(sel)) return false;
+    gesture.to({ kind: "group-drag", nodeId: id, startWorldX: world.x, startWorldY: world.y }, "pointerdown");
+    store.beginGroupDrag(sel);
+    trace.applied("pointerdown:group-drag", { id, count: sel.length });
+    return true;
   };
 
   const onPointerDown = (e: RPointerEvent): void => {
@@ -697,14 +795,18 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
 
-    for (const id of s.relFrom ? [] : s.selection) {
-      const n = store.doc.node(id);
-      const r = n?.style.freeform ? renderer.nodeWorldRect(rs, id) : null;
-      if (r && Math.abs(world.x - r.x - r.w) < 12 / s.camera.scale && Math.abs(world.y - r.y - r.h) < 12 / s.camera.scale) {
-        gesture.to({ kind: "resize-freeform", nodeId: id, startWorldX: world.x, startWorldY: world.y, startWidth: r.w, startHeight: r.h }, "pointerdown");
-        store.beginResize(id);
-        return;
-      }
+    const corner = s.relFrom ? null : canvasCornerAt(world.x, world.y);
+    if (corner?.item) {
+      gesture.to({ kind: "resize-item", nodeId: corner.id, corner: corner.corner, startScreenX: x, startScreenY: y }, "pointerdown");
+      store.beginItemResize(corner.id, corner.corner);
+      trace.applied("pointerdown:item-resize", { id: corner.id, corner: corner.corner });
+      return;
+    }
+    if (corner) {
+      gesture.to({ kind: "resize-freeform", nodeId: corner.id, corner: corner.corner, startScreenX: x, startScreenY: y }, "pointerdown");
+      store.beginCanvasResize(corner.id, corner.corner);
+      trace.applied("pointerdown:canvas-resize", { id: corner.id, corner: corner.corner });
+      return;
     }
     if ((s.mode === "ink" || eraserEnd) && !s.relFrom) {
       const canvasId = inkCanvasAt(world.x, world.y);
@@ -739,6 +841,25 @@ export function CanvasView(): JSX.Element {
         gesture.to({ kind: "connect", grip: { kind: "end", relId: s.relSel, end } }, "pointerdown");
         trace.applied("pointerdown:rel-end", { id: s.relSel, end });
         return;
+      }
+      // On the label chip a handle must be hit squarely, so a bend sitting
+      // under the label still leaves the rest of the chip to grab.
+      const onLabel = !!s.relSel && renderer.hitTestRelLabel(rs, world.x, world.y);
+      const bend = s.relSel ? renderer.hitTestBend(rs, world.x, world.y, onLabel ? 3 : undefined) : null;
+      const relS = s.relSel ? store.sheet.relationships.find((r) => r.id === s.relSel) : undefined;
+      if (relS && (bend || onLabel)) {
+        const a = renderer.nodeWorldRect(rs, relS.fromId), b = renderer.nodeWorldRect(rs, relS.toId);
+        if (a && b) {
+          const elbow = relS.connector === "elbow";
+          const base = !bend
+            ? [relS.labelOffset ?? { x: 0, y: 0 }]
+            : elbow
+              ? innerPoints(renderer.relRoute(rs, relS, a, b))
+              : worldWaypoints(relS, a, b, renderer.relOrigin(rs, relS));
+          gesture.to({ kind: "rel-bend", relId: relS.id, mode: bend ? bend.kind : "label", index: bend?.index ?? 0, base, startWorldX: world.x, startWorldY: world.y }, "pointerdown");
+          trace.applied("pointerdown:rel-bend", { id: relS.id, mode: bend ? bend.kind : "label", index: bend?.index ?? 0 });
+          return;
+        }
       }
       const con = s.editingId ? null : renderer.hitTestConnectHandle(rs, world.x, world.y);
       if (con) {
@@ -844,6 +965,7 @@ export function CanvasView(): JSX.Element {
 
     const imgHit = s.relFrom ? null : renderer.hitTestImageSlot(rs, world.x, world.y);
     if (imgHit && freeformOwner(store.sheet, imgHit.nodeId)) {
+      if (startGroupDrag(imgHit.nodeId, world, e.shiftKey || e.ctrlKey || e.metaKey)) return;
       const rect = renderer.nodeWorldRect(rs, imgHit.nodeId)!;
       gesture.to({ kind: "node-drag", nodeId: imgHit.nodeId, grabOffsetX: world.x - rect.x, grabOffsetY: world.y - rect.y }, "pointerdown");
       store.selectImage(imgHit.nodeId, imgHit.slot);
@@ -883,7 +1005,19 @@ export function CanvasView(): JSX.Element {
         trace.applied("pointerdown:relationship", { id: rel, insideFreeform: true });
         return;
       }
+      // Below the title band, the canvas's empty area draws a selection box
+      // over its items (draw.io); the title band still moves the canvas. A
+      // click without a drag selects the canvas, as before.
+      const rect = renderer.nodeWorldRect(rs, hit);
+      if (rect && world.y >= rect.y + FREEFORM_HEADER) {
+        const keepsSelection = e.shiftKey || e.ctrlKey || e.metaKey;
+        if (!keepsSelection) store.select(hit, { additive: false });
+        trace.applied("pointerdown:freeform-marquee", { id: hit, keepsSelection, wasEditing });
+        gesture.to({ kind: "marquee", anchorX: x, anchorY: y, active: false, scope: hit }, "pointerdown");
+        return;
+      }
     }
+    if (hit && startGroupDrag(hit, world, e.shiftKey || e.ctrlKey || e.metaKey)) return;
     if (hit) {
       const rect = renderer.nodeWorldRect(rs, hit);
       const additive = e.shiftKey || e.ctrlKey || e.metaKey;
@@ -993,6 +1127,16 @@ export function CanvasView(): JSX.Element {
       schedule();
       return;
     }
+    if (gs.kind === "rel-bend") {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const s = store.getSnapshot();
+      const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const rel = bentRelationship(gs, world, e.altKey);
+      if (rel) relDraftRef.current = { rel, pointer: world, replaces: rel.id, target: null };
+      schedule();
+      return;
+    }
     if (gs.kind === "chart-grow") {
       const g = gs;
       const s = store.getSnapshot();
@@ -1013,13 +1157,25 @@ export function CanvasView(): JSX.Element {
       drag.moved = true;
       return;
     }
-    if (gs.kind === "resize-freeform" || gs.kind === "resize-topic") {
+    if (gs.kind === "resize-item") {
+      const scale = store.getSnapshot().camera.scale;
+      store.setItemResizeDraft((x - gs.startScreenX) / scale, (y - gs.startScreenY) / scale, e.shiftKey, e.altKey ? 0 : GRID);
+      drag.moved = true;
+      return;
+    }
+    if (gs.kind === "resize-freeform") {
+      // Screen deltas, not world points: a top/left drag may move the camera
+      // (to keep the content still), which would shift every world point.
+      const scale = store.getSnapshot().camera.scale;
+      store.setCanvasResizeDraft((x - gs.startScreenX) / scale, (y - gs.startScreenY) / scale);
+      drag.moved = true;
+      return;
+    }
+    if (gs.kind === "resize-topic") {
       const s = store.getSnapshot();
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const dx = world.x - gs.startWorldX;
-      if (gs.kind === "resize-freeform") {
-        store.setResizeDraft(gs.nodeId, gs.startWidth + dx, { height: gs.startHeight + world.y - gs.startWorldY });
-      } else if (gs.side === "left") {
+      if (gs.side === "left") {
         // Right edge stays anchored; the left edge (position.x) follows the cursor.
         store.setResizeDraft(gs.nodeId, gs.startWidth - dx, {
           anchorRight: true,
@@ -1064,7 +1220,7 @@ export function CanvasView(): JSX.Element {
       const s = store.getSnapshot();
       const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, mx0, my0);
       const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-      const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
+      const ids = marqueeIds(marq.scope, w0, w1);
       marqueeSelRef.current = ids.length > 0 ? new Set(ids) : null;
       schedule();
       return;
@@ -1126,6 +1282,14 @@ export function CanvasView(): JSX.Element {
       }
       return;
     }
+    if (gs.kind === "group-drag") {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const d = store.snapGroupDelta(gs.nodeId, w.x - gs.startWorldX, w.y - gs.startWorldY, e.altKey ? 0 : GRID);
+      store.setGroupDragDraft(d.dx, d.dy);
+      return;
+    }
     // Only idle and a marquee still inside its 4px arm distance get here.
     if (gs.kind !== "node-drag") {
       const p = localPoint(e);
@@ -1134,15 +1298,14 @@ export function CanvasView(): JSX.Element {
       const rs = currentRenderState();
       const rh = renderer?.hitTestResize(rs, w.x, w.y) ?? null;
       const ih = renderer?.hitTestImageResize(rs, w.x, w.y) ?? null;
-      const canvasCorner = s0.selection.some((id) => {
-        const n = store.doc.node(id);
-        const r = n?.style.freeform ? renderer?.nodeWorldRect(rs, id) : null;
-        return !!r && Math.abs(w.x - r.x - r.w) < 12 / s0.camera.scale && Math.abs(w.y - r.y - r.h) < 12 / s0.camera.scale;
-      });
-      setResizeHover(!!rh || canvasCorner);
+      const canvasCorner = renderer ? canvasCornerAt(w.x, w.y) : null;
+      setResizeHover(!!rh);
       const onRelHandle = !!renderer && (!!renderer.hitTestConnectHandle(rs, w.x, w.y) || !!renderer.hitTestRelEnd(rs, w.x, w.y));
       const slider = renderer?.hitTestChartGrow(rs, w.x, w.y) ?? null;
-      setHandleCursor(onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null);
+      setHandleCursor(
+        canvasCorner ? (canvasCorner.corner === "nw" || canvasCorner.corner === "se" ? "nwse-resize" : "nesw-resize")
+        : onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null,
+      );
       setImgResizeHover(!!ih);
       store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
       return;
@@ -1176,7 +1339,10 @@ export function CanvasView(): JSX.Element {
         const draggedOwner = freeformOwner(store.sheet, dragging);
         if (owner && (owner === draggedOwner || store.doc.node(hit)?.style.freeform)) {
           store.setDrop({ mode: "child", nodeId: owner });
-          if (owner === draggedOwner) store.setNodeDragDraft(dragging, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+          if (owner === draggedOwner) {
+            const at = snapInCanvas(owner, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+            store.setNodeDragDraft(dragging, at.x, at.y);
+          }
           else store.resetNodeDragDraft(dragging);
           return;
         }
@@ -1184,6 +1350,16 @@ export function CanvasView(): JSX.Element {
         dropMode = relY < 0.28 ? "before" : relY > 0.72 ? "after" : "child";
         store.setDrop({ mode: dropMode, nodeId: hit });
       }
+    } else if (freeformOwner(store.sheet, dragging)) {
+      // An item of a canvas dragged past its edge, over nothing else: it stays
+      // in its canvas and follows the pointer; on release the canvas grows on
+      // that side (draw.io's endless page). Dropping it on another topic still
+      // takes it out.
+      const owner = freeformOwner(store.sheet, dragging)!;
+      store.setDrop({ mode: "child", nodeId: owner });
+      const at = snapInCanvas(owner, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+      store.setNodeDragDraft(dragging, at.x, at.y);
+      return;
     } else {
       // Only main topics (root children) and floating topics can be pinned to
       // a free position — deeper hierarchical nodes stay in the auto layout.
@@ -1232,12 +1408,31 @@ export function CanvasView(): JSX.Element {
       }
       return;
     }
+    if (gs.kind === "rel-bend") {
+      if (!drag.moved || !draft) return void trace.ignored("pointerup:rel-bend", "no drag", { id: gs.relId });
+      const r = draft.rel;
+      store.setRelationship(gs.relId, { waypoints: r.waypoints, labelOffset: r.labelOffset, fromAnchor: r.fromAnchor, toAnchor: r.toAnchor });
+      trace.applied("pointerup:rel-bend", { id: gs.relId, mode: gs.mode, bends: r.waypoints?.length ?? 0 });
+      return;
+    }
     if (gs.kind === "chart-grow") {
       const g = gs;
       // A click without a drag keeps the old "+": one more.
       const delta = drag.moved ? (live?.delta ?? 0) : 1;
       if (delta !== 0) store.resizeChart(g.id, g.grow === "row" ? delta : 0, g.grow === "col" ? delta : 0);
       else trace.ignored("pointerup:chart-grow", "slider back where it started", { id: g.id });
+      return;
+    }
+    if (gs.kind === "group-drag") {
+      if (drag.moved) {
+        const { x, y } = localPoint(e);
+        const w = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+        const d = store.snapGroupDelta(gs.nodeId, w.x - gs.startWorldX, w.y - gs.startWorldY, e.altKey ? 0 : GRID);
+        store.commitGroupDrag(d.dx, d.dy);
+      } else {
+        store.cancelGroupDrag();
+        store.select(gs.nodeId, { additive: false });
+      }
       return;
     }
     if (gs.kind === "marquee") {
@@ -1247,12 +1442,14 @@ export function CanvasView(): JSX.Element {
       const { x, y } = localPoint(e);
       const w0 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, gs.anchorX, gs.anchorY);
       const w1 = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
-      const ids = rendererRef.current!.nodesInRect(currentRenderState(), w0.x, w0.y, w1.x, w1.y);
+      const ids = marqueeIds(gs.scope, w0, w1);
       if (ids.length > 0) store.selectMany(ids, { additive: e.shiftKey || e.ctrlKey || e.metaKey });
       return;
     }
     if (gs.kind === "resize-image") return store.commitImageResize();
-    if (gs.kind === "resize-topic" || gs.kind === "resize-freeform") return store.commitResize();
+    if (gs.kind === "resize-topic") return store.commitResize();
+    if (gs.kind === "resize-freeform") return store.commitCanvasResize();
+    if (gs.kind === "resize-item") return store.commitItemResize();
     if (gs.kind === "pan") return;
     // Gallery cell dropped (T25). A plain click never moves anything: the
     // threshold in pointermove is what separates "grabbed it" from "clicked
@@ -1284,7 +1481,10 @@ export function CanvasView(): JSX.Element {
       const { x, y } = localPoint(e);
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
       const target = drop.mode === "floating" ? null : drop.nodeId;
-      store.commitNodeDrag(gs.nodeId, target, drop.mode, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+      // Into a canvas: the same grid the drag showed.
+      const into = target && store.doc.node(target)?.style.freeform ? target : null;
+      const at = snapInCanvas(into, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+      store.commitNodeDrag(gs.nodeId, target, drop.mode, at.x, at.y);
     } else {
       // A plain click, or a release over nowhere it can land.
       store.cancelNodeDrag();
@@ -1300,6 +1500,16 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     // Two quick pen dots (a colon, an umlaut) are writing, not a double click.
     if (s.mode === "ink" && inkCanvasAt(world.x, world.y)) return trace.ignored("dblclick", "writing with the pen");
+    // Double click on a bend of the selected relationship removes it (draw.io);
+    // on an elbow line's segment, it gives the line back its automatic route.
+    const bend = s.relSel ? renderer.hitTestBend(currentRenderState(), world.x, world.y) : null;
+    const relB = s.relSel ? store.sheet.relationships.find((r) => r.id === s.relSel) : undefined;
+    if (bend && relB && bend.kind !== "insert") {
+      const wps = relB.connector === "elbow" ? [] : (relB.waypoints ?? []).filter((_, i) => i !== bend.index);
+      store.setRelationship(relB.id, { waypoints: wps.length ? wps : undefined });
+      trace.applied("dblclick:rel-bend-remove", { id: relB.id, left: wps.length });
+      return;
+    }
     const hit = renderer.hitTest(currentRenderState(), world.x, world.y);
     if (hit) {
       if (store.doc.node(hit)?.style.freeform) {
@@ -1640,6 +1850,7 @@ export function CanvasView(): JSX.Element {
           cursor:
             gesture.state.kind === "connect" ? "crosshair"
             : gesture.state.kind === "chart-grow" ? (gesture.state.grow === "col" ? "ew-resize" : "ns-resize")
+            : gesture.state.kind === "resize-freeform" || gesture.state.kind === "resize-item" ? (gesture.state.corner === "nw" || gesture.state.corner === "se" ? "nwse-resize" : "nesw-resize")
             : handleCursor ? handleCursor
             : imgResizeHover || gesture.state.kind === "resize-image"
               ? "nwse-resize"

@@ -129,6 +129,14 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
     store.navigateGalleryCell(navDir[action as keyof typeof navDir]);
     return true;
   }
+  // Items of a freeform canvas: the arrows NUDGE them (1 px, 10 with Shift),
+  // as in draw.io, instead of walking the map.
+  if (action in navDir && store.canNudgeSelection()) {
+    const step = e.shiftKey ? 10 : 1;
+    const dir = navDir[action as keyof typeof navDir];
+    store.nudgeSelection(dir === "left" ? -step : dir === "right" ? step : 0, dir === "up" ? -step : dir === "down" ? step : 0);
+    return true;
+  }
 
   switch (action) {
     case "create-sibling":

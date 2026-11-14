@@ -17,6 +17,7 @@
  * read that throws returns an empty library rather than breaking the panel.
  */
 
+import { DIAGRAM_SHAPES } from "../core/diagramShapes";
 import { DEFAULT_STRUCTURE, type MindNode, type Relationship, type Sheet, type Style, type TextRun, type TopicShape } from "../core/types";
 import { nodeImageIds } from "../core/ops";
 import { validateSheet } from "../core/validate";
@@ -48,7 +49,7 @@ export class ShapeRejected extends Error {
 /** The built-in silhouettes. Anything else falls back to the default: a
  *  structure is made of base shapes, and a custom path belongs to a shape node
  *  (T24), which is a different object with a fixed size. */
-const BASE_SHAPES = new Set<TopicShape>(["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "cloud", "underline", "none"]);
+const BASE_SHAPES = new Set<TopicShape>(["rounded", "rect", "capsule", "circle", "diamond", "hexagon", "cloud", ...DIAGRAM_SHAPES, "underline", "none"]);
 
 /**
  * Colours out, form in.

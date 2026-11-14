@@ -13,6 +13,7 @@ import { WebSearchPanel } from "./ui/WebSearchPanel";
 import { Palette } from "./ui/Palette";
 import { SearchBar } from "./ui/SearchBar";
 import { QuizWindow } from "./ui/QuizWindow";
+import { AiDiagramWindow } from "./ui/AiDiagramWindow";
 import { FlashcardWindow } from "./ui/FlashcardWindow";
 import { InkRail } from "./ui/InkRail";
 
@@ -91,6 +92,7 @@ export function App(): JSX.Element {
       <Palette />
 
       {state.quizOpen && <QuizWindow key={`${state.quizOpen.nodeId}:${state.quizOpen.quizId}`} />}
+      {state.aiDiagramOpen && <AiDiagramWindow key={state.aiDiagramOpen.nodeId} nodeId={state.aiDiagramOpen.nodeId} />}
       {state.flashcardsOpen && <FlashcardWindow key={`${state.flashcardsOpen.nodeId}:${state.flashcardsOpen.deckId}`} />}
 
       {state.message && (

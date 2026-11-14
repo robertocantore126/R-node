@@ -1,4 +1,5 @@
 import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
+import { diagramShapePath, isDiagramShape, tracePath } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
 import { quizMistakeNodeIds } from "../core/quiz";
@@ -13,11 +14,11 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
  * of the node being edited so the overlay doesn't double-paint.
  */
 import type { Group, ImageSlot, MindNode, RelAnchor, Relationship, ResolvedBorder, Sheet, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
-import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, type HeadShape, type RelRoute } from "../layout/relationship";
+import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, routeEnv, bendHandles, boxesMid, worldWaypoints, type RouteEnv, type HeadShape, type Rect, type RelRoute, type BendHandle } from "../layout/relationship";
 import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
 import { groupBoxes, groupRadius, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
-import { nodeRuns } from "../core/text";
+import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
 import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, chartGrowPitch, CHART_COLS, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
@@ -126,6 +127,21 @@ const RING_PAD = 3;
 const RING_W_SELECTED = 2.5;
 const RING_W_HOVER = 1.5;
 
+/** The axis-aligned box a rectangle covers once turned `deg` degrees about its centre. */
+export function rotatedBox(r: { x: number; y: number; w: number; h: number }, deg?: number): { x: number; y: number; w: number; h: number } {
+  if (!deg) return r;
+  const t = (deg * Math.PI) / 180, c = Math.abs(Math.cos(t)), s = Math.abs(Math.sin(t));
+  const w = r.w * c + r.h * s, h = r.w * s + r.h * c;
+  return { x: r.x + r.w / 2 - w / 2, y: r.y + r.h / 2 - h / 2, w, h };
+}
+
+/** On a frame's border or in its title strip, where a frame takes the pointer. */
+export function onFrameEdge(p: { x: number; y: number; w: number; h: number; node: MindNode }, wx: number, wy: number, scale: number): boolean {
+  const band = 8 / scale;
+  const strip = OWN_LABEL_PAD * 2 + (p.node.style.fontSize ?? 14) * OWN_LABEL_LINE;
+  return wx - p.x < band || p.x + p.w - wx < band || wy - p.y < Math.max(band, strip) || p.y + p.h - wy < band;
+}
+
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
   private dpr = 1;
@@ -134,6 +150,8 @@ export class Renderer {
   private measurer: TextMeasurer = createCanvasTextMeasurer();
   /** Camera scale of the current frame (used to pick the text-cache resolution). */
   private curScale = 1;
+  /** Where each relationship's label chip was last painted (world), for dragging it. */
+  private relLabelRects = new Map<string, Rect>();
   /**
    * Bitmap cache for node titles: the styled text of a node is rendered once
    * into an offscreen canvas and blitted with drawImage during pan/zoom — the
@@ -450,8 +468,12 @@ export class Renderer {
     this.drawGroupFills(state, byId);
 
     // 1) relationships
+    // An arrow between two items of a freeform canvas is a diagram edge: it is
+    // painted over the boxes (draw.io), or a filled container would hide every
+    // arrow inside it. Arrows on the map stay under the topics, as always.
     let rels = 0;
     let relsDrawn = 0;
+    const overRels: [Placed, Placed, Relationship][] = [];
     for (const rel of state.sheet.relationships) {
       rels++;
       const a = byId.get(rel.fromId);
@@ -459,7 +481,8 @@ export class Renderer {
       if (state.relDraft?.replaces === rel.id) continue;
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
-        this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id);
+        if (freeformOwner(state.sheet, rel.fromId) && freeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
+        else this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
       }
     }
 
@@ -503,6 +526,7 @@ export class Renderer {
       if (!p.visible) continue;
       this.drawNode(theme, p, state, false);
     }
+    for (const [a, b, rel] of overRels) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
     // Handwriting goes over the items on its canvas, to annotate them.
     for (const p of placed) if (p.visible && p.node.style.freeform) this.drawInk(theme, p, state);
 
@@ -867,6 +891,32 @@ export class Renderer {
     ctx.fillStyle = p.node.style.fill ?? theme.background;
     ctx.strokeStyle = p.node.style.stroke ?? theme.nodeBorder;
     ctx.lineWidth = p.node.style.borderWidth ?? 1;
+    const box = p.node.style.container;
+    if (box) {
+      // A diagram container: its own corners, a header band, no grid or hint.
+      const radius = p.node.style.shape === "rect" ? 0 : 8;
+      ctx.beginPath();
+      ctx.roundRect(p.x, p.y, p.w, p.h, radius);
+      ctx.fill();
+      if (box.headerFill) {
+        ctx.save(); ctx.clip();
+        ctx.fillStyle = box.headerFill;
+        ctx.fillRect(p.x, p.y, p.w, FREEFORM_HEADER);
+        ctx.beginPath(); ctx.moveTo(p.x, p.y + FREEFORM_HEADER); ctx.lineTo(p.x + p.w, p.y + FREEFORM_HEADER); ctx.stroke();
+        ctx.restore();
+      }
+      ctx.beginPath();
+      ctx.roundRect(p.x, p.y, p.w, p.h, radius);
+      ctx.setLineDash(p.node.style.borderStyle === "dashed" ? [6, 4] : []);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = p.node.style.textColor ?? theme.text;
+      ctx.font = `600 ${p.node.style.fontSize ?? 13}px ${FONT_STACK}`;
+      ctx.textAlign = p.node.style.align === "left" ? "left" : "center"; ctx.textBaseline = "middle";
+      ctx.fillText(p.node.title, p.node.style.align === "left" ? p.x + 10 : p.x + p.w / 2, p.y + FREEFORM_HEADER / 2, p.w - 20);
+      ctx.restore();
+      return;
+    }
     ctx.beginPath();
     ctx.roundRect(p.x, p.y, p.w, p.h, 12);
     ctx.fill(); ctx.stroke();
@@ -911,7 +961,12 @@ export class Renderer {
       if (selected || state.hoverId === n.id) {
         ctx.save(); ctx.strokeStyle = theme.selection;
         this.strokeRing(ctx, p, selected ? RING_W_SELECTED : RING_W_HOVER);
-        if (selected) { ctx.fillStyle = theme.selection; const hs = 8 / state.camera.scale; ctx.fillRect(p.x + p.w - hs / 2, p.y + p.h - hs / 2, hs, hs); }
+        // A resize handle on every corner (draw.io): any edge can move.
+        if (selected) {
+          ctx.fillStyle = theme.selection;
+          const hs = 8 / state.camera.scale;
+          for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
+        }
         ctx.restore();
       }
       return;
@@ -926,7 +981,13 @@ export class Renderer {
 
     ctx.save();
     ctx.globalAlpha = opacity;
-    if (n.style.rotation) ctx.rotate((n.style.rotation * Math.PI) / 180);
+    // Rotation turns the item around its own centre (draw.io's rotation).
+    if (n.style.rotation) {
+      const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate((n.style.rotation * Math.PI) / 180);
+      ctx.translate(-cx, -cy);
+    }
 
     // shadow
     if (n.style.shadow) {
@@ -976,6 +1037,16 @@ export class Renderer {
         ctx.lineWidth = border.width;
         ctx.stroke();
       }
+      // A diagram shape's inner linework (cylinder rim, process bars, note fold).
+      if (!isCode && isDiagramShape(shape)) {
+        const detail = diagramShapePath(shape, p.x, p.y, p.w, p.h).detail;
+        if (detail.length) {
+          ctx.beginPath();
+          tracePath(ctx, detail);
+          ctx.lineWidth = border.double ? border.width / 3 : border.width;
+          ctx.stroke();
+        }
+      }
       ctx.setLineDash([]);
       ctx.lineCap = "butt";
     }
@@ -1004,6 +1075,12 @@ export class Renderer {
         ctx.strokeStyle = theme.selection;
         ctx.lineWidth = 1.6;
         ctx.stroke();
+      }
+      // An item of a canvas also resizes from its corners (width AND height).
+      if (freeformOwner(state.sheet, n.id) && !n.style.chartNote) {
+        const cs = 8 / state.camera.scale;
+        ctx.fillStyle = theme.selection;
+        for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) ctx.fillRect(cx - cs / 2, cy - cs / 2, cs, cs);
       }
       // A selected chart grows from its edges: "+" pills just outside the box,
       // to the right (a column) and underneath (a row). Same outline style as
@@ -1139,7 +1216,8 @@ export class Renderer {
       } else {
         this.drawImage(p);
         this.drawGallery(theme, p, state.sheet);
-        this.drawText(theme, p, textColor);
+        if (n.style.titleAt) this.drawOwnLabel(p, textColor);
+        else this.drawText(theme, p, textColor);
       }
     }
 
@@ -1247,7 +1325,8 @@ export class Renderer {
         // Text-only topics (the central topic in the XMind-inspired theme).
         break;
       default:
-        this.roundRect(ctx, x, y, w, h, radius);
+        if (isDiagramShape(shape)) tracePath(ctx, diagramShapePath(shape, x, y, w, h).outline);
+        else this.roundRect(ctx, x, y, w, h, radius);
     }
   }
 
@@ -1301,6 +1380,25 @@ export class Renderer {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(this.placeholderFor(n), p.x + p.w / 2, p.y + p.h / 2 + 0.5);
+    ctx.restore();
+  }
+
+  /** A label R-node paints itself, at the top or bottom of the box (Style.titleAt). */
+  private drawOwnLabel(p: Placed, color: string): void {
+    const n = p.node, ctx = this.ctx;
+    if (!n.title.trim()) return;
+    const size = n.style.fontSize ?? 14;
+    ctx.save();
+    ctx.font = `${n.style.italic ? "italic " : ""}${n.style.fontWeight ?? 400} ${size}px ${FONT_STACK}`;
+    ctx.fillStyle = color;
+    ctx.textBaseline = "top";
+    const left = n.style.align === "left";
+    ctx.textAlign = left ? "left" : "center";
+    const lines = wrapPlainLines(n.title, Math.max(20, p.w - OWN_LABEL_PAD * 2), (t) => ctx.measureText(t).width);
+    const lh = size * OWN_LABEL_LINE;
+    let y = n.style.titleAt === "bottom" ? p.y + p.h - OWN_LABEL_PAD - lines.length * lh : p.y + OWN_LABEL_PAD;
+    const x = left ? p.x + OWN_LABEL_PAD : p.x + p.w / 2;
+    for (const line of lines) { ctx.fillText(line, x, y); y += lh; }
     ctx.restore();
   }
 
@@ -1812,11 +1910,30 @@ export class Renderer {
     return { canvas, w: p.w, h: p.h };
   }
 
-  private drawRelationship(theme: RenderTheme, a: Box, b: Box, rel: Relationship, color: string, selected?: boolean): void {
+  /** The boxes an elbow arrow routes around (none for the other line styles). */
+  private relEnv(state: RenderState, rel: Relationship): RouteEnv {
+    return routeEnv(state.sheet, this.placedNodes(state), rel);
+  }
+
+  /** The world point a relationship's waypoints are measured from. */
+  relOrigin(state: RenderState, rel: Relationship): { x: number; y: number } {
+    const o = this.relEnv(state, rel).origin;
+    if (o) return o;
+    const a = this.nodeWorldRect(state, rel.fromId), b = this.nodeWorldRect(state, rel.toId);
+    return a && b ? boxesMid(a, b) : { x: 0, y: 0 };
+  }
+
+  /** The drawn route of a relationship, as every painter and hit test sees it. */
+  relRoute(state: RenderState, rel: Relationship, a: Rect, b: Rect): RelRoute {
+    const env = this.relEnv(state, rel);
+    return relationshipRoute(rel, a, b, env.obstacles, env.origin);
+  }
+
+  private drawRelationship(theme: RenderTheme, a: Box, b: Box, rel: Relationship, color: string, selected?: boolean, env: RouteEnv = {}): void {
     const ctx = this.ctx;
     // The route (curve or polyline, cut at the borders or pinned to anchors)
     // is shared with both exports — see layout/relationship.ts.
-    const route = relationshipRoute(rel, a, b);
+    const route = relationshipRoute(rel, a, b, env.obstacles, env.origin);
     const style = rel.lineStyle ?? "dashed";
     const width = relWidth(rel);
     ctx.strokeStyle = color;
@@ -1842,6 +1959,7 @@ export class Renderer {
       ctx.fillStyle = theme.background;
       const w = ctx.measureText(label).width + 10;
       ctx.fillRect(mx - w / 2, my - 10, w, 20);
+      if (rel.id) this.relLabelRects.set(rel.id, { x: mx - w / 2, y: my - 10, w, h: 20 });
       ctx.fillStyle = color;
       ctx.fillText(label, mx, my + 0.5);
     }
@@ -1867,7 +1985,7 @@ export class Renderer {
         ctx.lineWidth = 2 * k;
         ctx.strokeRect(target.x - RING_PAD * k, target.y - RING_PAD * k, target.w + 2 * RING_PAD * k, target.h + 2 * RING_PAD * k);
       }
-      this.drawRelationship(theme, a ?? pt, b ?? pt, draft.rel, theme.selection, true);
+      this.drawRelationship(theme, a ?? pt, b ?? pt, draft.rel, theme.selection, true, a && b ? this.relEnv(state, draft.rel) : {});
       return;
     }
     if (state.relSel) {
@@ -1875,7 +1993,7 @@ export class Renderer {
       const a = rel && byId.get(rel.fromId);
       const b = rel && byId.get(rel.toId);
       if (rel && a && b) {
-        const route = relationshipRoute(rel, a, b);
+        const route = this.relRoute(state, rel, a, b);
         for (const p of [route.start.tip, route.end.tip]) {
           ctx.beginPath();
           ctx.arc(p.x, p.y, REL_END_R * k, 0, Math.PI * 2);
@@ -1884,6 +2002,23 @@ export class Renderer {
           ctx.strokeStyle = theme.selection;
           ctx.lineWidth = 2 * k;
           ctx.stroke();
+        }
+        // Bends (draw.io): solid handles on the waypoints and on an elbow
+        // line's movable segments, faint ones where a new bend can be pulled out.
+        for (const h of this.relBendHandles(state, rel, a, b, route)) {
+          const r = (h.kind === "insert" ? REL_END_R - 1.5 : REL_END_R - 0.5) * k;
+          ctx.beginPath();
+          if (h.kind === "segment") {
+            const lw = (h.horizontal ? 5 : 2.5) * r / 2, lh = (h.horizontal ? 2.5 : 5) * r / 2;
+            ctx.rect(h.at.x - lw, h.at.y - lh, lw * 2, lh * 2);
+          } else ctx.arc(h.at.x, h.at.y, r, 0, Math.PI * 2);
+          ctx.globalAlpha = h.kind === "insert" ? 0.55 : 1;
+          ctx.fillStyle = h.kind === "insert" ? theme.background : theme.selection;
+          ctx.fill();
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 1.5 * k;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
         }
       }
       return;
@@ -2247,7 +2382,7 @@ export class Renderer {
       if (!a || !b) continue;
       // The drawn route, not the old centre-to-centre curve: an elbow or an
       // anchored line runs somewhere else entirely.
-      const d = routeDistance(relationshipRoute(rel, a, b), { x: wx, y: wy }) - relWidth(rel) / 2;
+      const d = routeDistance(this.relRoute(state, rel, a, b), { x: wx, y: wy }) - relWidth(rel) / 2;
       if (d < threshold && d < bestD) {
         bestD = d;
         best = rel.id;
@@ -2263,8 +2398,38 @@ export class Renderer {
     const a = this.nodeWorldRect(state, rel.fromId);
     const b = this.nodeWorldRect(state, rel.toId);
     if (!a || !b) return null;
-    const route = relationshipRoute(rel, a, b);
+    const route = this.relRoute(state, rel, a, b);
     return { from: route.start.tip, to: route.end.tip };
+  }
+
+  /** The bend handles of a relationship (see layout/relationship.ts bendHandles). */
+  private relBendHandles(state: RenderState, rel: Relationship, a: Rect, b: Rect, route: RelRoute): BendHandle[] {
+    return bendHandles(rel, route, worldWaypoints(rel, a, b, this.relEnv(state, rel).origin));
+  }
+
+  /** The bend handle of the selected relationship under the pointer. */
+  hitTestBend(state: RenderState, wx: number, wy: number, reach = REL_END_R + 3): BendHandle | null {
+    if (!state.relSel) return null;
+    const rel = state.sheet.relationships.find((r) => r.id === state.relSel);
+    const a = rel && this.nodeWorldRect(state, rel.fromId);
+    const b = rel && this.nodeWorldRect(state, rel.toId);
+    if (!rel || !a || !b) return null;
+    const tol = reach / state.camera.scale;
+    let best: BendHandle | null = null, bestD = Infinity;
+    for (const h of this.relBendHandles(state, rel, a, b, this.relRoute(state, rel, a, b))) {
+      const d = Math.hypot(wx - h.at.x, wy - h.at.y);
+      // A real bend wins over a faint "add one" handle at the same spot.
+      const score = d + (h.kind === "insert" ? 0.5 / state.camera.scale : 0);
+      if (d <= tol && score < bestD) { bestD = score; best = h; }
+    }
+    return best;
+  }
+
+  /** Is the pointer on the label chip of the selected relationship? */
+  hitTestRelLabel(state: RenderState, wx: number, wy: number): boolean {
+    const r = state.relSel ? this.relLabelRects.get(state.relSel) : undefined;
+    const rel = state.relSel ? state.sheet.relationships.find((x) => x.id === state.relSel) : undefined;
+    return !!r && !!rel?.label && wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h;
   }
 
   /** The endpoint handle of the selected relationship under the pointer. */
@@ -2570,7 +2735,12 @@ export class Renderer {
       for (let k = count - 1; k >= 0; k--) {
         const p = placed[candidates ? candidates[k] : k];
         if (!p.visible || !!p.node.style.freeform !== background || skip?.(p.node.id)) continue;
-        if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
+        if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) {
+          // A frame takes the pointer only on its border and title strip; inside,
+          // the canvas and the items under it answer.
+          if (p.node.style.frame && !onFrameEdge(p, worldX, worldY, state.camera.scale)) continue;
+          return p.node.id;
+        }
       }
     }
     return null;
@@ -2798,12 +2968,27 @@ export class Renderer {
     return p ? { x: p.x, y: p.y, w: p.w, h: p.h, node: p.node } : null;
   }
 
-  /** Visible node ids whose box intersects the given world-space rectangle (marquee). */
-  nodesInRect(state: RenderState, wx0: number, wy0: number, wx1: number, wy1: number): string[] {
+  /**
+   * Visible node ids whose box intersects the given world-space rectangle
+   * (marquee). With `contain`, only boxes lying wholly inside it — the
+   * draw.io rule a freeform canvas's marquee follows.
+   */
+  nodesInRect(state: RenderState, wx0: number, wy0: number, wx1: number, wy1: number, contain = false): string[] {
     const minX = Math.min(wx0, wx1), maxX = Math.max(wx0, wx1);
     const minY = Math.min(wy0, wy1), maxY = Math.max(wy0, wy1);
     return this.placedNodes(state)
-      .filter((p) => p.visible && p.x < maxX && p.x + p.w > minX && p.y < maxY && p.y + p.h > minY)
+      .filter((p) => {
+        if (!p.visible) return false;
+        // Canvases and their items always follow draw.io's rule: picked only
+        // when wholly inside, whichever surface the box was started on (a box
+        // that merely clips a canvas does not grab it with its items). A
+        // rotated item is measured by the box it really covers.
+        const item = !!p.node.style.freeform || !!freeformOwner(state.sheet, p.node.id);
+        const b = item ? rotatedBox(p, p.node.style.rotation) : p;
+        return contain || item
+          ? b.x >= minX && b.x + b.w <= maxX && b.y >= minY && b.y + b.h <= maxY
+          : b.x < maxX && b.x + b.w > minX && b.y < maxY && b.y + b.h > minY;
+      })
       .map((p) => p.node.id);
   }
 
@@ -2888,11 +3073,17 @@ export class Renderer {
     const byId = new Map(all.map((p) => [p.node.id, p]));
     for (const p of all) if (p.node.style.freeform) this.drawFreeform(theme, p);
     this.drawGroupFills({ ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);
-    for (const rel of state.sheet.relationships) {
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
-      if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false);
-    }
+    // Diagram arrows (both ends in a canvas) go over the boxes, as on screen.
+    const inCanvas = (rel: Relationship): boolean => !!freeformOwner(state.sheet, rel.fromId) && !!freeformOwner(state.sheet, rel.toId);
+    const paintRels = (over: boolean): void => {
+      for (const rel of state.sheet.relationships) {
+        if (inCanvas(rel) !== over) continue;
+        const a = byId.get(rel.fromId);
+        const b = byId.get(rel.toId);
+        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false, this.relEnv(state, rel));
+      }
+    };
+    paintRels(false);
     for (const p of all) {
       if (p.node.parentId) {
         const parent = byId.get(p.node.parentId);
@@ -2907,6 +3098,7 @@ export class Renderer {
       }
     }
     for (const p of all) this.drawNode(theme, p, { ...state, showHidden: true }, false);
+    paintRels(true);
     for (const p of all) if (p.node.style.freeform) this.drawInk(theme, p, state);
     // export with a fixed 1px-ish stroke scale
     this.drawGroupsAndSummaries(theme, { ...state, showHidden: true, camera: { ...state.camera, scale: 1 } }, byId);
