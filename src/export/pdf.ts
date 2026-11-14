@@ -74,7 +74,7 @@ import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET } from "../layout/me
 import { unzlibSync, zlibSync } from "fflate";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import type { MindNode, Relationship, Sheet, TextRun } from "../core/types";
-import { nodeRuns } from "../core/text";
+import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
 import { headLen, headShape, relationshipRoute, relHeads, relWidth, routeYRange, type HeadShape } from "../layout/relationship";
 import {
   FONT_STACK,
@@ -1163,7 +1163,18 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       drawBox(cmds, p, colors?.fill ?? "#ffffff", fr);
       drawImages(cmds, p, fr);
       drawCaptions(cmds, p, colors?.text ?? "#111111", fr);
-      drawTitle(cmds, p, colors?.text ?? "#111111", fr);
+      if (p.node.style.titleAt) {
+        // A label painted at the top or bottom of its box, as on screen.
+        const n = p.node, size = n.style.fontSize ?? 14, bold = (n.style.fontWeight ?? 400) >= 600;
+        const lines = n.title.trim() ? wrapPlainLines(n.title, Math.max(20, p.w - OWN_LABEL_PAD * 2), (t) => advance(winAnsiText(t), bold, !!n.style.italic, size)) : [];
+        const lh = size * OWN_LABEL_LINE;
+        const top = n.style.titleAt === "bottom" ? p.y + p.h - OWN_LABEL_PAD - lines.length * lh : p.y + OWN_LABEL_PAD;
+        lines.forEach((l, i) => {
+          const w = advance(winAnsiText(l), bold, !!n.style.italic, size);
+          const x = n.style.align === "left" ? p.x + OWN_LABEL_PAD : p.x + (p.w - w) / 2;
+          plainText(cmds, l, x, top + i * lh + size * 0.8, size, n.style.textColor ?? colors?.text ?? "#111111", fr, bold);
+        });
+      } else drawTitle(cmds, p, colors?.text ?? "#111111", fr);
     }
     paintRels(true);
     // Handwriting over the items on its canvas, as on screen.

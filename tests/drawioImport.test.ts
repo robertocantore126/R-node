@@ -247,38 +247,41 @@ describe("a diagram that was cut off", () => {
 });
 
 describe("frames drawn behind other boxes", () => {
-  it("a box that encloses others becomes their container, nested by size (the user's AWS answer)", async () => {
+  it("a box that encloses others is a visual frame, title at the top; nothing is nested in it (the user's AWS answer)", async () => {
     const { readFileSync } = await import("node:fs");
     const d = (await parseDrawio(readFileSync("tests/fixtures/drawio-aws-truncated.xml", "utf8")))!;
     const by = Object.fromEntries(d.vertices.map((v) => [v.id, v]));
-    expect(by.aws_cloud).toMatchObject({ container: true, align: "left" });
-    expect(by.aws_cloud.parent).toBeUndefined();
-    expect(by.vpc_box).toMatchObject({ container: true, parent: "aws_cloud", dashed: true });
-    expect(by.public_subnet).toMatchObject({ container: true, parent: "vpc_box" });
-    expect(by.alb.parent).toBe("public_subnet");
-    expect(by.ec2_ecs.parent).toBe("private_app_subnet");
-    expect(by.rds.parent).toBe("private_db_subnet");
-    expect(by.cloudfront.parent).toBe("aws_cloud");
-    expect(by.cloudwatch.parent).toBe("aws_cloud");
-    // Outside every frame, and boxes that hold nothing stay boxes.
-    expect(by.users.parent).toBeUndefined();
-    expect(by.route53.container).toBe(false);
+    for (const id of ["aws_cloud", "vpc_box", "public_subnet", "private_app_subnet", "private_db_subnet"]) {
+      expect(by[id], id).toMatchObject({ frame: true, titleAt: "top", container: false, align: "left" });
+    }
+    expect(d.vertices.every((v) => v.parent === undefined)).toBe(true);
+    expect(by.route53.frame).toBeUndefined();
+    // Under what they frame, the largest first.
+    expect(d.vertices.slice(0, 5).map((v) => v.id)).toEqual(["aws_cloud", "vpc_box", "private_app_subnet", "private_db_subnet", "public_subnet"]);
   });
 
-  it("imports into nested canvases with each box where it was drawn", async () => {
+  it("imports as flat items at draw.io's positions, frames first", async () => {
     const { readFileSync } = await import("node:fs");
     const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
     store.createFreeformTopic(store.sheet.rootNodeId);
     const board = store.doc.requireNode(store.getSnapshot().selection[0]);
     store.importDrawio(board.id, (await parseDrawio(readFileSync("tests/fixtures/drawio-aws-truncated.xml", "utf8")))!);
+    expect(board.childrenIds).toHaveLength(22);
     const find = (title: string) => Object.values(store.sheet.nodes).find((n) => n.title.startsWith(title))!;
-    const cloud = find("AWS Cloud"), vpc = find("Amazon VPC"), pub = find("Public Subnet"), alb = find("Application Load");
-    expect(cloud.parentId).toBe(board.id);
-    expect(vpc.parentId).toBe(cloud.id);
-    expect(pub.parentId).toBe(vpc.id);
-    expect(alb.parentId).toBe(pub.id);
-    expect(cloud.style).toMatchObject({ freeform: true, align: "left", textColor: "#232f3e" });
-    // ALB at (395,310), Public Subnet at (370,250): 25 right, 60 down, clear of the band.
-    expect(alb.style.freeformPosition).toEqual({ x: 25, y: 60 });
+    const cloud = find("AWS Cloud"), pub = find("Public Subnet"), alb = find("Application Load");
+    expect(cloud.style).toMatchObject({ frame: true, titleAt: "top", align: "left", width: 810, height: 750 });
+    expect(cloud.style.freeform).toBeUndefined();
+    expect(alb.parentId).toBe(board.id);
+    // Same distance as in draw.io: ALB (395,310) vs Public Subnet (370,250).
+    expect(alb.style.freeformPosition!.x - pub.style.freeformPosition!.x).toBe(25);
+    expect(alb.style.freeformPosition!.y - pub.style.freeformPosition!.y).toBe(60);
+  });
+
+  it("verticalAlign top/bottom on an ordinary box puts its label there", async () => {
+    const d = (await parseDrawio(`<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+      <mxCell id="a" value="Top" style="verticalAlign=top;" vertex="1" parent="1"><mxGeometry width="100" height="60" as="geometry"/></mxCell>
+      <mxCell id="b" value="Bottom" style="verticalAlign=bottom;" vertex="1" parent="1"><mxGeometry x="200" width="100" height="60" as="geometry"/></mxCell>
+      </root></mxGraphModel>`))!;
+    expect(d.vertices.map((v) => v.titleAt)).toEqual(["top", "bottom"]);
   });
 });

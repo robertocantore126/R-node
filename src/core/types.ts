@@ -238,6 +238,20 @@ export interface Style {
   /** Topic containing freely positioned document nodes. */
   freeform?: boolean;
   /**
+   * A purely visual frame in a canvas (an "AWS Cloud" or "VPC" box drawn
+   * behind other items): it holds nothing, and only its border and title
+   * strip take clicks — inside it the pointer reaches the canvas and the
+   * items under it, so a marquee or a click works through it.
+   */
+  frame?: boolean;
+  /**
+   * The label is painted by R-node at the top or bottom of the box (plain,
+   * wrapped, aligned by `align`) instead of centred rich text: a frame's
+   * title, an actor's name. Such a label is renamed in the Inspector, not in
+   * place, so no second renderer draws it.
+   */
+  titleAt?: "top" | "bottom";
+  /**
    * A freeform canvas drawn as a diagram CONTAINER (draw.io swimlane / group
    * box, a VPC around its subnets): no grid, no hint, the title centred in the
    * band, which `headerFill` paints as a swimlane header. It is still a canvas

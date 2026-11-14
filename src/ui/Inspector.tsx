@@ -12,6 +12,7 @@ import { plainToRuns } from "../core/text";
 import { chartSlotNote } from "../core/chartNotes";
 import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
 import { InkControls } from "./InkControls";
+import { freeformOwner } from "../core/freeform";
 import { ColorControls, ColorSwatch } from "./ColorControls";
 import { DIAGRAM_PALETTE } from "../core/paint";
 const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
@@ -199,6 +200,32 @@ export function Inspector(): JSX.Element {
                 {SHAPES.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
+            {freeformOwner(store.sheet, node.id) && !node.style.freeform && (() => {
+              const ids = snap.selection.includes(node.id) ? snap.selection : [node.id];
+              return <>
+                <div className="field">
+                  <span>Label</span>
+                  <select
+                    value={node.style.titleAt ?? "center"}
+                    title="Where the label sits in the box. Top/bottom labels are renamed in the Topic field above."
+                    onChange={(e) => store.setSelectionStyle({ titleAt: e.target.value === "center" ? undefined : (e.target.value as "top" | "bottom") }, ids)}
+                  >
+                    <option value="center">centre</option>
+                    <option value="top">top</option>
+                    <option value="bottom">bottom</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <span>Frame</span>
+                  <input
+                    type="checkbox"
+                    checked={!!node.style.frame}
+                    title="A visual box behind other items: it holds nothing, and clicks inside it reach the canvas"
+                    onChange={(e) => store.setSelectionStyle((n) => (e.target.checked ? { frame: true, titleAt: n.style.titleAt ?? "top" } : { frame: undefined }), ids)}
+                  />
+                </div>
+              </>;
+            })()}
           </>
         )}
       </div>

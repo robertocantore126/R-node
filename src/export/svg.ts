@@ -25,7 +25,7 @@ import { inkPolyline, inkStrokes } from "../core/ink";
  * the browser under the canvas one.
  */
 import type { MindNode, Relationship, ResolvedBorder, Sheet, TextRun } from "../core/types";
-import { nodeRuns } from "../core/text";
+import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
 import { positionedImageSlots } from "../layout/measure";
 import { buildReport, publishReport, type ExportReport } from "./report";
 import {
@@ -255,6 +255,21 @@ function relationship(rel: Relationship, byId: Map<string, Placed>, color: strin
  * always left aligned. Deviating anywhere here reintroduces exactly the
  * divergence the parity harness was built to close.
  */
+/** A label painted at the top or bottom of its box (Style.titleAt), as the canvas paints it. */
+function ownLabel(p: Placed, color: string, measurer: TextMeasurer): string {
+  const n = p.node;
+  if (!n.title.trim()) return "";
+  const size = n.style.fontSize ?? 14;
+  const font = { fontSize: size, fontWeight: n.style.fontWeight ?? 400, italic: !!n.style.italic };
+  const lines = wrapPlainLines(n.title, Math.max(20, p.w - OWN_LABEL_PAD * 2), (t) => measurer.measure(t, font).width);
+  const lh = size * OWN_LABEL_LINE;
+  const top = n.style.titleAt === "bottom" ? p.y + p.h - OWN_LABEL_PAD - lines.length * lh : p.y + OWN_LABEL_PAD;
+  const left = n.style.align === "left";
+  const x = left ? p.x + OWN_LABEL_PAD : p.x + p.w / 2;
+  const attrs = `font-size="${n3(size)}" font-weight="${font.fontWeight}"${font.italic ? ` font-style="italic"` : ""} fill="${esc(color)}" text-anchor="${left ? "start" : "middle"}" dominant-baseline="hanging"`;
+  return lines.map((l, i) => `<text x="${n3(x)}" y="${n3(top + i * lh)}" ${attrs}>${esc(l)}</text>`).join("");
+}
+
 function title(
   p: Placed,
   color: string,
@@ -591,7 +606,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
         }
       }
     }
-    parts.push(title(p, text, pos, opts.measurer));
+    parts.push(n.style.titleAt ? ownLabel(p, text, opts.measurer) : title(p, text, pos, opts.measurer));
     parts.push(`</g>`);
   }
   if (overRels.length) parts.push("<g>", ...overRels, "</g>");

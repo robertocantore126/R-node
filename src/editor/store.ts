@@ -2100,11 +2100,11 @@ export class EditorStore {
     // would be indistinguishable from a defect (§4bis). A CHART is the
     // exception: its title is a heading over a fixed board, and the overlay
     // sits above the board exactly as it sits above any topic's images.
-    if (node.style.code || (node.style.gallery && !node.style.gallery.chart) || node.style.freeform) {
+    if (node.style.code || (node.style.gallery && !node.style.gallery.chart) || node.style.freeform || node.style.titleAt) {
       this.setSelectionTarget({ kind: "nodes", ids: [id] });
       this.state.editingId = null;
       this.state.pendingInsert = null;
-      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : "gallery topic is a grid of pictures";
+      const why = node.style.freeform ? "double click the canvas to add text" : node.style.code ? "code topic is read-only" : node.style.titleAt ? "a top/bottom label is renamed in the Inspector" : "gallery topic is a grid of pictures";
       return trace.ignored("edit:start", why, { nodeId: id });
     }
     this.setSelectionTarget({ kind: "nodes", ids: [id] });
@@ -2639,6 +2639,8 @@ export class EditorStore {
         fontSize: v.fontSize ?? 12,
         align: v.align ?? "center",
       };
+      if (v.frame) style.frame = true;
+      if (v.titleAt) style.titleAt = v.titleAt;
       if (v.container) {
         style.freeform = true;
         style.container = v.headerFill ? { headerFill: v.headerFill } : {};

@@ -32,6 +32,10 @@ export interface DrawioVertex {
   parent?: string;
   /** A swimlane's title band colour (its fillColor; the body is swimlaneFillColor). */
   headerFill?: string;
+  /** A box drawn behind others as their frame: visual only, it holds nothing. */
+  frame?: boolean;
+  /** draw.io's verticalAlign=top/bottom: the label sits at that edge of the box. */
+  titleAt?: "top" | "bottom";
   fill?: string;
   stroke?: string;
   textColor?: string;
@@ -392,6 +396,7 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       underline: (fontStyle & 4) !== 0 || undefined,
       opacity: num(s.opacity) !== undefined ? num(s.opacity)! / 100 : undefined,
       align: s.align === "left" ? "left" : undefined,
+      titleAt: !container && (s.verticalAlign === "top" || s.verticalAlign === "bottom") ? s.verticalAlign : undefined,
     });
   }
 
@@ -411,37 +416,25 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
     }
   }
   // Frames drawn as plain boxes BEHIND others (an "AWS Cloud" or "VPC"
-  // rectangle with verticalAlign=top, its services laid on top at the same
-  // level) are containers in all but name: draw.io only shows it by position.
-  // A rectangle that wholly encloses a box of its own level becomes the
-  // container of the smallest such frame holding it, so the title sits in the
-  // band and what it frames moves with it.
+  // rectangle, its services laid on top at the same level): a rectangle that
+  // wholly encloses another box of its own level is a FRAME. It stays a
+  // visual box — it holds nothing and captures nothing — with its title
+  // painted at the top, where draw.io drew it.
   const tol = 1;
   const encloses = (a: DrawioVertex, b: DrawioVertex): boolean =>
     b.x >= a.x - tol && b.y >= a.y - tol && b.x + b.w <= a.x + a.w + tol && b.y + b.h <= a.y + a.h + tol && a.w * a.h > b.w * b.h;
-  const frames = vertices.filter((v) => !v.text && (v.shape === "rect" || v.shape === "rounded" || v.container));
-  const inferred = new Map<string, string>();
-  for (const v of vertices) {
-    let best: DrawioVertex | undefined;
-    for (const f of frames) {
-      if (f === v || f.parent !== v.parent || !encloses(f, v)) continue;
-      if (!best || f.w * f.h < best.w * best.h) best = f;
-    }
-    if (best) inferred.set(v.id, best.id);
-  }
-  for (const [child, frame] of inferred) {
-    const v = vertices.find((o) => o.id === child)!;
-    const f = vertices.find((o) => o.id === frame)!;
-    v.parent = frame;
-    if (!f.container) {
-      f.container = true;
-      // Its title goes in the band: left as draw.io put it, or centred.
-      f.align = f.align === "left" ? "left" : undefined;
+  for (const f of vertices) {
+    if (f.text || f.container || (f.shape !== "rect" && f.shape !== "rounded")) continue;
+    if (vertices.some((v) => v !== f && v.parent === f.parent && encloses(f, v))) {
+      f.frame = true;
+      f.titleAt = f.titleAt === "bottom" ? "bottom" : "top";
     }
   }
   // Holders before what they hold, whatever order the file listed them in.
   const depth = (v: DrawioVertex): number => { let d = 0, p = v.parent; while (p && d < 64) { d++; p = vertices.find((o) => o.id === p)?.parent; } return d; };
-  vertices.sort((a, b) => depth(a) - depth(b));
+  // Frames go under what they frame: first, the largest first.
+  const layer = (v: DrawioVertex): number => (v.frame ? -v.w * v.h : 0);
+  vertices.sort((a, b) => depth(a) - depth(b) || layer(a) - layer(b));
   const edges: DrawioEdge[] = [];
   let skippedEdges = 0;
   for (const c of order) {

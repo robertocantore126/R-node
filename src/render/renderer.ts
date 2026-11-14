@@ -18,7 +18,7 @@ import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHe
 import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
 import { groupBoxes, groupRadius, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
-import { nodeRuns } from "../core/text";
+import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
 import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, chartGrowPitch, CHART_COLS, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
@@ -126,6 +126,13 @@ interface Placed {
 const RING_PAD = 3;
 const RING_W_SELECTED = 2.5;
 const RING_W_HOVER = 1.5;
+
+/** On a frame's border or in its title strip, where a frame takes the pointer. */
+export function onFrameEdge(p: { x: number; y: number; w: number; h: number; node: MindNode }, wx: number, wy: number, scale: number): boolean {
+  const band = 8 / scale;
+  const strip = OWN_LABEL_PAD * 2 + (p.node.style.fontSize ?? 14) * OWN_LABEL_LINE;
+  return wx - p.x < band || p.x + p.w - wx < band || wy - p.y < Math.max(band, strip) || p.y + p.h - wy < band;
+}
 
 export class Renderer {
   private ctx: CanvasRenderingContext2D;
@@ -1187,7 +1194,8 @@ export class Renderer {
       } else {
         this.drawImage(p);
         this.drawGallery(theme, p, state.sheet);
-        this.drawText(theme, p, textColor);
+        if (n.style.titleAt) this.drawOwnLabel(p, textColor);
+        else this.drawText(theme, p, textColor);
       }
     }
 
@@ -1350,6 +1358,25 @@ export class Renderer {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(this.placeholderFor(n), p.x + p.w / 2, p.y + p.h / 2 + 0.5);
+    ctx.restore();
+  }
+
+  /** A label R-node paints itself, at the top or bottom of the box (Style.titleAt). */
+  private drawOwnLabel(p: Placed, color: string): void {
+    const n = p.node, ctx = this.ctx;
+    if (!n.title.trim()) return;
+    const size = n.style.fontSize ?? 14;
+    ctx.save();
+    ctx.font = `${n.style.italic ? "italic " : ""}${n.style.fontWeight ?? 400} ${size}px ${FONT_STACK}`;
+    ctx.fillStyle = color;
+    ctx.textBaseline = "top";
+    const left = n.style.align === "left";
+    ctx.textAlign = left ? "left" : "center";
+    const lines = wrapPlainLines(n.title, Math.max(20, p.w - OWN_LABEL_PAD * 2), (t) => ctx.measureText(t).width);
+    const lh = size * OWN_LABEL_LINE;
+    let y = n.style.titleAt === "bottom" ? p.y + p.h - OWN_LABEL_PAD - lines.length * lh : p.y + OWN_LABEL_PAD;
+    const x = left ? p.x + OWN_LABEL_PAD : p.x + p.w / 2;
+    for (const line of lines) { ctx.fillText(line, x, y); y += lh; }
     ctx.restore();
   }
 
@@ -2619,7 +2646,12 @@ export class Renderer {
       for (let k = count - 1; k >= 0; k--) {
         const p = placed[candidates ? candidates[k] : k];
         if (!p.visible || !!p.node.style.freeform !== background || skip?.(p.node.id)) continue;
-        if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) return p.node.id;
+        if (worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h) {
+          // A frame takes the pointer only on its border and title strip; inside,
+          // the canvas and the items under it answer.
+          if (p.node.style.frame && !onFrameEdge(p, worldX, worldY, state.camera.scale)) continue;
+          return p.node.id;
+        }
       }
     }
     return null;
