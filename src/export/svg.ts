@@ -543,7 +543,8 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     const text = colors?.text ?? "#1a1a1a";
     // The item's own opacity, over box, pictures and text alike, as on screen.
     const alpha = n.style.opacity ?? 1;
-    parts.push(alpha < 1 ? `<g opacity="${n3(alpha)}">` : `<g>`);
+    const turn = n.style.rotation ? ` transform="rotate(${n3(n.style.rotation)} ${n3(p.x + p.w / 2)} ${n3(p.y + p.h / 2)})"` : "";
+    parts.push(alpha < 1 ? `<g opacity="${n3(alpha)}"${turn}>` : `<g${turn}>`);
     const shape = shapeOf(p, fill, opts.borderOf ? opts.borderOf(n.id) : null);
     if (shape) parts.push(shape);
 

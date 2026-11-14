@@ -6,7 +6,7 @@ export const FREEFORM_PADDING = 16;
 /** The base shapes the double-click picker offers in a canvas (draw.io style). */
 export type FreeformShape = Extract<
   TopicShape,
-  "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon" | "ellipse" | "cylinder" | "document" | "parallelogram" | "triangle" | "process" | "note"
+  "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon" | "ellipse" | "cylinder" | "document" | "parallelogram" | "triangle" | "process" | "note" | "actor"
 >;
 export const FREEFORM_SHAPES: { shape: FreeformShape; label: string }[] = [
   { shape: "rect", label: "Rectangle" },
@@ -22,6 +22,7 @@ export const FREEFORM_SHAPES: { shape: FreeformShape; label: string }[] = [
   { shape: "cylinder", label: "Database" },
   { shape: "triangle", label: "Triangle" },
   { shape: "note", label: "Note" },
+  { shape: "actor", label: "Actor (person)" },
 ];
 /** Starting box of each shape; the user resizes it like any item. */
 export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number }> = {
@@ -38,6 +39,7 @@ export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number 
   triangle: { w: 90, h: 80 },
   process: { w: 130, h: 60 },
   note: { w: 110, h: 80 },
+  actor: { w: 60, h: 100 },
 };
 /** Nearest enclosing canvas, excluding the topic itself. */
 export function freeformOwner(sheet: Sheet, id: string): string | null {

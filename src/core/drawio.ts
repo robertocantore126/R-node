@@ -12,6 +12,7 @@
  */
 import type { ArrowHead, ConnectorStyle, RelAnchor, TopicShape } from "./types";
 import { withAlpha } from "./paint";
+import { ACTOR_FIGURE } from "./diagramShapes";
 
 export interface DrawioVertex {
   id: string;
@@ -36,6 +37,8 @@ export interface DrawioVertex {
   frame?: boolean;
   /** draw.io's verticalAlign=top/bottom: the label sits at that edge of the box. */
   titleAt?: "top" | "bottom";
+  /** Degrees clockwise around the box centre (draw.io's rotation). */
+  rotation?: number;
   fill?: string;
   stroke?: string;
   textColor?: string;
@@ -71,6 +74,8 @@ export interface DrawioDiagram {
   skippedEdges: number;
   /** The text was cut off; this is what arrived up to the last complete cell. */
   truncated?: boolean;
+  /** How many pages the file had; only the first is imported. */
+  pages?: number;
 }
 
 /** Cheap test, before any parsing: does this text carry a draw.io diagram? */
@@ -226,6 +231,10 @@ export function shapeFor(kind: string, s: Record<string, string>): TopicShape {
     case "card":
     case "card2":
       return "note";
+    case "umlActor":
+    case "actor":
+    case "person":
+      return "actor";
     case "terminator":
     case "delay":
     case "display":
@@ -397,7 +406,15 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       opacity: num(s.opacity) !== undefined ? num(s.opacity)! / 100 : undefined,
       align: s.align === "left" ? "left" : undefined,
       titleAt: !container && (s.verticalAlign === "top" || s.verticalAlign === "bottom") ? s.verticalAlign : undefined,
+      rotation: num(s.rotation) ? ((num(s.rotation)! % 360) + 360) % 360 : undefined,
     });
+    const last = vertices[vertices.length - 1];
+    if (last.shape === "actor") {
+      // draw.io writes an actor's name UNDER the figure: the box grows to hold
+      // it, and the figure keeps its size in the top part.
+      last.h = Math.round(last.h / ACTOR_FIGURE);
+      last.titleAt = "bottom";
+    }
   }
 
   const ids = new Set(vertices.map((v) => v.id));
@@ -453,7 +470,8 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       source,
       target,
       label,
-      color: color(s.strokeColor),
+      // draw.io's default line is black; dark grey reads on light and dark themes.
+      color: color(s.strokeColor) ?? "#666666",
       width: num(s.strokeWidth),
       // Explicit "solid": an R-node arrow with no lineStyle is drawn dashed.
       lineStyle: s.dashed === "1" ? (/^1\s+[1-4]$/.test(dash.trim()) ? "dotted" : "dashed") : "solid",
@@ -464,5 +482,6 @@ export async function parseDrawio(text: string): Promise<DrawioDiagram | null> {
       toAnchor: anchor(s.entryX, s.entryY),
     });
   }
-  return { vertices, edges, skippedEdges, ...(found.truncated ? { truncated: true } : {}) };
+  const pages = (found.xml.match(/<diagram[\s>]/g) ?? []).length;
+  return { vertices, edges, skippedEdges, ...(found.truncated ? { truncated: true } : {}), ...(pages > 1 ? { pages } : {}) };
 }

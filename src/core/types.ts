@@ -61,6 +61,7 @@ export type TopicShape =
   | "triangle"
   | "process"
   | "note"
+  | "actor"
   | "underline"
   | "none";
 

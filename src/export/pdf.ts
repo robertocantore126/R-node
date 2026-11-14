@@ -1162,6 +1162,14 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     for (const p of pg.nodes) {
       if (p.node.style.freeform) continue;
       const colors = opts.colorOf(p.node.id);
+      // Rotation around the item's centre, as on screen (PDF's y axis points up,
+      // so a clockwise turn on screen is a negative angle here).
+      const turn = p.node.style.rotation ?? 0;
+      if (turn) {
+        const t = (-turn * Math.PI) / 180, c = Math.cos(t), sn = Math.sin(t);
+        const X = fr.X(p.x + p.w / 2), Y = fr.Y(p.y + p.h / 2);
+        cmds.push("q", `${f(c)} ${f(sn)} ${f(-sn)} ${f(c)} ${f(X - X * c + Y * sn)} ${f(Y - X * sn - Y * c)} cm`);
+      }
       drawBox(cmds, p, colors?.fill ?? "#ffffff", fr);
       drawImages(cmds, p, fr);
       drawCaptions(cmds, p, colors?.text ?? "#111111", fr);
@@ -1177,6 +1185,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
           plainText(cmds, l, x, top + i * lh + size * 0.8, size, n.style.textColor ?? colors?.text ?? "#111111", fr, bold);
         });
       } else drawTitle(cmds, p, colors?.text ?? "#111111", fr);
+      if (turn) cmds.push("Q");
     }
     paintRels(true);
     // Handwriting over the items on its canvas, as on screen.

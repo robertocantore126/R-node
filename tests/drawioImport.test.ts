@@ -285,3 +285,44 @@ describe("frames drawn behind other boxes", () => {
     expect(d.vertices.map((v) => v.titleAt)).toEqual(["top", "bottom"]);
   });
 });
+
+describe("import fidelity", () => {
+  const xml = (cells: string, pages = 1) => {
+    const model = `<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>${cells}</root></mxGraphModel>`;
+    return pages === 1 ? model : `<mxfile>${Array.from({ length: pages }, (_, i) => `<diagram id="p${i}" name="Page-${i + 1}">${i === 0 ? model : ""}</diagram>`).join("")}</mxfile>`;
+  };
+
+  it("an actor keeps its figure size and gets its name underneath", async () => {
+    const d = (await parseDrawio(xml(`<mxCell id="u" value="Customer" style="shape=umlActor;verticalLabelPosition=bottom;" vertex="1" parent="1"><mxGeometry x="0" y="0" width="30" height="60" as="geometry"/></mxCell>`)))!;
+    expect(d.vertices[0]).toMatchObject({ shape: "actor", titleAt: "bottom", w: 30, h: 83 });
+  });
+
+  it("rotation comes in as degrees around the centre", async () => {
+    const d = (await parseDrawio(xml(`<mxCell id="t" value="Pillar of Mercy" style="text;rotation=270;" vertex="1" parent="1"><mxGeometry width="180" height="30" as="geometry"/></mxCell>
+      <mxCell id="n" value="neg" style="text;rotation=-90;" vertex="1" parent="1"><mxGeometry x="300" width="80" height="30" as="geometry"/></mxCell>`)))!;
+    expect(d.vertices.map((v) => v.rotation)).toEqual([270, 270]);
+  });
+
+  it("an arrow without a colour comes in dark grey, not the theme's purple", async () => {
+    const d = (await parseDrawio(AI_ANSWER))!;
+    expect(d.edges[0].color).toBe("#666666");
+    expect(d.edges[1].color).toBe("#82b366");
+  });
+
+  it("a file with several pages imports the first and says how many there were", async () => {
+    const d = (await parseDrawio(xml(`<mxCell id="a" value="A" style="" vertex="1" parent="1"><mxGeometry width="80" height="40" as="geometry"/></mxCell>`, 3)))!;
+    expect(d.pages).toBe(3);
+    expect(d.vertices).toHaveLength(1);
+  });
+});
+
+describe("the user's draw.io Tree of Life", () => {
+  it("imports all ten sefirot, the captions (two rotated) and the 19 paths in grey", async () => {
+    const { readFileSync } = await import("node:fs");
+    const d = (await parseDrawio(readFileSync("tests/fixtures/drawio-tree-of-life.xml", "utf8")))!;
+    expect(d.vertices.filter((v) => v.shape === "ellipse")).toHaveLength(10);
+    expect(d.vertices.filter((v) => v.rotation).map((v) => [v.id, v.rotation])).toEqual([["leftpillar", 270], ["rightpillar", 90]]);
+    expect(d.edges).toHaveLength(19);
+    expect(d.edges.every((e) => e.color === "#999999" && e.endArrow === "none" && e.connector === "elbow")).toBe(true);
+  });
+});

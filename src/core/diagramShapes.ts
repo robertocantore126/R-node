@@ -17,7 +17,7 @@ export type PathCmd =
   | ["C", number, number, number, number, number, number]
   | ["Z"];
 
-export const DIAGRAM_SHAPES = ["ellipse", "cylinder", "document", "parallelogram", "triangle", "process", "note"] as const;
+export const DIAGRAM_SHAPES = ["ellipse", "cylinder", "document", "parallelogram", "triangle", "process", "note", "actor"] as const;
 export type DiagramShape = (typeof DIAGRAM_SHAPES)[number];
 
 export function isDiagramShape(shape: string | undefined): shape is DiagramShape {
@@ -94,6 +94,22 @@ export function diagramShapePath(shape: DiagramShape, x: number, y: number, w: n
         detail: [["M", x + b, y], ["L", x + b, y + h], ["M", x + w - b, y], ["L", x + w - b, y + h]],
       };
     }
+    case "actor": {
+      // A stick figure in the top part of the box; its name goes underneath
+      // (Style.titleAt "bottom"), in the band ACTOR_FIGURE leaves free.
+      const fh = h * ACTOR_FIGURE, cx = x + w / 2;
+      const r = Math.min(w * 0.2, fh * 0.15);
+      const neck = y + r * 2, hip = y + fh * 0.62, arms = y + fh * 0.4;
+      return {
+        outline: ellipse(cx, y + r, r, r),
+        detail: [
+          ["M", cx, neck], ["L", cx, hip],
+          ["M", x + w * 0.12, arms], ["L", x + w * 0.88, arms],
+          ["M", cx, hip], ["L", x + w * 0.15, y + fh],
+          ["M", cx, hip], ["L", x + w * 0.85, y + fh],
+        ],
+      };
+    }
     case "note": {
       const f = Math.min(16, w * 0.3, h * 0.3);
       return {
@@ -140,4 +156,8 @@ export const DIAGRAM_SHAPE_LABELS: Record<DiagramShape, string> = {
   triangle: "Triangle",
   process: "Process",
   note: "Note",
+  actor: "Actor (person)",
 };
+
+/** The share of an actor's box its figure takes; the rest is its name. */
+export const ACTOR_FIGURE = 0.72;

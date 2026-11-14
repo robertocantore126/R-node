@@ -2573,7 +2573,7 @@ export class EditorStore {
     const look: Partial<Style> = imageId
       ? { image: imageId, imageWidth: 180 }
       : size && shape
-        ? { shape, width: size.w, height: size.h, borderWidth: 1.5 }
+        ? { shape, width: size.w, height: size.h, borderWidth: 1.5, ...(shape === "actor" ? { titleAt: "bottom" as const } : {}) }
         : { shape: "none", align: "left" };
     this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
       id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
@@ -2640,6 +2640,7 @@ export class EditorStore {
         align: v.align ?? "center",
       };
       if (v.frame) style.frame = true;
+      if (v.rotation) style.rotation = v.rotation;
       if (v.titleAt) style.titleAt = v.titleAt;
       if (v.container) {
         style.freeform = true;
@@ -2713,7 +2714,7 @@ export class EditorStore {
     const done = canvasId ? this.importDrawio(canvasId, diagram) : null;
     if (!done) return "failed";
     const skipped = diagram.skippedEdges ? ` (${diagram.skippedEdges} loose arrow${diagram.skippedEdges === 1 ? "" : "s"} skipped)` : "";
-    const cut = diagram.truncated ? " — the diagram was cut off, so its end is missing" : "";
+    const cut = (diagram.truncated ? " — the diagram was cut off, so its end is missing" : "") + (diagram.pages ? ` (page 1 of ${diagram.pages})` : "");
     this.toast(`Imported ${done.shapes} shape${done.shapes === 1 ? "" : "s"} and ${done.arrows} arrow${done.arrows === 1 ? "" : "s"}${skipped}${cut}`);
     return "done";
   }

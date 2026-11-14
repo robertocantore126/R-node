@@ -971,7 +971,13 @@ export class Renderer {
 
     ctx.save();
     ctx.globalAlpha = opacity;
-    if (n.style.rotation) ctx.rotate((n.style.rotation * Math.PI) / 180);
+    // Rotation turns the item around its own centre (draw.io's rotation).
+    if (n.style.rotation) {
+      const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate((n.style.rotation * Math.PI) / 180);
+      ctx.translate(-cx, -cy);
+    }
 
     // shadow
     if (n.style.shadow) {
