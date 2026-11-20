@@ -85,8 +85,8 @@ export function readableOn(color: string): string {
 export const THEMES: Record<ThemeName, RenderTheme> = {
   light: {
     name: "light",
-    background: "#ffffff",
-    grid: "#f5f7fa",
+    background: "#f3f4f6",
+    grid: "#cfd5de",
     text: "#111827",
     textMuted: "#6b7280",
     selection: "#4f46e5",
@@ -120,7 +120,7 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
   dark: {
     name: "dark",
     background: "#0f1319",
-    grid: "#1a1f29",
+    grid: "#262e3d",
     text: "#e6e8ee",
     textMuted: "#9aa3b2",
     selection: "#6366f1",
@@ -158,7 +158,7 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
   vanilla: {
     name: "vanilla",
     background: "#f7f1e3",
-    grid: "#efe4cf",
+    grid: "#d7cbb2",
     text: "#3b2f24",
     textMuted: "#8a7358",
     selection: "#b45309",

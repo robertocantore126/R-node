@@ -92,7 +92,28 @@ describe("vector editor surfaces", () => {
     expect(content).toContain("(Independent text) Tj");
     expect(content.match(/\(Canvas title\) Tj/g)).toHaveLength(1);
     expect(file).not.toContain("/Subtype /Image");
-    expect(content).toContain("W n"); // board grid is clipped to its rounded outline
+    // The canvas has no inner grid any more (the editor dropped it): its box is
+    // the only path it strokes, so no segment ends on the 20-unit inner lattice.
+    expect(content).not.toMatch(/ l\nS\nQ\n\(Canvas title\)/);
+  });
+
+  it("paints the page grid as dots, as the editor does", async () => {
+    const { sheet } = boardMap();
+    const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light, grid: true });
+    const content = (await pageStreams(out.blob)).join("\n");
+    // Zero-length segments with round caps: "x y m x y l".
+    expect(content).toContain("1 J");
+    expect(content).toMatch(/(-?[\d.]+) (-?[\d.]+) m \1 \2 l/);
+  });
+
+  it("stretches text like the canvas: a scale about the box centre", async () => {
+    const { sheet, text } = boardMap();
+    text.style.textScaleX = 2;
+    const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light });
+    const content = (await pageStreams(out.blob)).join("\n");
+    expect(content).toMatch(/\n2 0 0 1 -?[\d.]+ 0 cm\n/);
+    expect(content).toContain("(Independent text) Tj");
+    expect(out.report.styleGaps.map((g) => g.prop)).not.toContain("textScaleX");
   });
 
   it("does not connect freeform children or paint transparent text boxes grey", async () => {
@@ -112,7 +133,7 @@ describe("vector editor surfaces", () => {
     const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light, grid: true });
     const content = (await pageStreams(out.blob)).join("\n");
     const file = latin1(await out.blob.arrayBuffer());
-    expect(content).toContain("0.961 0.969 0.980 RG");
+    expect(content).toContain("0.812 0.835 0.871 RG");
     expect(content).toContain("[9 5.85] 0 d");
     expect(file).toContain("/ca 0.06 /CA 0.06");
     expect(out.report.coverage.boundaries.emitted).toBe(1);

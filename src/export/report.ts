@@ -30,7 +30,7 @@ export const RENDERED_STYLE_PROPS = [
   "fill", "stroke", "borderWidth", "borderStyle", "cornerRadius", "shape",
   "textColor", "fontSize", "fontWeight", "fontFamily", "italic", "underline",
   "strikethrough", "opacity", "shadow", "icon", "image", "imageWidth",
-  "align", "width", "height", "rotation",
+  "align", "width", "height", "rotation", "textScaleX", "textScaleY",
 ] as const;
 
 export type StyleProp = (typeof RENDERED_STYLE_PROPS)[number];

@@ -17,6 +17,7 @@
  */
 import type { ImageSlot, MindNode, Sheet, Style, TextRun } from "../core/types";
 import { nodeRuns } from "../core/text";
+import { isBarePicture } from "../core/freeform";
 
 // ---------------------------------------------------------------------------
 // Text measurer
@@ -685,7 +686,7 @@ export function slotSizes(
     const att = resolveImage(id);
     if (!att || att.w <= 0) return null;
     const w = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
-    return { w, h: (w * att.h) / att.w };
+    return { w, h: n.style.imageHeight ?? (w * att.h) / att.w };
   };
   return {
     top: size(n.style.image),
@@ -1188,7 +1189,8 @@ export function positionedImageSlots(
   const gallery = galleryExtent(n);
   const insets = textInsets(slots, gallery?.h ?? 0);
   const sidePadW = insets.left + insets.right;
-  const pad = n.style.padding ?? 10;
+  // A bare picture is its image, edge to edge.
+  const pad = isBarePicture(n) ? 0 : n.style.padding ?? 10;
   const midL = box.x + pad + insets.left;
   const midR = box.x + box.w - pad - insets.right;
   const midW = Math.max(0, midR - midL);
@@ -1288,7 +1290,7 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
   const gal = g
     ? `${g.items.length}:${g.cellW ?? ""}:${g.aspect ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}:${g.chart ? "chart" : ""}`
     : "";
-  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.imageWidth ?? ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
+  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.textScaleX ?? 1}|${s.textScaleY ?? 1}|${s.imageWidth ?? ""}|${s.imageHeight ?? ""}|${isBarePicture(n) ? "pic" : ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
 }
 
 /**
@@ -1362,6 +1364,8 @@ function measureTopicUncached(
 ): Extent {
   const style = n.style;
   if (style.width && style.height) return { w: style.width, h: style.height };
+  // A bare picture of a canvas: the box is the image, no padding, no strut.
+  if (slots.top && isBarePicture(n)) return { w: slots.top.w, h: slots.top.h };
 
   // A code topic measures on its own path (T22): it does NOT wrap and DOES
   // keep its leading whitespace — both properties are exactly what the shared
@@ -1464,6 +1468,12 @@ function measureTopicUncached(
   } else if (shape === "hexagon") {
     w += 14;
     h += 10;
+  }
+  const sx = style.textScaleX ?? 1;
+  const sy = style.textScaleY ?? 1;
+  if (sx !== 1 || sy !== 1) {
+    w = Math.max(16, Math.round(w * sx));
+    h = Math.max(16, Math.round(h * sy));
   }
   return { w, h };
 }

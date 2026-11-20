@@ -41,6 +41,33 @@ export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number 
   note: { w: 110, h: 80 },
   actor: { w: 60, h: 100 },
 };
+/**
+ * A picture item of a freeform canvas: one image, no text, no grid. It is the
+ * picture itself — no padding, no frame — so its box IS the image, and its
+ * handles transform the image directly instead of a node holding it.
+ */
+export function isBarePicture(node: MindNode): boolean {
+  const s = node.style;
+  return !!s.image && !!s.freeformPosition && !s.imageBottom && !s.imageLeft && !s.imageRight
+    && !s.gallery && !s.code && !s.freeform && !s.chartNote && node.title.trim() === "";
+}
+
+/** Smallest font size a free-transform drag shrinks text to; past it the text squashes instead. */
+export const FREE_TRANSFORM_MIN_FONT = 2;
+
+/**
+ * Whether an item uses Photoshop-style free transform: resizing scales and
+ * stretches its text with the box. Only items of a freeform canvas can; there,
+ * text and shapes default to it (Style.freeTransform: false turns it off), while
+ * pictures, frames, notes, code and nested canvases never do.
+ */
+export function isFreeTransform(sheet: Sheet, node: MindNode): boolean {
+  const s = node.style;
+  if (s.freeform || s.container || s.chartNote || s.code || !freeformOwner(sheet, node.id)) return false;
+  if (s.freeTransform !== undefined) return s.freeTransform;
+  return !s.frame && (!s.image || isBarePicture(node));
+}
+
 /** Nearest enclosing canvas, excluding the topic itself. */
 export function freeformOwner(sheet: Sheet, id: string): string | null {
   let parentId = sheet.nodes[id]?.parentId;

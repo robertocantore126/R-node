@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
-import { FREEFORM_HEADER, FREEFORM_PADDING } from "../src/core/freeform";
+import { FREEFORM_HEADER, FREEFORM_PADDING, isFreeTransform } from "../src/core/freeform";
 import { EditorStore } from "../src/editor/store";
 
 function setup() {
@@ -88,5 +88,210 @@ describe("canvas resize from every corner", () => {
     drag(store, c, "nw", -30, -20);
     expect(size(store, c)).toEqual([290, 190]);
     expect(store.doc.requireNode(c).style.freeformPosition).toEqual({ x: at.x - 30, y: at.y - 20 });
+  });
+
+  it("free-transform text resize scales fontSize and runs proportionally, anchoring the opposite corner, and undoes cleanly", () => {
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    const textId = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 120, "Hello world")!;
+    store.cancelEdit?.();
+    store.setSelectionStyle({ freeTransform: true }, [textId]);
+
+    const beforeGeo = store.itemGeometry(textId)!;
+    const beforeFont = store.doc.requireNode(textId).style.fontSize ?? 14;
+    expect(beforeFont).toBe(14);
+
+    // Drag SE corner outward with Shift (keepRatio=true) -> ~1.5x proportional fontSize scale
+    store.beginItemResize(textId, "se");
+    store.setItemResizeDraft(beforeGeo.w * 0.5, beforeGeo.h * 0.5, true);
+    store.commitItemResize();
+
+    const after = store.doc.requireNode(textId);
+    const afterGeo = store.itemGeometry(textId)!;
+    expect(after.style.fontSize).toBe(21);
+    expect(afterGeo.x).toBe(beforeGeo.x);
+    expect(afterGeo.y).toBe(beforeGeo.y);
+    expect(afterGeo.w).toBeGreaterThan(beforeGeo.w);
+
+    // Drag NW corner outward with Shift -> SE corner stays anchored
+    const seX = afterGeo.x + afterGeo.w;
+    const seY = afterGeo.y + afterGeo.h;
+    store.beginItemResize(textId, "nw");
+    store.setItemResizeDraft(-afterGeo.w * 0.5, -afterGeo.h * 0.5, true);
+    store.commitItemResize();
+
+    const afterNw = store.itemGeometry(textId)!;
+    expect(store.doc.requireNode(textId).style.fontSize).toBe(31.5);
+    expect(Math.abs(afterNw.x + afterNw.w - seX)).toBeLessThanOrEqual(2);
+    expect(Math.abs(afterNw.y + afterNw.h - seY)).toBeLessThanOrEqual(2);
+
+    // Undo restores previous size & position in one step
+    store.undo();
+    expect(store.doc.requireNode(textId).style.fontSize).toBe(21);
+    expect(store.doc.requireNode(textId).style.freeformPosition).toEqual({ x: afterGeo.x, y: afterGeo.y });
+
+    // Cancel restores pre-drag state
+    store.beginItemResize(textId, "se");
+    store.setItemResizeDraft(100, 100);
+    store.cancelItemResize();
+    expect(store.doc.requireNode(textId).style.fontSize).toBe(21);
+  });
+
+  it("stretching a width-only text box scales it once, not twice", () => {
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    const id = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 120, "Hello world")!;
+    store.cancelEdit?.();
+    store.setNodeStyle(id, { width: 150 });
+    const g0 = store.itemGeometry(id)!;
+    store.beginItemResize(id, "e");
+    store.setItemResizeDraft(g0.w, 0);
+    store.commitItemResize();
+    expect(store.doc.requireNode(id).style.textScaleX).toBe(2);
+    expect(store.doc.requireNode(id).style.width).toBe(150); // the unstretched width
+    expect(store.itemGeometry(id)!.w).toBe(300);
+    // Shift-scaling a stretched box keeps the stretch applied once too.
+    store.beginItemResize(id, "se");
+    store.setItemResizeDraft(150, 0, true);
+    store.commitItemResize();
+    expect(store.doc.requireNode(id).style.width).toBe(225);
+    expect(Math.abs(store.itemGeometry(id)!.w - 450)).toBeLessThanOrEqual(2);
+  });
+
+  it("a stretching edge lands on the canvas grid", () => {
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    const id = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 120, "Hello world")!;
+    store.cancelEdit?.();
+    const g0 = store.itemGeometry(id)!;
+    store.beginItemResize(id, "e");
+    store.setItemResizeDraft(37, 0, false, 10);
+    store.commitItemResize();
+    const g1 = store.itemGeometry(id)!;
+    const right = g1.x + g1.w;
+    // On the 10 px grid, within the rounding of textScaleX to 1/100.
+    expect(Math.abs(right - Math.round(right / 10) * 10)).toBeLessThanOrEqual(2);
+    expect(g1.w).toBeGreaterThan(g0.w + 30);
+  });
+
+  it("free-transform edge handles stretch textScaleX/Y and rotation handle rotates with 15° snap and undo", () => {
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    const textId = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 120, "Stretch me")!;
+    store.cancelEdit?.();
+    store.setSelectionStyle({ freeTransform: true }, [textId]);
+
+    const beforeGeo = store.itemGeometry(textId)!;
+    // Drag east edge outward by 100% of width -> textScaleX ≈ 2, fontSize unchanged
+    store.beginItemResize(textId, "e");
+    store.setItemResizeDraft(beforeGeo.w, 0);
+    store.commitItemResize();
+
+    const stretched = store.doc.requireNode(textId);
+    expect(stretched.style.fontSize).toBeUndefined();
+    expect(stretched.style.textScaleX).toBe(2);
+    expect(store.itemGeometry(textId)!.w).toBeGreaterThanOrEqual(beforeGeo.w * 2 - 2);
+
+    // Drag north edge upward by 50% of height -> 2× wide, 1.5× tall: the even
+    // 1.5 goes into the font, the rest stays a stretch; bottom stays anchored.
+    const geoBeforeN = store.itemGeometry(textId)!;
+    const bottomY = geoBeforeN.y + geoBeforeN.h;
+    store.beginItemResize(textId, "n");
+    store.setItemResizeDraft(0, -geoBeforeN.h * 0.5);
+    store.commitItemResize();
+
+    expect(store.doc.requireNode(textId).style.fontSize).toBe(21);
+    expect(store.doc.requireNode(textId).style.textScaleX).toBeCloseTo(4 / 3, 2);
+    expect(store.doc.requireNode(textId).style.textScaleY).toBeUndefined();
+    const geoAfterN = store.itemGeometry(textId)!;
+    expect(Math.abs(geoAfterN.y + geoAfterN.h - bottomY)).toBeLessThanOrEqual(2);
+
+    // Rotate with 15° snap
+    store.beginItemRotate(textId);
+    store.setItemRotateDraft(43, true);
+    store.commitItemRotate();
+    expect(store.doc.requireNode(textId).style.rotation).toBe(45);
+
+    store.undo();
+    expect(store.doc.requireNode(textId).style.rotation).toBeUndefined();
+
+    // Cancel rotate restores previous rotation
+    store.beginItemRotate(textId);
+    store.setItemRotateDraft(30, false);
+    store.cancelItemRotate();
+    expect(store.doc.requireNode(textId).style.rotation).toBeUndefined();
+
+    // Drag SE corner without Shift -> changes width and height independently (no ratio lock)
+    // (compared as total scale per axis: font size × stretch).
+    const total = (): [number, number] => {
+      const s = store.doc.requireNode(textId).style, f = (s.fontSize ?? 14) / 14;
+      return [f * (s.textScaleX ?? 1), f * (s.textScaleY ?? 1)];
+    };
+    const curGeo = store.itemGeometry(textId)!;
+    const [cx0, cy0] = total();
+    store.beginItemResize(textId, "se");
+    store.setItemResizeDraft(curGeo.w * 0.5, curGeo.h * 0.25, false);
+    store.commitItemResize();
+    const [cx1, cy1] = total();
+    expect(cx1).toBeCloseTo(cx0 * 1.5, 1);
+    expect(cy1).toBeCloseTo(cy0 * 1.25, 1);
+  });
+
+  const freshItem = (shape?: "rect") => {
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    const id = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 120, "Grow me", undefined, shape)!;
+    store.cancelEdit?.();
+    return { store, id };
+  };
+
+  it("folds the even part of a stretch into the font size, with no 5× cap", () => {
+    const { store, id } = freshItem();
+    const g = store.itemGeometry(id)!;
+    // Corner without Shift to 6× wide, 3× tall: font 3×, stretch 2× in X.
+    store.beginItemResize(id, "se");
+    store.setItemResizeDraft(g.w * 5, g.h * 2);
+    store.commitItemResize();
+    const s = store.doc.requireNode(id).style;
+    expect(s.fontSize).toBe(42);
+    expect(s.textScaleX).toBeCloseTo(2, 2);
+    expect(s.textScaleY).toBeUndefined();
+    // An edge alone goes past the old 5× limit.
+    const g1 = store.itemGeometry(id)!;
+    store.beginItemResize(id, "e");
+    store.setItemResizeDraft(g1.w * 7, 0);
+    store.commitItemResize();
+    expect(store.doc.requireNode(id).style.textScaleX).toBeCloseTo(16, 1);
+    expect(Math.abs(store.itemGeometry(id)!.w - g1.w * 8)).toBeLessThanOrEqual(8);
+  });
+
+  it("scales the text of a shape in a canvas with its box", () => {
+    const { store, id } = freshItem("rect");
+    const g = store.itemGeometry(id)!;
+    store.beginItemResize(id, "se");
+    store.setItemResizeDraft(g.w, g.h, true);
+    store.commitItemResize();
+    const s = store.doc.requireNode(id).style;
+    expect(s.fontSize).toBe(28);
+    expect([s.width, s.height]).toEqual([g.w * 2, g.h * 2]);
+    // Opting out restores the plain box resize: the text keeps its size.
+    store.setSelectionStyle({ freeTransform: false }, [id]);
+    store.beginItemResize(id, "se");
+    store.setItemResizeDraft(g.w, 0);
+    store.commitItemResize();
+    expect(store.doc.requireNode(id).style.fontSize).toBe(28);
+    expect(store.doc.requireNode(id).style.width).toBe(g.w * 3);
+  });
+
+  it("only items of a canvas use free transform", () => {
+    const { store, id } = freshItem("rect");
+    expect(isFreeTransform(store.sheet, store.doc.requireNode(id))).toBe(true);
+    const topic = store.doc.requireNode(store.sheet.rootNodeId);
+    expect(isFreeTransform(store.sheet, { ...topic, style: { ...topic.style, freeTransform: true } })).toBe(false);
   });
 });

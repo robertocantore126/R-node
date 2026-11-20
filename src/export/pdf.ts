@@ -1,5 +1,5 @@
 import { phoneMapPages } from "./pdfPhone";
-import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner, isBarePicture } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, pdfPathOps } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
@@ -752,14 +752,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       return;
     }
     const path=roundedPath(p.x,p.y,p.w,p.h,12,fr);
-    cmds.push("q",opacityCommand(fill),`${rgb(fill)} rg`,path,"f",opacityCommand(p.node.style.stroke??theme.nodeBorder),`${rgb(p.node.style.stroke??theme.nodeBorder)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,path,"S",opacityCommand("#000000"),path,"W n");
-    // Composite the editor's 13% muted grid over its solid surface, losslessly.
-    const foreground=rgb(theme.textMuted).split(" ").map(Number),background=rgb(fill).split(" ").map(Number);
-    const grid=foreground.map((v,i)=>(v*.13+background[i]*.87).toFixed(4)).join(" ");
-    cmds.push(`${grid} RG`,`${f(.5*fr.s)} w`);
-    for(let x=p.x+Math.max(0,Math.floor(((activePage?.left??p.x)-p.x)/20))*20;x<Math.min(p.x+p.w,activePage ? activePage.left+activePage.width : Infinity);x+=20) cmds.push(`${f(fr.X(x))} ${f(fr.Y(p.y+FREEFORM_HEADER))} m ${f(fr.X(x))} ${f(fr.Y(p.y+p.h))} l`);
-    for(let y=p.y+FREEFORM_HEADER+Math.max(0,Math.floor(((activePage?.top??p.y)-p.y-FREEFORM_HEADER)/20))*20;y<Math.min(p.y+p.h,activePage ? activePage.top+activePage.height : Infinity);y+=20) cmds.push(`${f(fr.X(p.x))} ${f(fr.Y(y))} m ${f(fr.X(p.x+p.w))} ${f(fr.Y(y))} l`);
-    cmds.push("S","Q");
+    cmds.push("q",opacityCommand(fill),`${rgb(fill)} rg`,path,"f",opacityCommand(p.node.style.stroke??theme.nodeBorder),`${rgb(p.node.style.stroke??theme.nodeBorder)} RG`,`${f((p.node.style.borderWidth??1)*fr.s)} w`,path,"S","Q");
+    // No inner grid: the editor stopped drawing one inside canvases.
     plainText(cmds,p.node.title||"Freeform",p.x+14,p.y+FREEFORM_HEADER/2+4.5,13,theme.text,fr,true,p.w-28);
     if(!p.node.childrenIds.length&&!inkStrokes(p.node.style).length) plainText(cmds,"Double-click to add text or a shape. Drop nodes, text or images here.",p.x+18,p.y+FREEFORM_HEADER+32.5,13,theme.textMuted,fr,false,p.w-36);
     ops+=12;
@@ -1119,9 +1113,11 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     cmds.push("q", `${f(margin)} ${f(margin)} ${f(usableWpt)} ${f(usableHpt)} re W n`);
 
     if (opts.grid) {
-      cmds.push("q",`${rgb(theme.grid)} RG`,`${f(PT_PER_UNIT)} w`);
-      for(let x=Math.floor(pg.left/40)*40;x<=pg.left+pg.width;x+=40) cmds.push(`${f(fr.X(x))} ${f(fr.Y(pg.top))} m ${f(fr.X(x))} ${f(fr.Y(pg.top+pg.height))} l`);
-      for(let y=Math.floor(pg.top/40)*40;y<=pg.top+pg.height;y+=40) cmds.push(`${f(fr.X(pg.left))} ${f(fr.Y(y))} m ${f(fr.X(pg.left+pg.width))} ${f(fr.Y(y))} l`);
+      // Dots on the 40-unit lattice, as Renderer.drawGrid paints them: a
+      // zero-length segment with round caps is a dot of the line width.
+      cmds.push("q",`${rgb(theme.grid)} RG`,`${f(2.8*PT_PER_UNIT)} w`,"1 J");
+      for(let x=Math.floor(pg.left/40)*40;x<=pg.left+pg.width;x+=40)
+        for(let y=Math.floor(pg.top/40)*40;y<=pg.top+pg.height;y+=40) cmds.push(`${f(fr.X(x))} ${f(fr.Y(y))} m ${f(fr.X(x))} ${f(fr.Y(y))} l`);
       cmds.push("S","Q");
     }
     for(const p of pg.nodes) if(p.node.style.freeform) drawFreeform(cmds,p,fr);
@@ -1162,7 +1158,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     };
     paintRels(false);
 
-    for (const p of pg.nodes) {
+    for (let p of pg.nodes) {
       if (p.node.style.freeform) continue;
       const colors = opts.colorOf(p.node.id);
       // Rotation around the item's centre, as on screen (PDF's y axis points up,
@@ -1173,9 +1169,21 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
         const X = fr.X(p.x + p.w / 2), Y = fr.Y(p.y + p.h / 2);
         cmds.push("q", `${f(c)} ${f(sn)} ${f(-sn)} ${f(c)} ${f(X - X * c + Y * sn)} ${f(Y - X * sn - Y * c)} cm`);
       }
-      drawBox(cmds, p, colors?.fill ?? "#ffffff", fr);
+      if (!isBarePicture(p.node)) drawBox(cmds, p, colors?.fill ?? "#ffffff", fr); // a bare picture has no box
       drawImages(cmds, p, fr);
       drawCaptions(cmds, p, colors?.text ?? "#111111", fr);
+      // Stretched text (Style.textScaleX/Y): laid out in the unstretched box and
+      // scaled about the centre, as Renderer.drawNode paints it. `fr` is linear,
+      // so scaling about the mapped centre equals scaling about the world one.
+      const tsx = p.node.style.textScaleX ?? 1, tsy = p.node.style.textScaleY ?? 1;
+      const stretched = tsx !== 1 || tsy !== 1;
+      const outer = p;
+      if (stretched) {
+        const X = fr.X(p.x + p.w / 2), Y = fr.Y(p.y + p.h / 2);
+        cmds.push("q", `${f(tsx)} 0 0 ${f(tsy)} ${f(X - X * tsx)} ${f(Y - Y * tsy)} cm`);
+        const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+        p = { ...p, x: cx - p.w / tsx / 2, y: cy - p.h / tsy / 2, w: p.w / tsx, h: p.h / tsy };
+      }
       if (p.node.style.titleAt) {
         // A label painted at the top or bottom of its box, as on screen.
         const n = p.node, size = n.style.fontSize ?? 14, bold = (n.style.fontWeight ?? 400) >= 600;
@@ -1188,6 +1196,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
           plainText(cmds, l, x, top + i * lh + size * 0.8, size, n.style.textColor ?? colors?.text ?? "#111111", fr, bold);
         });
       } else drawTitle(cmds, p, colors?.text ?? "#111111", fr);
+      if (stretched) { cmds.push("Q"); p = outer; }
       if (turn) cmds.push("Q");
     }
     paintRels(true);
@@ -1437,7 +1446,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     honoured: [
       "fill", "textColor", "fontSize", "fontWeight", "italic", "underline",
       "strikethrough", "cornerRadius", "image", "imageWidth", "align", "width",
-      "height", "stroke", "borderWidth", "borderStyle",
+      "height", "stroke", "borderWidth", "borderStyle", "textScaleX", "textScaleY",
       ...(placed.some(p=>p.node.style.shape==="custom") ? [] : ["shape" as const]),
     ],
     units: {

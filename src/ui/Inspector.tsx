@@ -12,7 +12,7 @@ import { plainToRuns } from "../core/text";
 import { chartSlotNote } from "../core/chartNotes";
 import { CHART_CELL_W, GALLERY_ASPECT, GALLERY_CELL_W, GALLERY_COLS, MAX_IMAGE_W } from "../layout/measure";
 import { InkControls } from "./InkControls";
-import { freeformOwner } from "../core/freeform";
+import { freeformOwner, isBarePicture, isFreeTransform } from "../core/freeform";
 import { ColorControls, ColorSwatch } from "./ColorControls";
 import { DIAGRAM_PALETTE } from "../core/paint";
 const HEADS: ArrowHead[] = ["none", "triangle", "open", "diamond", "circle"];
@@ -137,8 +137,82 @@ export function Inspector(): JSX.Element {
         ) : (
           <>
             <div className="field">
+              <span>Font</span>
+              <select
+                value={node.style.fontFamily ?? ""}
+                onChange={(e) => store.setNodeStyle(node.id, { fontFamily: e.target.value || undefined })}
+              >
+                <option value="">System UI</option>
+                <option value="Arial, Helvetica, sans-serif">Arial / Sans</option>
+                <option value="Georgia, 'Times New Roman', serif">Georgia / Serif</option>
+                <option value="'Cascadia Code', Consolas, monospace">Monospace</option>
+                <option value="Impact, 'Arial Black', sans-serif">Impact / Display</option>
+                <option value="'Comic Sans MS', cursive, sans-serif">Casual</option>
+              </select>
+            </div>
+            <div className="field">
               <span>Font size</span>
-              <input type="number" min={10} max={48} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
+              <input type="number" min={2} value={node.style.fontSize ?? 14} onChange={(e) => store.setNodeStyle(node.id, { fontSize: Number(e.target.value) || 14 })} />
+              <select
+                value={node.style.fontWeight ?? 400}
+                onChange={(e) => store.setNodeStyle(node.id, { fontWeight: Number(e.target.value) })}
+                title="Font weight"
+              >
+                <option value={300}>Light</option>
+                <option value={400}>Regular</option>
+                <option value={500}>Medium</option>
+                <option value={600}>Semibold</option>
+                <option value={700}>Bold</option>
+                <option value={900}>Black</option>
+              </select>
+            </div>
+            <div className="field">
+              <span>Format</span>
+              <div className="arrange-row" role="group" aria-label="Text format">
+                <button
+                  className={`btn small${(node.style.fontWeight ?? 400) >= 600 ? " active" : ""}`}
+                  title="Bold"
+                  onClick={() => store.setNodeStyle(node.id, { fontWeight: (node.style.fontWeight ?? 400) >= 600 ? 400 : 700 })}
+                >
+                  <b>B</b>
+                </button>
+                <button
+                  className={`btn small${node.style.italic ? " active" : ""}`}
+                  title="Italic"
+                  onClick={() => store.setNodeStyle(node.id, { italic: node.style.italic ? undefined : true })}
+                >
+                  <i>I</i>
+                </button>
+                <button
+                  className={`btn small${node.style.underline ? " active" : ""}`}
+                  title="Underline"
+                  onClick={() => store.setNodeStyle(node.id, { underline: node.style.underline ? undefined : true })}
+                >
+                  <u>U</u>
+                </button>
+                <button
+                  className={`btn small${node.style.strikethrough ? " active" : ""}`}
+                  title="Strikethrough"
+                  onClick={() => store.setNodeStyle(node.id, { strikethrough: node.style.strikethrough ? undefined : true })}
+                >
+                  <s>S</s>
+                </button>
+              </div>
+            </div>
+            <div className="field">
+              <span>Align</span>
+              <div className="arrange-row" role="group" aria-label="Text align">
+                {(["left", "center"] as const).map((a) => (
+                  <button
+                    key={a}
+                    className={`btn small${(node.style.align ?? "center") === a ? " active" : ""}`}
+                    title={`Align ${a}`}
+                    onClick={() => store.setNodeStyle(node.id, { align: a })}
+                  >
+                    {a === "left" ? "⇤ Left" : "↔ Center"}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="field">
               <span>Node width</span>
@@ -239,6 +313,53 @@ export function Inspector(): JSX.Element {
                     onChange={(e) => store.setSelectionStyle((n) => (e.target.checked ? { frame: true, titleAt: n.style.titleAt ?? "top" } : { frame: undefined }), ids)}
                   />
                 </div>
+                <div className="field">
+                  <span>Free transform</span>
+                  <input
+                    type="checkbox"
+                    checked={isFreeTransform(store.sheet, node)}
+                    title="Photoshop-style free transform: corner handles scale text, edge handles stretch X/Y, top handle rotates"
+                    onChange={(e) => store.setSelectionStyle({ freeTransform: e.target.checked }, ids)}
+                  />
+                </div>
+                <div className="field">
+                  <span>Rotation</span>
+                  <input
+                    type="number"
+                    min={-360}
+                    max={360}
+                    value={node.style.rotation ?? 0}
+                    onChange={(e) => {
+                      const v = ((Math.round(Number(e.target.value) || 0) % 360) + 360) % 360;
+                      store.setSelectionStyle({ rotation: v === 0 ? undefined : v }, ids);
+                    }}
+                  />
+                  <span className="muted">°</span>
+                  {!!node.style.rotation && (
+                    <button className="btn small" onClick={() => store.setSelectionStyle({ rotation: undefined }, ids)}>Reset</button>
+                  )}
+                </div>
+                {isFreeTransform(store.sheet, node) && !isBarePicture(node) && (
+                  <div className="field geometry-fields" title="Text stretch X / Y in percent">
+                    <span>Stretch</span>
+                    <GeometryInput
+                      label="X%"
+                      value={Math.round((node.style.textScaleX ?? 1) * 100)}
+                      onCommit={(v) => {
+                        const s = Math.max(0.05, Math.round(v) / 100);
+                        store.setSelectionStyle({ textScaleX: s === 1 ? undefined : s }, ids);
+                      }}
+                    />
+                    <GeometryInput
+                      label="Y%"
+                      value={Math.round((node.style.textScaleY ?? 1) * 100)}
+                      onCommit={(v) => {
+                        const s = Math.max(0.05, Math.round(v) / 100);
+                        store.setSelectionStyle({ textScaleY: s === 1 ? undefined : s }, ids);
+                      }}
+                    />
+                  </div>
+                )}
               </>;
             })()}
           </>

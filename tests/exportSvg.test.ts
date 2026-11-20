@@ -43,6 +43,15 @@ const OPTS = {
 };
 
 describe("SVG export", () => {
+  it("stretches text like the canvas: a scale about the box centre", async () => {
+    const { sheet, add } = makeSheet();
+    add(sheet.rootNodeId, "Wide words", undefined, { textScaleX: 2, textScaleY: 0.5 });
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+    const out = await sheetToSvg(sheet, OPTS);
+    expect(out.svg).toMatch(/<g transform="translate\([\d.-]+ [\d.-]+\) scale\(2 0\.5\) translate\([\d.-]+ [\d.-]+\)"><text[^>]*>.*Wide words/);
+    expect(out.report.styleGaps.map((g) => g.prop)).not.toContain("textScaleX");
+  });
+
   it("covers every node in the viewBox", async () => {
     const { sheet, add } = makeSheet();
     for (let i = 0; i < 8; i++) add(sheet.rootNodeId, `Topic ${i}`);
