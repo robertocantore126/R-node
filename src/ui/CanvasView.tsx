@@ -1,5 +1,5 @@
 import { topicClipboardFromHtml } from "../editor/topicClipboard";
-import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner, isFreeTransform } from "../core/freeform";
 import { appendInkSample, inkStrokeHit, inkStrokes } from "../core/ink";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
@@ -26,7 +26,7 @@ import type { ImageSlot, MindNode, Relationship, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
 import { TouchGestures } from "./touchGestures";
-import { createCanvasGestureMachine, gestureHoldsKeyboard, IDLE_GESTURE, isResizeGesture, type CanvasGesture } from "./canvasGesture";
+import { createCanvasGestureMachine, gestureHoldsKeyboard, IDLE_GESTURE, isResizeGesture, type CanvasGesture, type ResizeHandle } from "./canvasGesture";
 import { registerInspectable, type Machine } from "../editor/machine";
 import { CaptionField } from "./CaptionField";
 import { installTrace, trace } from "../dev/trace";
@@ -265,6 +265,7 @@ export function CanvasView(): JSX.Element {
     else if (g.kind === "resize-topic") store.cancelResize();
     else if (g.kind === "resize-freeform") store.cancelCanvasResize();
     else if (g.kind === "resize-item") store.cancelItemResize();
+    else if (g.kind === "rotate-item") store.cancelItemRotate();
     else if (g.kind === "resize-image") store.cancelImageResize();
     else if (g.kind === "move-image") store.setDrop(null);
     trace.applied("gesture:cancel", { kind: g.kind, reason });
@@ -656,22 +657,45 @@ export function CanvasView(): JSX.Element {
     return { x: o.x + Math.round((wx - o.x) / GRID) * GRID, y: o.y + Math.round((wy - o.y) / GRID) * GRID };
   };
 
-  /** The corner handle of a selected canvas under a world point, if any (all four corners). */
-  const canvasCornerAt = (wx: number, wy: number): { id: string; corner: "nw" | "ne" | "sw" | "se"; item: boolean } | null => {
+  /** The corner/edge/rotation handle of a selected canvas or item under a world point, if any. */
+  const canvasCornerAt = (wx: number, wy: number): { id: string; corner: ResizeHandle; item: boolean; rotate?: boolean } | null => {
     const s = store.getSnapshot();
     if (s.editingId) return null;
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
     const reach = 12 / s.camera.scale;
-    // Canvas corners, and the corners of selected items inside a canvas.
+    // Canvas corners, and the handles of selected items inside a canvas.
     for (const id of s.selection) {
       const n = store.doc.node(id);
       const item = !!n && !n.style.freeform && !!freeformOwner(store.sheet, id) && !n.style.chartNote;
       const r = n?.style.freeform || item ? renderer.nodeWorldRect(rs, id) : null;
       if (!r) continue;
-      const west = Math.abs(wx - r.x) < reach, east = Math.abs(wx - r.x - r.w) < reach;
-      const north = Math.abs(wy - r.y) < reach, south = Math.abs(wy - r.y - r.h) < reach;
-      if ((west || east) && (north || south)) return { id, item, corner: `${north ? "n" : "s"}${west ? "w" : "e"}` as "nw" | "ne" | "sw" | "se" };
+      let lx = wx, ly = wy;
+      if (item && n?.style.rotation) {
+        const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+        const rad = (-n.style.rotation * Math.PI) / 180;
+        const cos = Math.cos(rad), sin = Math.sin(rad);
+        const dx = wx - cx, dy = wy - cy;
+        lx = cx + dx * cos - dy * sin;
+        ly = cy + dx * sin + dy * cos;
+      }
+      if (item && n && isFreeTransform(store.sheet, n)) {
+        const rotY = r.y - 22 / s.camera.scale;
+        if (Math.hypot(lx - (r.x + r.w / 2), ly - rotY) < reach) return { id, item: true, corner: "n", rotate: true };
+        const mx = r.x + r.w / 2, my = r.y + r.h / 2;
+        const handles: [ResizeHandle, number, number][] = [
+          ["nw", r.x, r.y], ["n", mx, r.y], ["ne", r.x + r.w, r.y],
+          ["w", r.x, my], ["e", r.x + r.w, my],
+          ["sw", r.x, r.y + r.h], ["s", mx, r.y + r.h], ["se", r.x + r.w, r.y + r.h],
+        ];
+        for (const [hnd, hx, hy] of handles) {
+          if (Math.abs(lx - hx) < reach && Math.abs(ly - hy) < reach) return { id, item: true, corner: hnd };
+        }
+        continue;
+      }
+      const west = Math.abs(lx - r.x) < reach, east = Math.abs(lx - r.x - r.w) < reach;
+      const north = Math.abs(ly - r.y) < reach, south = Math.abs(ly - r.y - r.h) < reach;
+      if ((west || east) && (north || south)) return { id, item, corner: `${north ? "n" : "s"}${west ? "w" : "e"}` as ResizeHandle };
     }
     return null;
   };
@@ -796,6 +820,15 @@ export function CanvasView(): JSX.Element {
     const rs = currentRenderState();
 
     const corner = s.relFrom ? null : canvasCornerAt(world.x, world.y);
+    if (corner?.item && corner.rotate) {
+      const r = renderer.nodeWorldRect(rs, corner.id)!;
+      const cx = (r.x + r.w / 2 - s.camera.x) * s.camera.scale + sizeRef.current.w / 2;
+      const cy = (r.y + r.h / 2 - s.camera.y) * s.camera.scale + sizeRef.current.h / 2;
+      const startAngle = (Math.atan2(y - cy, x - cx) * 180) / Math.PI;
+      gesture.to({ kind: "rotate-item", nodeId: corner.id, centerScreenX: cx, centerScreenY: cy, startAngle }, "pointerdown");
+      store.beginItemRotate(corner.id);
+      return;
+    }
     if (corner?.item) {
       gesture.to({ kind: "resize-item", nodeId: corner.id, corner: corner.corner, startScreenX: x, startScreenY: y }, "pointerdown");
       store.beginItemResize(corner.id, corner.corner);
@@ -803,9 +836,10 @@ export function CanvasView(): JSX.Element {
       return;
     }
     if (corner) {
-      gesture.to({ kind: "resize-freeform", nodeId: corner.id, corner: corner.corner, startScreenX: x, startScreenY: y }, "pointerdown");
-      store.beginCanvasResize(corner.id, corner.corner);
-      trace.applied("pointerdown:canvas-resize", { id: corner.id, corner: corner.corner });
+      const c4 = corner.corner as "nw" | "ne" | "sw" | "se";
+      gesture.to({ kind: "resize-freeform", nodeId: corner.id, corner: c4, startScreenX: x, startScreenY: y }, "pointerdown");
+      store.beginCanvasResize(corner.id, c4);
+      trace.applied("pointerdown:canvas-resize", { id: corner.id, corner: c4 });
       return;
     }
     if ((s.mode === "ink" || eraserEnd) && !s.relFrom) {
@@ -1157,9 +1191,24 @@ export function CanvasView(): JSX.Element {
       drag.moved = true;
       return;
     }
+    if (gs.kind === "rotate-item") {
+      const angle = (Math.atan2(y - gs.centerScreenY, x - gs.centerScreenX) * 180) / Math.PI;
+      store.setItemRotateDraft(angle - gs.startAngle, e.shiftKey);
+      drag.moved = true;
+      return;
+    }
     if (gs.kind === "resize-item") {
       const scale = store.getSnapshot().camera.scale;
-      store.setItemResizeDraft((x - gs.startScreenX) / scale, (y - gs.startScreenY) / scale, e.shiftKey, e.altKey ? 0 : GRID);
+      let dx = (x - gs.startScreenX) / scale;
+      let dy = (y - gs.startScreenY) / scale;
+      const rot = store.doc.node(gs.nodeId)?.style.rotation;
+      if (rot) {
+        const rad = (-rot * Math.PI) / 180;
+        const cos = Math.cos(rad), sin = Math.sin(rad);
+        const rdx = dx * cos - dy * sin, rdy = dx * sin + dy * cos;
+        dx = rdx; dy = rdy;
+      }
+      store.setItemResizeDraft(dx, dy, e.shiftKey, e.altKey ? 0 : GRID);
       drag.moved = true;
       return;
     }
@@ -1303,7 +1352,12 @@ export function CanvasView(): JSX.Element {
       const onRelHandle = !!renderer && (!!renderer.hitTestConnectHandle(rs, w.x, w.y) || !!renderer.hitTestRelEnd(rs, w.x, w.y));
       const slider = renderer?.hitTestChartGrow(rs, w.x, w.y) ?? null;
       setHandleCursor(
-        canvasCorner ? (canvasCorner.corner === "nw" || canvasCorner.corner === "se" ? "nwse-resize" : "nesw-resize")
+        canvasCorner ? (
+          canvasCorner.rotate ? "grab"
+          : canvasCorner.corner === "n" || canvasCorner.corner === "s" ? "ns-resize"
+          : canvasCorner.corner === "w" || canvasCorner.corner === "e" ? "ew-resize"
+          : canvasCorner.corner === "nw" || canvasCorner.corner === "se" ? "nwse-resize" : "nesw-resize"
+        )
         : onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null,
       );
       setImgResizeHover(!!ih);
@@ -1450,6 +1504,7 @@ export function CanvasView(): JSX.Element {
     if (gs.kind === "resize-topic") return store.commitResize();
     if (gs.kind === "resize-freeform") return store.commitCanvasResize();
     if (gs.kind === "resize-item") return store.commitItemResize();
+    if (gs.kind === "rotate-item") return store.commitItemRotate();
     if (gs.kind === "pan") return;
     // Gallery cell dropped (T25). A plain click never moves anything: the
     // threshold in pointermove is what separates "grabbed it" from "clicked
@@ -1850,7 +1905,12 @@ export function CanvasView(): JSX.Element {
           cursor:
             gesture.state.kind === "connect" ? "crosshair"
             : gesture.state.kind === "chart-grow" ? (gesture.state.grow === "col" ? "ew-resize" : "ns-resize")
-            : gesture.state.kind === "resize-freeform" || gesture.state.kind === "resize-item" ? (gesture.state.corner === "nw" || gesture.state.corner === "se" ? "nwse-resize" : "nesw-resize")
+            : gesture.state.kind === "rotate-item" ? "grabbing"
+            : gesture.state.kind === "resize-freeform" || gesture.state.kind === "resize-item" ? (
+              gesture.state.corner === "n" || gesture.state.corner === "s" ? "ns-resize"
+              : gesture.state.corner === "w" || gesture.state.corner === "e" ? "ew-resize"
+              : gesture.state.corner === "nw" || gesture.state.corner === "se" ? "nwse-resize" : "nesw-resize"
+            )
             : handleCursor ? handleCursor
             : imgResizeHover || gesture.state.kind === "resize-image"
               ? "nwse-resize"

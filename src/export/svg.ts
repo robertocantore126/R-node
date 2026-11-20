@@ -1,4 +1,4 @@
-import { FREEFORM_HEADER, freeformOwner } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner, isBarePicture } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, svgPathData } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 /**
@@ -545,7 +545,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     const alpha = n.style.opacity ?? 1;
     const turn = n.style.rotation ? ` transform="rotate(${n3(n.style.rotation)} ${n3(p.x + p.w / 2)} ${n3(p.y + p.h / 2)})"` : "";
     parts.push(alpha < 1 ? `<g opacity="${n3(alpha)}"${turn}>` : `<g${turn}>`);
-    const shape = shapeOf(p, fill, opts.borderOf ? opts.borderOf(n.id) : null);
+    const shape = isBarePicture(n) ? null : shapeOf(p, fill, opts.borderOf ? opts.borderOf(n.id) : null); // a bare picture has no box
     if (shape) parts.push(shape);
 
     const pos = positionedImageSlots(p, n, resolveImage);
@@ -609,7 +609,16 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
         }
       }
     }
-    parts.push(n.style.titleAt ? ownLabel(p, text, opts.measurer) : title(p, text, pos, opts.measurer));
+    // Stretched text (Style.textScaleX/Y): laid out in the unstretched box and
+    // scaled about the centre, exactly as Renderer.drawNode paints it.
+    const sx = n.style.textScaleX ?? 1, sy = n.style.textScaleY ?? 1;
+    if (sx !== 1 || sy !== 1) {
+      const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+      const up = { ...p, x: cx - p.w / sx / 2, y: cy - p.h / sy / 2, w: p.w / sx, h: p.h / sy };
+      parts.push(`<g transform="translate(${n3(cx)} ${n3(cy)}) scale(${n3(sx)} ${n3(sy)}) translate(${n3(-cx)} ${n3(-cy)})">`);
+      parts.push(n.style.titleAt ? ownLabel(up, text, opts.measurer) : title(up, text, positionedImageSlots(up, n, resolveImage), opts.measurer));
+      parts.push(`</g>`);
+    } else parts.push(n.style.titleAt ? ownLabel(p, text, opts.measurer) : title(p, text, pos, opts.measurer));
     parts.push(`</g>`);
   }
   if (overRels.length) parts.push("<g>", ...overRels, "</g>");
@@ -636,7 +645,7 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     // Declared, not detected: an exporter cannot notice what it never thought
     // of, so it lists what it covers and the gap is computed against the
     // document. Everything absent here is a known omission.
-    honoured: ["fill", "textColor", "fontSize", "fontWeight", "italic", "underline", "shape", "cornerRadius", "image", "imageWidth", "align", "width", "height", ...(opts.borderOf ? (["stroke", "borderWidth", "borderStyle"] as const) : [])],
+    honoured: ["fill", "textColor", "fontSize", "fontWeight", "italic", "underline", "shape", "textScaleX", "textScaleY", "cornerRadius", "image", "imageWidth", "align", "width", "height", ...(opts.borderOf ? (["stroke", "borderWidth", "borderStyle"] as const) : [])],
     units: { elements, imageBytes },
     // The document is parsed back: an SVG that does not parse renders as
     // nothing, which is exactly how the PDF failure stayed invisible.

@@ -268,6 +268,11 @@ export interface Style {
   canvasNote?: string;
   /** Position relative to the parent inside a freeform topic. */
   freeformPosition?: { x: number; y: number };
+  /** When true on a freeform item, corner-resizing scales text size proportionally instead of only resizing the box. */
+  freeTransform?: boolean;
+  /** Non-uniform horizontal/vertical text stretch factor (1 = normal). */
+  textScaleX?: number;
+  textScaleY?: number;
   fill?: string;
   /**
    * Outline colour: a hex, or BRANCH_STROKE to follow the branch palette at
@@ -306,6 +311,8 @@ export interface Style {
   imageRight?: string;
   /** Display width of the image(s) in world units; height follows the aspect ratio. */
   imageWidth?: number;
+  /** Display height when a free transform stretched the picture off its aspect ratio. */
+  imageHeight?: number;
   /**
    * Turns the topic into a GALLERY (T25): an ordered grid of captioned images
    * filling the body under the title — a tier-list row, a mood board, a cast

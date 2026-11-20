@@ -1,4 +1,4 @@
-import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, type FreeformShape } from "../core/freeform";
+import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, isBarePicture, isFreeTransform, FREE_TRANSFORM_MIN_FONT, type FreeformShape } from "../core/freeform";
 import { looksLikeDrawio, parseDrawio, type DrawioDiagram } from "../core/drawio";
 import { diagramPrompt } from "../core/diagramPrompt";
 import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
@@ -2571,7 +2571,7 @@ export class EditorStore {
     const px = Math.max(FREEFORM_PADDING, (cx ?? parent.position.x + FREEFORM_PADDING + offset) - parent.position.x);
     const py = Math.max(FREEFORM_HEADER + FREEFORM_PADDING, (cy ?? parent.position.y + FREEFORM_HEADER + FREEFORM_PADDING + offset) - parent.position.y);
     const look: Partial<Style> = imageId
-      ? { image: imageId, imageWidth: 180 }
+      ? { image: imageId, imageWidth: 180, shape: "none" }
       : size && shape
         ? { shape, width: size.w, height: size.h, borderWidth: 1.5, ...(shape === "actor" ? { titleAt: "bottom" as const } : {}) }
         : { shape: "none", align: "left" };
@@ -3597,23 +3597,103 @@ export class EditorStore {
    * opposite corner stays, width AND height change. Shift keeps the shape's
    * proportions. A live draft, one undo step on release.
    */
-  private itemResize: { id: string; corner: "nw" | "ne" | "sw" | "se"; style: Style; w: number; h: number; at: { x: number; y: number }; g: { x: number; y: number } } | null = null;
+  private itemResize: { id: string; corner: "nw" | "ne" | "sw" | "se" | "n" | "s" | "w" | "e"; style: Style; runs?: TextRun[]; w: number; h: number; at: { x: number; y: number }; g: { x: number; y: number } } | null = null;
 
-  beginItemResize(id: string, corner: "nw" | "ne" | "sw" | "se"): void {
+  beginItemResize(id: string, corner: "nw" | "ne" | "sw" | "se" | "n" | "s" | "w" | "e"): void {
     const n = this.model.node(id);
     const g = this.itemGeometry(id);
     const parent = n?.parentId ? this.model.node(n.parentId) : undefined;
     if (!n || !g || !parent) return;
-    this.itemResize = { id, corner, style: n.style, w: g.w, h: g.h, at: freeformOffset(n, parent.childrenIds.indexOf(id)), g: { x: g.x, y: g.y } };
+    const runs = n.titleRuns ? n.titleRuns.map((run) => ({ ...run })) : undefined;
+    this.itemResize = { id, corner, style: n.style, runs, w: g.w, h: g.h, at: freeformOffset(n, parent.childrenIds.indexOf(id)), g: { x: g.x, y: g.y } };
   }
 
   setItemResizeDraft(dx: number, dy: number, keepRatio = false, snap = 0): void {
     const r = this.itemResize;
     const n = r ? this.model.node(r.id) : undefined;
     if (!r || !n) return;
-    const west = r.corner === "nw" || r.corner === "sw", north = r.corner === "nw" || r.corner === "ne";
-    let w = Math.max(16, r.w + (west ? -dx : dx));
-    let h = Math.max(16, r.h + (north ? -dy : dy));
+    const west = r.corner === "nw" || r.corner === "sw" || r.corner === "w";
+    const east = r.corner === "ne" || r.corner === "se" || r.corner === "e";
+    const north = r.corner === "nw" || r.corner === "ne" || r.corner === "n";
+    const south = r.corner === "sw" || r.corner === "se" || r.corner === "s";
+    const isEdge = r.corner === "n" || r.corner === "s" || r.corner === "w" || r.corner === "e";
+    let w = west || east ? Math.max(16, r.w + (west ? -dx : dx)) : r.w;
+    let h = north || south ? Math.max(16, r.h + (north ? -dy : dy)) : r.h;
+    if (isFreeTransform(this.sheet, { ...n, style: r.style })) {
+      // Photoshop-style free transform. The new box is a scale per axis
+      // (fx, fy). Its even part goes into the font size — what the Inspector
+      // shows and what later typing uses — and only the uneven part stays a
+      // stretch (textScaleX/Y), so one of the two is always 1 and no factor
+      // caps how far a drag can go.
+      // measureTopic returns a fixed box (width AND height set: a diagram
+      // shape) as is, but multiplies any other box by textScaleX/Y: a fixed box
+      // stores its STRETCHED size, everything else its unstretched one.
+      const fixedBox = !!r.style.width && !!r.style.height;
+      let fx: number, fy: number;
+      if (keepRatio && !isEdge) {
+        const k = (w >= r.w || h >= r.h) ? Math.max(w / r.w, h / r.h) : Math.min(w / r.w, h / r.h);
+        fx = fy = k;
+      } else {
+        if (snap > 0) {
+          // The moving edges land on the canvas grid, as for any other item.
+          const q = (v: number): number => Math.round(v / snap) * snap;
+          if (west || east) w = Math.max(16, west ? r.g.x + r.w - q(r.g.x + r.w - w) : q(r.g.x + w) - r.g.x);
+          if (north || south) h = Math.max(16, north ? r.g.y + r.h - q(r.g.y + r.h - h) : q(r.g.y + h) - r.g.y);
+        }
+        fx = w / r.w;
+        fy = h / r.h;
+      }
+      if (isBarePicture({ ...n, style: r.style })) {
+        // A bare picture: the handles size the image itself. Off its aspect
+        // ratio it keeps an explicit height (a stretch); on it, none.
+        const iw = Math.max(4, Math.round(r.w * fx)), ih = Math.max(4, Math.round(r.h * fy));
+        const nat = imageResolver(this.sheet)(r.style.image!);
+        const natH = nat && nat.w > 0 ? (iw * nat.h) / nat.w : ih;
+        n.style = {
+          ...r.style,
+          imageWidth: iw,
+          imageHeight: Math.abs(ih - natH) < 1 ? undefined : ih,
+          freeformPosition: { x: Math.round(r.at.x + (west ? r.w - iw : 0)), y: Math.round(r.at.y + (north ? r.h - ih : 0)) },
+        };
+        applyLayout(this.sheet, false, this.measurer);
+        this.notify();
+        return;
+      }
+      const baseFont = r.style.fontSize ?? 14;
+      const tx = (r.style.textScaleX ?? 1) * fx, ty = (r.style.textScaleY ?? 1) * fy;
+      // Below the smallest glyph the even part stays a squash instead.
+      const fontSize = Math.max(FREE_TRANSFORM_MIN_FONT, Math.round(baseFont * Math.min(tx, ty) * 10) / 10);
+      const u = fontSize / baseFont; // the even scale actually applied, from the start
+      const stretch = (t: number): number | undefined => {
+        const v = Math.round((t / u) * 1000) / 1000;
+        return Math.abs(v - 1) < 0.005 ? undefined : v;
+      };
+      const nextStyle: Style = {
+        ...r.style,
+        fontSize: u === 1 ? r.style.fontSize : fontSize,
+        padding: u === 1 ? r.style.padding : Math.round((r.style.padding ?? 10) * u * 10) / 10,
+        textScaleX: stretch(tx),
+        textScaleY: stretch(ty),
+        ...(fixedBox
+          ? { width: Math.max(16, Math.round(r.w * fx)), height: Math.max(16, Math.round(r.h * fy)) }
+          : {
+              ...(r.style.width !== undefined ? { width: Math.max(16, Math.round(r.style.width * u)) } : {}),
+              ...(r.style.height !== undefined ? { height: Math.max(16, Math.round(r.style.height * u)) } : {}),
+            }),
+      };
+      if (u !== 1 && r.runs?.some((run) => run.fontSize !== undefined)) {
+        n.titleRuns = r.runs.map((run) => (run.fontSize === undefined ? { ...run } : { ...run, fontSize: Math.max(FREE_TRANSFORM_MIN_FONT, Math.round(run.fontSize * u * 10) / 10) }));
+      } else n.titleRuns = r.runs;
+      n.style = nextStyle;
+      const measured = measureNode(n, this.measurer, imageResolver(this.sheet));
+      n.style = {
+        ...nextStyle,
+        freeformPosition: { x: Math.round(r.at.x + (west ? r.w - measured.w : 0)), y: Math.round(r.at.y + (north ? r.h - measured.h : 0)) },
+      };
+      applyLayout(this.sheet, false, this.measurer);
+      this.notify();
+      return;
+    }
     if (keepRatio && r.w > 0 && r.h > 0) {
       const k = Math.max(w / r.w, h / r.h);
       w = Math.max(16, r.w * k); h = Math.max(16, r.h * k);
@@ -3640,13 +3720,20 @@ export class EditorStore {
     const n = r ? this.model.node(r.id) : undefined;
     if (!r || !n) return;
     const style = n.style;
+    const runs = n.titleRuns;
     n.style = r.style;
-    if (style.width === r.style.width && style.height === r.style.height && style.freeformPosition?.x === r.style.freeformPosition?.x && style.freeformPosition?.y === r.style.freeformPosition?.y) {
+    n.titleRuns = r.runs;
+    const styleChanged = JSON.stringify(style) !== JSON.stringify(r.style);
+    const runsChanged = JSON.stringify(runs) !== JSON.stringify(r.runs);
+    if (!styleChanged && !runsChanged) {
       applyLayout(this.sheet, false, this.measurer);
       this.notify();
       return;
     }
-    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: r.id, style, prev: r.style })]);
+    const ops: Op[] = [];
+    if (styleChanged) ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: r.id, style, prev: r.style }));
+    if (runsChanged) ops.push(makeOp<Op & { type: "setTitle" }>("setTitle", { id: r.id, title: n.title, prev: n.title, titleRuns: runs, prevRuns: r.runs }));
+    this.execOps(ops);
     this.settleLayoutNow();
   }
 
@@ -3656,7 +3743,50 @@ export class EditorStore {
     const n = r ? this.model.node(r.id) : undefined;
     if (!r || !n) return;
     n.style = r.style;
+    n.titleRuns = r.runs;
     applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  private itemRotate: { id: string; style: Style; baseDeg: number } | null = null;
+
+  beginItemRotate(id: string): void {
+    const n = this.model.node(id);
+    if (!n) return;
+    this.itemRotate = { id, style: n.style, baseDeg: n.style.rotation ?? 0 };
+  }
+
+  setItemRotateDraft(deltaDeg: number, snap15 = false): void {
+    const r = this.itemRotate;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    let deg = r.baseDeg + deltaDeg;
+    if (snap15) deg = Math.round(deg / 15) * 15;
+    const norm = ((Math.round(deg) % 360) + 360) % 360;
+    n.style = { ...r.style, rotation: norm === 0 ? undefined : norm };
+    this.notify();
+  }
+
+  commitItemRotate(): void {
+    const r = this.itemRotate;
+    this.itemRotate = null;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    const style = n.style;
+    n.style = r.style;
+    if (style.rotation === r.style.rotation) {
+      this.notify();
+      return;
+    }
+    this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: r.id, style, prev: r.style })]);
+  }
+
+  cancelItemRotate(): void {
+    const r = this.itemRotate;
+    this.itemRotate = null;
+    const n = r ? this.model.node(r.id) : undefined;
+    if (!r || !n) return;
+    n.style = r.style;
     this.notify();
   }
 
@@ -4069,9 +4199,13 @@ export class EditorStore {
     if (!res.ok) return { ok: false, reason: res.reason };
     if (this.sheet !== sheet || !this.model.node(nodeId)) return { ok: false, reason: "Target topic is no longer open" };
     const node = this.model.requireNode(nodeId);
-    if (node.style.freeform) {
+    // Inside a canvas a picture is never put INTO an item: pasted or dropped
+    // on one, it becomes a free picture of the canvas, just past the item.
+    const owner = node.style.freeform ? null : freeformOwner(sheet, nodeId);
+    if (node.style.freeform || owner) {
       if (!sheet.attachments.some((a) => a.id === res.card.id)) sheet.attachments.push({ ...res.card });
-      this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
+      if (owner) this.createFreeformItem(owner, node.position.x + 24, node.position.y + 24, "", res.card.id);
+      else this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
     } else this.attachImage(nodeId, res.card, position);
     trace.applied("drop:image", { bytes: res.card.bytes, w: res.card.w, h: res.card.h });
     return { ok: true };

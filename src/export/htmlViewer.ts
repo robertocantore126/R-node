@@ -147,6 +147,7 @@ export async function sheetToHtmlViewer(sheet: Sheet, opts: HtmlViewerOptions): 
       "fill", "stroke", "borderWidth", "borderStyle", "cornerRadius", "shape", "textColor",
       "fontSize", "fontWeight", "fontFamily", "italic", "underline", "strikethrough",
       "opacity", "shadow", "icon", "image", "imageWidth", "align", "width", "height", "rotation",
+      "textScaleX", "textScaleY",
     ],
     units: {
       imageBytes,

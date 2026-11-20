@@ -1,4 +1,4 @@
-import { freeformOwner, FREEFORM_HEADER } from "../core/freeform";
+import { freeformOwner, FREEFORM_HEADER, isBarePicture, isFreeTransform } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, tracePath } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
@@ -205,6 +205,34 @@ export class Renderer {
    *  wider than the stored source costs memory and adds no detail. */
   private readonly IMAGE_BUCKET_MIN = 128;
   private readonly IMAGE_BUCKET_MAX = 1024;
+  /** Above the `large` level a picture is decoded from the ORIGINAL, at most
+   *  this many pixels (32 MB): one picture never shows more on any screen, and
+   *  the cap keeps a few big pictures inside IMAGE_BUDGET. */
+  private readonly IMAGE_ORIGINAL_MAX_PIXELS = 8 * 1024 * 1024;
+
+  /**
+   * Decode width and stored level for an image painted `neededPx` device
+   * pixels wide. Powers of two up to the 1024px `large` level (as before);
+   * past it, half-octave steps decoded from the original — a full octave
+   * could decode four times the pixels needed — never wider than the source
+   * has pixels, nor past the area cap.
+   */
+  private imageDecodeSize(imageId: string, neededPx: number): { bucket: number; level: AssetLevel } {
+    const need = Math.max(1, neededPx);
+    let bucket = 2 ** Math.ceil(Math.log2(need));
+    if (bucket > this.IMAGE_BUCKET_MAX) {
+      const nat = this.resolveImage?.(imageId);
+      bucket = this.IMAGE_BUCKET_MAX;
+      if (nat && nat.w > 0 && nat.h > 0) {
+        const step = Math.round(2 ** (Math.ceil(Math.log2(need) * 2) / 2));
+        const areaW = Math.floor(Math.sqrt((this.IMAGE_ORIGINAL_MAX_PIXELS * nat.w) / nat.h));
+        const w = Math.min(step, nat.w, areaW);
+        if (w > this.IMAGE_BUCKET_MAX) return { bucket: w, level: "original" };
+      }
+    }
+    bucket = Math.max(this.IMAGE_BUCKET_MIN, bucket);
+    return { bucket, level: bucket <= 256 ? "small" : "large" };
+  }
   private assetStore: AssetStore;
   private onRepaint: (() => void) | null = null;
 
@@ -619,9 +647,10 @@ export class Renderer {
   private drawGrid(theme: RenderTheme, state: RenderState): void {
     const ctx = this.ctx;
     const s = state.camera.scale;
-    const step = 40;
-    ctx.strokeStyle = theme.grid;
-    ctx.lineWidth = 1 / s;
+    let step = 40;
+    while (step * s < 14) step *= 2;
+    const r = 1.4 / s;
+    ctx.fillStyle = theme.grid;
     ctx.beginPath();
     const x0 = state.camera.x - state.viewW / 2 / s;
     const x1 = state.camera.x + state.viewW / 2 / s;
@@ -630,14 +659,12 @@ export class Renderer {
     const startX = Math.floor(x0 / step) * step;
     const startY = Math.floor(y0 / step) * step;
     for (let gx = startX; gx <= x1; gx += step) {
-      ctx.moveTo(gx, y0);
-      ctx.lineTo(gx, y1);
+      for (let gy = startY; gy <= y1; gy += step) {
+        ctx.moveTo(gx + r, gy);
+        ctx.arc(gx, gy, r, 0, Math.PI * 2);
+      }
     }
-    for (let gy = startY; gy <= y1; gy += step) {
-      ctx.moveTo(x0, gy);
-      ctx.lineTo(x1, gy);
-    }
-    ctx.stroke();
+    ctx.fill();
   }
 
   private drawConnector(
@@ -784,8 +811,9 @@ export class Renderer {
     const { stroke, borderWidth, borderStyle } = n.style;
     if (borderStyle === "none" || stroke === "transparent") return null;
     if (stroke === undefined && borderWidth === undefined && borderStyle === undefined) {
-      // A text-only topic has no box for the hairline to trace.
-      if (theme.nodeBorder === "transparent" || (n.style.shape === "none" && !n.style.code)) return null;
+      // A text-only topic (or an image item inside a freeform canvas with no explicit shape) has no box for the hairline to trace.
+      const freeformImageOnly = !n.style.shape && !n.style.fill && !n.style.code && !!(n.style.image || n.style.imageBottom || n.style.imageLeft || n.style.imageRight) && !!freeformOwner(sheet, n.id);
+      if (theme.nodeBorder === "transparent" || (n.style.shape === "none" && !n.style.code) || freeformImageOnly || isBarePicture(n)) return null;
       return { color: theme.nodeBorder, width: 1, dash: [], cap: "butt", double: false };
     }
     const color = stroke === undefined || stroke === BRANCH_STROKE ? this.branchColor(theme, n, sheet) : stroke;
@@ -920,14 +948,6 @@ export class Renderer {
     ctx.beginPath();
     ctx.roundRect(p.x, p.y, p.w, p.h, 12);
     ctx.fill(); ctx.stroke();
-    ctx.save(); ctx.clip();
-    ctx.strokeStyle = theme.textMuted;
-    ctx.globalAlpha = 0.13;
-    ctx.lineWidth = 0.5;
-    ctx.beginPath();
-    for (let x = p.x; x < p.x + p.w; x += 20) { ctx.moveTo(x, p.y + FREEFORM_HEADER); ctx.lineTo(x, p.y + p.h); }
-    for (let y = p.y + FREEFORM_HEADER; y < p.y + p.h; y += 20) { ctx.moveTo(p.x, y); ctx.lineTo(p.x + p.w, y); }
-    ctx.stroke(); ctx.restore();
     ctx.fillStyle = theme.text;
     ctx.font = `600 13px ${FONT_STACK}`;
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
@@ -1008,7 +1028,8 @@ export class Renderer {
       // A code block is always a rounded rectangle: shape styles (circle,
       // diamond…) describe presentational topics, and the chrome strip needs a
       // straight top edge to sit on.
-      this.traceShape(ctx, p, isCode ? "rounded" : n.style.shape ?? "rounded", isCode ? 8 : n.style.cornerRadius ?? 10);
+      // A bare picture has no box under it: a transparent PNG shows the canvas.
+      this.traceShape(ctx, p, isCode ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded", isCode ? 8 : n.style.cornerRadius ?? 10);
       ctx.fillStyle = fill;
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -1078,9 +1099,43 @@ export class Renderer {
       }
       // An item of a canvas also resizes from its corners (width AND height).
       if (freeformOwner(state.sheet, n.id) && !n.style.chartNote) {
-        const cs = 8 / state.camera.scale;
-        ctx.fillStyle = theme.selection;
-        for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) ctx.fillRect(cx - cs / 2, cy - cs / 2, cs, cs);
+        const s = state.camera.scale;
+        const cs = 8 / s;
+        if (isFreeTransform(state.sheet, n)) {
+          // Photoshop-style free-transform box: 8 resize handles + top rotation handle.
+          const mx = p.x + p.w / 2, my = p.y + p.h / 2;
+          const rotStem = 22 / s;
+          ctx.beginPath();
+          ctx.moveTo(mx, p.y);
+          ctx.lineTo(mx, p.y - rotStem);
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 1.5 / s;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(mx, p.y - rotStem, 4.5 / s, 0, Math.PI * 2);
+          ctx.fillStyle = theme.background;
+          ctx.fill();
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 1.6 / s;
+          ctx.stroke();
+
+          const handles: [number, number][] = [
+            [p.x, p.y], [mx, p.y], [p.x + p.w, p.y],
+            [p.x, my], [p.x + p.w, my],
+            [p.x, p.y + p.h], [mx, p.y + p.h], [p.x + p.w, p.y + p.h],
+          ];
+          ctx.fillStyle = theme.background;
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 1.6 / s;
+          for (const [cx, cy] of handles) {
+            ctx.fillRect(cx - cs / 2, cy - cs / 2, cs, cs);
+            ctx.strokeRect(cx - cs / 2, cy - cs / 2, cs, cs);
+          }
+        } else {
+          ctx.fillStyle = theme.selection;
+          for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) ctx.fillRect(cx - cs / 2, cy - cs / 2, cs, cs);
+        }
       }
       // A selected chart grows from its edges: "+" pills just outside the box,
       // to the right (a column) and underneath (a row). Same outline style as
@@ -1216,8 +1271,26 @@ export class Renderer {
       } else {
         this.drawImage(p);
         this.drawGallery(theme, p, state.sheet);
-        if (n.style.titleAt) this.drawOwnLabel(p, textColor);
-        else this.drawText(theme, p, textColor);
+        const sx = n.style.textScaleX ?? 1;
+        const sy = n.style.textScaleY ?? 1;
+        // Free-transform text is painted as vectors, never from the bitmap
+        // cache, so it stays sharp at any size and stretch.
+        const vector = sx !== 1 || sy !== 1 || isFreeTransform(state.sheet, n);
+        if (sx !== 1 || sy !== 1) {
+          const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+          const uw = p.w / sx, uh = p.h / sy;
+          const unstretched: Placed = { ...p, x: cx - uw / 2, y: cy - uh / 2, w: uw, h: uh };
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.scale(sx, sy);
+          ctx.translate(-cx, -cy);
+          if (n.style.titleAt) this.drawOwnLabel(unstretched, textColor);
+          else this.drawText(theme, unstretched, textColor, vector);
+          ctx.restore();
+        } else {
+          if (n.style.titleAt) this.drawOwnLabel(p, textColor);
+          else this.drawText(theme, p, textColor, vector);
+        }
       }
     }
 
@@ -1402,7 +1475,7 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawText(_theme: RenderTheme, p: Placed, color: string): void {
+  private drawText(_theme: RenderTheme, p: Placed, color: string, vector = false): void {
     const n = p.node;
     // The caller already skips this node entirely while it is being edited,
     // so an empty title here means an empty topic nobody is typing into.
@@ -1424,6 +1497,22 @@ export class Renderer {
     // as a container it is not.
     const slots = positionedImageSlots(p, n, this.resolveImage);
     const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET - slots.sidePadW);
+    const topBlock = slots.insets.top;
+    const botBlock = slots.insets.bottom;
+    const startX = p.x + pad + slots.insets.left;
+    if (vector) {
+      const size = n.style.fontSize ?? 14;
+      const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, this.measurer, n.style);
+      let totalH = 0;
+      for (const line of lines) totalH += (line.height ?? size * LINE_HEIGHT_FACTOR) + (line.gapPx ?? 0);
+      const midH = topBlock + totalH + botBlock;
+      const startY = p.y + pad + topBlock + Math.max(0, (p.h - pad * 2 - midH) / 2);
+      this.ctx.save();
+      this.ctx.textBaseline = "alphabetic";
+      this.paintRunLines(this.ctx, n, color, maxW, lines, startX, startY);
+      this.ctx.restore();
+      return;
+    }
     // Resolution bucket: re-render the bitmap only when the zoom crosses a
     // power-of-two boundary; between boundaries pan/zoom just blits.
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
@@ -1447,20 +1536,8 @@ export class Renderer {
       this.evictTextToBudget();
     }
     const totalH = entry.h;
-    // The text lives in the middle column: below the top image, above the
-    // bottom one, between the side ones — each separated by IMAGE_GAP. With
-    // no images at all this reduces to the old vertical centering exactly
-    // (p.y + pad + (p.h − pad·2 − totalH)/2 = p.y + (p.h − totalH)/2).
-    // Read from the INSETS, not from the image slots. For images the two agree
-    // exactly (an occupied slot's inset is its size plus one gap), but a custom
-    // shape's text box only reaches this far through the insets — and reading
-    // the slots meant the label of a shape node was drawn at the box's left
-    // edge, outside the drawing entirely.
-    const topBlock = slots.insets.top;
-    const botBlock = slots.insets.bottom;
     const midH = topBlock + totalH + botBlock;
     const startY = p.y + pad + topBlock + Math.max(0, (p.h - pad * 2 - midH) / 2);
-    const startX = p.x + pad + slots.insets.left;
     if (entry.w > 0 && entry.h > 0) this.ctx.drawImage(entry.canvas, startX, startY, entry.w, entry.h);
   }
 
@@ -1574,12 +1651,11 @@ export class Renderer {
     // bitmap on the 1024px level above zoom 0.5 on a retina screen — 3MB each,
     // so fifty visible image nodes blew the budget and the cache thrashed.
     const neededPx = (imgW * this.curScale * this.dpr) / (crop && crop.sw > 0 ? crop.sw : 1);
-    // Quantised to powers of two: an exact size would mint a new cache key on
-    // every micro-change of zoom and nothing would ever hit.
-    const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
-    // Smallest stored level that can serve the bucket. The original is never
-    // decoded: the hard 1024px cap of ADR-001 §12 is enforced here.
-    const level: AssetLevel = bucket <= 256 ? "small" : "large";
+    // Quantised (imageDecodeSize): an exact size would mint a new cache key on
+    // every micro-change of zoom and nothing would ever hit. Pictures shown
+    // wider than the 1024px level decode from the original, so a big picture
+    // or a deep zoom stays sharp instead of upscaling the large level.
+    const { bucket, level } = this.imageDecodeSize(imageId, neededPx);
     // The BUCKET keys the cache, not the level — with a variable decode size,
     // keying by level would reuse a 384px bitmap when 900 are needed and leave
     // that image blurred with nothing to invalidate it.
@@ -1604,12 +1680,19 @@ export class Renderer {
     this.startDecode(key, imageId, p.node.id, level, bucket);
   }
 
+  /** The blob of a level; an original that is gone (a compact .rnode.zip
+   *  carries only the display levels) falls back to the large one. */
+  private async storedLevel(assetId: string, level: AssetLevel): Promise<Blob | null> {
+    const blob = await this.assetStore.get(assetId, level);
+    return blob ?? (level === "original" ? await this.assetStore.get(assetId, "large") : null);
+  }
+
   private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel, bucket: number): Promise<void> {
     this.inflight.set(key, nodeId);
     this.inflightCount++;
     const t0 = typeof performance !== "undefined" ? performance.now() : 0;
     try {
-      const blob = await this.assetStore.get(assetId, level);
+      const blob = await this.storedLevel(assetId, level);
       if (!blob) {
         this.imageFailed.set(key, Date.now());
         trace.mark("render", "render:image-decode", { assetId, level, bucket, error: "missing" });
@@ -1665,8 +1748,7 @@ export class Renderer {
     const imgW = Math.min(att.w, MAX_IMAGE_W);
     const imgH = (imgW * att.h) / att.w;
     const neededPx = imgW * this.curScale * this.dpr;
-    const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
-    const level: AssetLevel = bucket <= 256 ? "small" : "large";
+    const { bucket, level } = this.imageDecodeSize(ghost.imageId, neededPx);
     const key = `${ghost.imageId}@${bucket}`;
     const entry = this.imageCache.get(key);
     if (!entry) {
@@ -1765,7 +1847,20 @@ export class Renderer {
     if (!bctx) return { canvas, w: maxW, h: totalH };
     bctx.scale(res, res);
     bctx.textBaseline = "alphabetic";
+    this.paintRunLines(bctx, n, color, maxW, lines, 0, 0);
+    return { canvas, w: maxW, h: totalH };
+  }
 
+  private paintRunLines(
+    bctx: CanvasRenderingContext2D,
+    n: MindNode,
+    color: string,
+    maxW: number,
+    lines: ReturnType<typeof wrapRunLines>,
+    ox: number,
+    oy: number,
+  ): void {
+    const size = n.style.fontSize ?? 14;
     const family = n.style.fontFamily ?? FONT_STACK;
     const baseWeight = n.style.fontWeight ?? 400;
     const strike = (n.style.strikethrough ?? false);
@@ -1775,29 +1870,19 @@ export class Renderer {
       const italic = (seg.run.italic ?? false) || (n.style.italic ?? false);
       return `${italic ? "italic " : ""}${bold ? 700 : baseWeight} ${runSize}px ${family}`;
     };
-    let yCursor = 0;
+    let yCursor = oy;
     for (const line of lines) {
       const lh = line.height ?? size * LINE_HEIGHT_FACTOR;
       yCursor += line.gapPx ?? 0;
-
-      // The line box and its baseline come from wrapRunLines, which builds
-      // them with the CSS rule (per-inline-box half-leading over every run
-      // plus the strut). Recomputing them here — with ONE half-leading for the
-      // whole line — is what used to drift from the editor on mixed sizes.
       const baselineY = yCursor + (line.baseline ?? lh * 0.8);
-
-      // 2) draw the bullet in its own fixed-width column, then the text.
-      //    List items are ALWAYS left-aligned (as in the overlay's CSS):
-      //    centering a hanging indent is ill-defined and the two sides could
-      //    never agree on it.
       const indent = line.indent ?? 0;
       if (line.bullet) {
         bctx.font = fontOf({ run: line.bullet.run });
         bctx.fillStyle = line.bullet.run.color ?? color;
-        bctx.fillText(line.bullet.char, line.bullet.x, baselineY);
+        bctx.fillText(line.bullet.char, ox + line.bullet.x, baselineY);
       }
       const isList = indent > 0 || !!line.bullet;
-      let x = n.style.align === "left" || isList ? indent : (maxW - line.width) / 2;
+      let x = ox + (n.style.align === "left" || isList ? indent : (maxW - line.width) / 2);
       for (const seg of line.segments) {
         const runSize = seg.run.fontSize ?? size;
         const bold = (seg.run.bold ?? false) || baseWeight >= 700;
@@ -1810,7 +1895,6 @@ export class Renderer {
           bctx.strokeStyle = seg.run.color ?? color;
           bctx.lineWidth = 1;
           bctx.beginPath();
-          // underline ~0.1em below the baseline, strikethrough ~0.28em above
           const yy = underline ? baselineY + runSize * 0.1 : baselineY - runSize * 0.28;
           bctx.moveTo(x, yy);
           bctx.lineTo(x + w, yy);
@@ -1820,7 +1904,6 @@ export class Renderer {
       }
       yCursor += lh;
     }
-    return { canvas, w: maxW, h: totalH };
   }
 
   /** Draw a code topic (T22): the whole block — chrome and tokenized lines —
@@ -2597,10 +2680,7 @@ export class Renderer {
         // Same bucket arithmetic paintSlot uses, so the draw finds these
         // entries instead of missing and starting its own decode.
         const neededPx = (w * scale) / (crop && crop.sw > 0 ? crop.sw : 1);
-        const bucket = Math.max(
-          this.IMAGE_BUCKET_MIN,
-          Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx))))
-        );
+        const { bucket, level } = this.imageDecodeSize(id, neededPx);
         const key = `${id}@${bucket}`;
         if (this.imageCache.has(key)) return;
         if (this.failedRecently(key)) {
@@ -2608,7 +2688,7 @@ export class Renderer {
           return;
         }
         try {
-          const blob = await this.assetStore.get(id, bucket <= 256 ? "small" : "large");
+          const blob = await this.storedLevel(id, level);
           if (!blob) {
             this.imageFailed.set(key, Date.now());
             if (strict) throw new Error(`Missing image ${id}`);
@@ -2815,6 +2895,9 @@ export class Renderer {
 
   /** Rect of the SELECTED image slot (falling back to the first present). */
   private selectedImageRect(state: RenderState, p: Placed): { x: number; y: number; w: number; h: number } | null {
+    // A bare picture has no image "inside" it to select or resize apart: the
+    // item's own free-transform handles are the picture's.
+    if (isBarePicture(p.node)) return null;
     const items = positionedImageSlots(p, p.node, this.resolveImage).items;
     const slot = state.imageSlot ?? "top";
     const it = items.find((i) => i.slot === slot) ?? items[0];
@@ -2847,6 +2930,8 @@ export class Renderer {
   ): { nodeId: string; slot: ImageSlot; rect: { x: number; y: number; w: number; h: number } } | null {
     const placed = this.placedNodes(state).filter((p) => p.visible);
     for (let i = placed.length - 1; i >= 0; i--) {
+      // A bare picture is hit as the item itself (select, move, transform).
+      if (isBarePicture(placed[i].node)) continue;
       const items = positionedImageSlots(placed[i], placed[i].node, this.resolveImage).items;
       for (const it of items) {
         if (worldX >= it.x && worldX <= it.x + it.size.w && worldY >= it.y && worldY <= it.y + it.size.h) {

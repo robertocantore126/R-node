@@ -12,9 +12,9 @@
 }
 
 :root[data-theme="light"] {
-  --bg: #ffffff;
-  --surface: #ffffff;
-  --surface-2: #f8fafc;
+  --bg: #f3f4f6;
+  --surface: #f9fafb;
+  --surface-2: #eef0f4;
   --border: #e5e7eb;
   --text: #1c2333;
   --text-muted: #6b7280;

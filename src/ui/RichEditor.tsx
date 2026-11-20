@@ -86,10 +86,12 @@ export function RichEditor({
   // canvas pixel-for-pixel at every zoom. (Scaling each property separately
   // broke the WYSIWYG: heading font-size was absolute px and the padding was
   // screen px, so the editor text inflated and wrapped elsewhere.)
+  const sx = ns.textScaleX ?? 1;
+  const sy = ns.textScaleY ?? 1;
   const decoration = [ns.underline ? "underline" : null, ns.strikethrough ? "line-through" : null].filter(Boolean).join(" ");
   const inner: CSSProperties = {
-    width: Math.max(1, ((style.width as number) ?? 60) / scale),
-    height: Math.max(1, ((style.height as number) ?? 28) / scale),
+    width: Math.max(1, ((style.width as number) ?? 60) / (scale * sx)),
+    height: Math.max(1, ((style.height as number) ?? 28) / (scale * sy)),
     fontSize: ns.fontSize ?? 14,
     lineHeight: LINE_HEIGHT_FACTOR,
     textAlign: (ns.align === "left" ? "left" : "center") as CSSProperties["textAlign"],
@@ -102,7 +104,7 @@ export function RichEditor({
     textDecoration: decoration.length > 0 ? decoration : undefined,
     background: colors?.fill,
     color: colors?.text,
-    transform: `scale(${scale})`,
+    transform: `scale(${scale * sx}, ${scale * sy})`,
     transformOrigin: "0 0",
   };
   // Shared block gap: the canvas advances BLOCK_GAP_FACTOR × line-height at
@@ -145,7 +147,17 @@ export function RichEditor({
   const insets = pos.insets;
 
   return (
-    <div className="topic-rich-editor" style={{ left: style.left, top: style.top }}>
+    <div
+      className="topic-rich-editor"
+      style={{
+        left: style.left,
+        top: style.top,
+        width: style.width,
+        height: style.height,
+        transform: ns.rotation ? `rotate(${ns.rotation}deg)` : undefined,
+        transformOrigin: "center center",
+      }}
+    >
       <LexicalComposer initialConfig={config}>
         {/* Outside the scaled box on purpose: inside it the toolbar shrank
             with the zoom (unreadable at 40%, huge at 300%). */}

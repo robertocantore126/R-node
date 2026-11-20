@@ -19,6 +19,7 @@ import { quizHasMistakes } from "../core/quiz";
 import { flashcardCounts } from "../core/flashcards";
 import { NodeBorderPicker } from "./Inspector";
 import { chartSlotNote, freeformNote } from "../core/chartNotes";
+import { freeformOwner, isFreeTransform } from "../core/freeform";
 
 export interface CtxMenuState {
   /** Canvas-wrap coordinates of the cursor when the menu opened. */
@@ -175,6 +176,15 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
           <button role="menuitem" title="80 px - semibold" onClick={act(() => store.setSelectionTopicSize("large"))}>Large</button>
           <button role="menuitem" title="200 px - bold" onClick={act(() => store.setSelectionTopicSize("heading"))}>Heading</button>
         </div>
+        {freeformOwner(store.sheet, node.id) && (
+          <button
+            role="menuitem"
+            title="Corner-resizing scales text size proportionally instead of only resizing the box"
+            onClick={act(() => store.setSelectionStyle({ freeTransform: !isFreeTransform(store.sheet, node) }, [node.id]))}
+          >
+            {isFreeTransform(store.sheet, node) ? "✓ Free transform resize" : "Free transform resize"}
+          </button>
+        )}
       </>}
       <div className="ctx-sep" />
       <button
