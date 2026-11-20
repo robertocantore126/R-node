@@ -35,7 +35,7 @@ export function saveRerunAllowed(outcome: SaveOutcome): boolean {
 // Long operations (progress bar in the status bar)
 // ---------------------------------------------------------------------------
 
-export type LongOpKind = "save" | "export" | "open";
+export type LongOpKind = "save" | "export" | "open" | "import";
 
 /** What the status bar shows. Published as `EditorState.op`. */
 export interface LongOpView {

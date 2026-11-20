@@ -177,28 +177,99 @@ export interface ImportedImage {
   meta: Omit<AssetMeta, "id">;
 }
 
+interface PoolJob {
+  payload: { blob: Blob; mime: string; name?: string };
+  resolve: (res: ImportedImage) => void;
+  reject: (err: Error) => void;
+  signal?: AbortSignal;
+}
+
+const poolWorkers: Worker[] = [];
+const idleWorkers: Worker[] = [];
+const jobQueue: PoolJob[] = [];
+let poolCtor: typeof Worker | undefined;
+
+function poolSize(): number {
+  const cores = typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 0 : 0;
+  return cores >= 8 ? 4 : 2;
+}
+
+function resetPoolIfCtorChanged(): void {
+  const current = typeof Worker !== "undefined" ? Worker : undefined;
+  if (poolCtor === current) return;
+  for (const w of poolWorkers) w.terminate();
+  poolWorkers.length = 0;
+  idleWorkers.length = 0;
+  poolCtor = current;
+}
+
+function dispatchPool(): void {
+  while (idleWorkers.length > 0 && jobQueue.length > 0) {
+    const job = jobQueue.shift()!;
+    if (job.signal?.aborted) {
+      job.reject(new DOMException("Aborted", "AbortError"));
+      continue;
+    }
+    const worker = idleWorkers.pop()!;
+    const cleanup = () => {
+      worker.onmessage = null;
+      worker.onerror = null;
+    };
+    worker.onmessage = (e: MessageEvent) => {
+      cleanup();
+      idleWorkers.push(worker);
+      const data = e.data as { ok: boolean; result?: ImportedImage; error?: string };
+      if (data.ok && data.result) job.resolve(data.result);
+      else job.reject(new Error(data.error ?? "image import failed"));
+      dispatchPool();
+    };
+    worker.onerror = (e: ErrorEvent) => {
+      cleanup();
+      worker.terminate();
+      const idx = poolWorkers.indexOf(worker);
+      if (idx >= 0) poolWorkers.splice(idx, 1);
+      job.reject(new Error(e.message ?? "image import worker crashed"));
+      ensurePoolWorker();
+      dispatchPool();
+    };
+    worker.postMessage(job.payload);
+  }
+}
+
+function ensurePoolWorker(): void {
+  resetPoolIfCtorChanged();
+  const max = poolSize();
+  while (poolWorkers.length < max && poolWorkers.length < jobQueue.length + (max - idleWorkers.length)) {
+    const worker = new Worker(new URL("./imageImport.worker.ts", import.meta.url), { type: "module" });
+    poolWorkers.push(worker);
+    idleWorkers.push(worker);
+  }
+}
+
 /**
- * Run the import in a Web Worker. Resolves with the three levels ready for
- * AssetStore.put; rejects with a message when the source is unusable.
+ * Run the import in a pooled Web Worker. Resolves with the three levels ready
+ * for AssetStore.put; rejects with a message when the source is unusable.
  */
-export async function importImageFile(file: Blob & { name?: string }, mime = file.type): Promise<ImportedImage> {
+export async function importImageFile(
+  file: Blob & { name?: string },
+  mime = file.type,
+  signal?: AbortSignal,
+): Promise<ImportedImage> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   // Resolve the type BEFORE choosing the path: a cross-app drag reports an
   // empty type and only the name knows it is an SVG.
   const sourceMime = mime || mimeFromName(file.name ?? "") || "";
   const prepared = isSvgMime(sourceMime) ? await rasterizeSvg(file) : file;
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const preparedMime = isSvgMime(sourceMime) ? "image/png" : sourceMime;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("./imageImport.worker.ts", import.meta.url), { type: "module" });
-    worker.onmessage = (e: MessageEvent) => {
-      const data = e.data as { ok: boolean; result?: ImportedImage; error?: string };
-      worker.terminate();
-      if (data.ok && data.result) resolve(data.result);
-      else reject(new Error(data.error ?? "image import failed"));
-    };
-    worker.onerror = (e: ErrorEvent) => {
-      worker.terminate();
-      reject(new Error(e.message ?? "image import worker crashed"));
-    };
-    worker.postMessage({ blob: prepared, mime: preparedMime, name: file.name });
+    jobQueue.push({
+      payload: { blob: prepared, mime: preparedMime, name: file.name },
+      resolve,
+      reject,
+      signal,
+    });
+    ensurePoolWorker();
+    dispatchPool();
   });
 }

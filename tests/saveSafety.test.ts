@@ -53,32 +53,38 @@ async function until(cond: () => boolean): Promise<void> {
 }
 
 describe("unsaved changes per document", () => {
-  it("an edited document still reads unsaved after switching away and back", () => {
+  it("an edited document still reads unsaved after switching away and back", async () => {
     const store = new EditorStore(memoryAdapter());
     const a = store.getSnapshot().activeDocId;
     store.newDocument();
     const b = store.getSnapshot().activeDocId;
-    store.switchToDoc(a);
+    await store.switchToDoc(a);
+    expect(store.getSnapshot().activeDocId).toBe(a);
+    const before = Object.keys(store.sheet.nodes).length;
     store.createChildOf(store.sheet.rootNodeId);
     expect(store.getSnapshot().sync).toBe("dirty");
 
-    store.switchToDoc(b);
-    store.switchToDoc(a);
+    await store.switchToDoc(b);
+    await store.switchToDoc(a);
     expect(store.getSnapshot().sync).toBe("dirty");
     expect(store.hasUnsavedChanges()).toBe(true);
+    // The edit itself came back with the map: it was parked, not dropped.
+    expect(Object.keys(store.sheet.nodes).length).toBe(before + 1);
+    // Only one map is ever in memory.
+    expect(store.getSnapshot().docs).toHaveLength(1);
   });
 
-  it("web: deleting a document is itself unsaved until browser storage drops it", () => {
-    // Browser storage still holds the deleted map until the next save: if the
-    // close guard stayed quiet, closing the tab brought the map back on reload.
+  it("closing a document takes it out of the library at once, and opens the next one", async () => {
+    // The library drops the map immediately (it used to linger in browser
+    // storage until the next save, which is why the close guard had to ask).
     const store = new EditorStore(memoryAdapter());
+    const a = store.getSnapshot().activeDocId;
     store.newDocument();
     const b = store.getSnapshot().activeDocId;
     store.createChildOf(store.sheet.rootNodeId);
-    store.deleteDocument(b);
-    expect(store.getSnapshot().docs.some((d) => d.documentId === b)).toBe(false);
-    expect(store.hasUnsavedChanges()).toBe(true);
-    expect(store.getSnapshot().sync).toBe("dirty");
+    await store.deleteDocument(b);
+    expect(store.getSnapshot().library.some((d) => d.documentId === b)).toBe(false);
+    expect(store.getSnapshot().activeDocId).toBe(a);
   });
 
   it("a desktop save with no edit in between leaves everything saved", async () => {

@@ -40,6 +40,7 @@ function make2dCtx(): CanvasRenderingContext2D {
   const target: Record<string | symbol, unknown> = {};
   return new Proxy(target, {
     get(_t, p) {
+      if (p in _t) return _t[p];
       if (p === "measureText") return (text: string) => ({ width: text.length * 8 });
       return () => {};
     },
@@ -152,6 +153,36 @@ describe("image decode size", () => {
 
   it("stays on the large level when the image size is unknown", () => {
     expect(decoder(null)(3000)).toEqual({ bucket: 1024, level: "large" });
+  });
+});
+
+describe("text above 100% zoom", () => {
+  it("is drawn as vectors, never from a cached bitmap; at 100% the cache stays", () => {
+    const ctx = make2dCtx();
+    let created = 0;
+    vi.stubGlobal("document", {
+      createElement: () => {
+        created += 1;
+        return makeFakeCanvas(ctx);
+      },
+    });
+    const renderer = new Renderer(makeFakeCanvas(ctx));
+    created = 0;
+    const r = renderer as unknown as {
+      curScale: number;
+      drawText: (_theme: unknown, p: { node: MindNode; x: number; y: number; w: number; h: number; visible: boolean }, color: string) => void;
+      textCache: Map<string, unknown>;
+    };
+    const draw = (id: string): void => r.drawText(undefined, { node: makeNode(id), x: 0, y: 0, w: 120, h: 40, visible: true }, "#000");
+
+    r.curScale = 2.5;
+    draw("zoomed");
+    expect(r.textCache.size).toBe(0);
+    expect(created).toBe(0);
+
+    r.curScale = 1;
+    draw("fit");
+    expect(r.textCache.size).toBe(1);
   });
 });
 
@@ -500,5 +531,141 @@ describe("hitTestGalleryCell — the caption band is a target of its own (T25)",
     const c = cells[0];
     expect(c.captionH).toBe(0);
     expect(r.hitTestGalleryCell({} as never, c.x + c.w / 2, c.y + c.h + 4)).toBeNull();
+  });
+});
+
+describe("image scale cache, fallback & priority queue", () => {
+  function fakeBitmap(w: number, h: number) {
+    return { width: w, height: h, close: vi.fn() } as unknown as ImageBitmap;
+  }
+
+  it("uses 32 px minimum bucket for tiny zoomed-out thumbnails", () => {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const r = new Renderer(makeFakeCanvas(ctx)) as unknown as {
+      resolveImage: (id: string) => { w: number; h: number } | null;
+      imageDecodeSize: (id: string, px: number) => { bucket: number; level: string };
+    };
+    r.resolveImage = () => ({ w: 1000, h: 1000 });
+    expect(r.imageDecodeSize("img", 18)).toEqual({ bucket: 32, level: "small" });
+    expect(r.imageDecodeSize("img", 50)).toEqual({ bucket: 64, level: "small" });
+  });
+
+  it("never evicts on-screen keys unless exceeding 2x hard ceiling", () => {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const r = new Renderer(makeFakeCanvas(ctx)) as unknown as {
+      IMAGE_BUDGET: number;
+      cacheImageBitmap: (key: string, imageId: string, bucket: number, bitmap: ImageBitmap) => number;
+      frameKeys: Set<string>;
+      imageCache: Map<string, { bitmap: ImageBitmap; bytes: number }>;
+      evictToBudget: () => void;
+    };
+    // Put an on-screen 8192x4096 (128 MB) entry and an off-screen 4096x2048 (32 MB) entry.
+    const onScreen = fakeBitmap(8192, 4096);
+    const offScreen = fakeBitmap(4096, 2048);
+    r.cacheImageBitmap("on@1024", "on", 1024, onScreen);
+    r.cacheImageBitmap("off@512", "off", 512, offScreen);
+    r.frameKeys.add("on@1024");
+    r.evictToBudget();
+    expect(r.imageCache.has("on@1024")).toBe(true);
+    expect(r.imageCache.has("off@512")).toBe(false);
+    expect((offScreen.close as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    expect((onScreen.close as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("draws nearest cached fallback bucket on cache miss and enqueues exact bucket", () => {
+    const ctx = make2dCtx();
+    const drawImage = vi.fn();
+    (ctx as unknown as Record<string, unknown>).drawImage = drawImage;
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const r = new Renderer(makeFakeCanvas(ctx)) as unknown as {
+      resolveImage: (id: string) => { w: number; h: number } | null;
+      cacheImageBitmap: (key: string, imageId: string, bucket: number, bitmap: ImageBitmap) => number;
+      paintSlot: (p: { node: MindNode }, id: string, w: number, h: number, x: number, y: number) => void;
+      decodeQueue: Map<string, { bucket: number; priority: number }>;
+    };
+    r.resolveImage = () => ({ w: 800, h: 600 });
+    const smallBmp = fakeBitmap(128, 96);
+    r.cacheImageBitmap("pic@128", "pic", 128, smallBmp);
+    r.paintSlot({ node: makeNode("n1") }, "pic", 512, 384, 0, 0);
+    expect(drawImage).toHaveBeenCalledWith(smallBmp, 0, 0, 512, 384);
+    expect(r.decodeQueue.has("pic@512")).toBe(true);
+  });
+
+  it("prioritises missing-without-fallback over sharpening and drops off-screen queued items", () => {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const getMany = vi.fn(async () => new Map());
+    const r = new Renderer(makeFakeCanvas(ctx), { assetStore: { getMany } as unknown as AssetStore }) as unknown as {
+      visibleImageNodes: Set<string>;
+      enqueueDecode: (key: string, imageId: string, nodeId: string, level: string, bucket: number, priority: number) => void;
+      flushDecodeQueue: () => void;
+      decodeQueue: Map<string, unknown>;
+    };
+    r.visibleImageNodes = new Set(["n-visible"]);
+    r.enqueueDecode("off@64", "off", "n-offscreen", "small", 64, 1e12);
+    r.enqueueDecode("vis@64", "vis", "n-visible", "small", 64, 100);
+    r.flushDecodeQueue();
+    expect(r.decodeQueue.size).toBe(0);
+    expect(getMany).toHaveBeenCalledWith(["vis"], "small");
+  });
+
+  it("derives smaller original-level buckets from a larger cached bitmap without fetching", async () => {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const derivedBmp = fakeBitmap(1448, 1086);
+    const createImageBitmapMock = vi.fn(async () => derivedBmp);
+    vi.stubGlobal("createImageBitmap", createImageBitmapMock);
+    const getMany = vi.fn(async () => new Map());
+    const r = new Renderer(makeFakeCanvas(ctx), { assetStore: { getMany } as unknown as AssetStore }) as unknown as {
+      visibleImageNodes: Set<string>;
+      cacheImageBitmap: (key: string, imageId: string, bucket: number, bitmap: ImageBitmap) => number;
+      enqueueDecode: (key: string, imageId: string, nodeId: string, level: string, bucket: number, priority: number) => void;
+      flushDecodeQueue: () => void;
+      imageCache: Map<string, unknown>;
+    };
+    const bigBmp = fakeBitmap(2896, 2172);
+    r.visibleImageNodes = new Set(["n1"]);
+    r.cacheImageBitmap("big@2896", "big", 2896, bigBmp);
+    r.enqueueDecode("big@1448", "big", "n1", "original", 1448, 100);
+    r.flushDecodeQueue();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(getMany).not.toHaveBeenCalled();
+    expect(createImageBitmapMock).toHaveBeenCalledWith(bigBmp, { resizeWidth: 1448, resizeQuality: "high" });
+    expect(r.imageCache.has("big@1448")).toBe(true);
+  });
+
+  it("uses spatial grid to cull visibility in O(visible) on maps > 128 nodes", () => {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const renderer = new Renderer(makeFakeCanvas(ctx));
+    const sheet = new DocumentModel(DocumentModel.blank("grid")).sheet;
+    const root = sheet.nodes[sheet.rootNodeId];
+    for (let i = 0; i < 200; i++) {
+      const n = makeNode(`n-${i}`);
+      n.position = { x: i * 5000, y: 0, manual: true };
+      root.childrenIds.push(n.id);
+      sheet.nodes[n.id] = n;
+    }
+    const r = renderer as unknown as {
+      visiblePlacedList: (s: RenderState) => { node: MindNode }[];
+    };
+    const state1: RenderState = {
+      sheet,
+      camera: { x: 10000, y: 0, scale: 1 },
+      viewW: 400,
+      viewH: 400,
+      selection: new Set(),
+      editingId: null,
+      hoverId: null,
+      drop: null,
+      themeName: "light",
+      rev: 1,
+    };
+    expect(r.visiblePlacedList(state1).map((p) => p.node.id)).toEqual(["n-2"]);
+    const state2: RenderState = { ...state1, camera: { x: 500000, y: 0, scale: 1 } };
+    expect(r.visiblePlacedList(state2).map((p) => p.node.id)).toEqual(["n-100"]);
+    renderer.dispose();
   });
 });

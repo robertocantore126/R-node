@@ -8,11 +8,15 @@
  */
 import type { RnodeDocument } from "../core/types";
 import { trace } from "../dev/trace";
+import type { DocumentLibrary } from "./library";
 
 export interface StorageAdapter {
   readonly label: string;
   load(): Promise<RnodeDocument[]>;
   save(docs: RnodeDocument[]): Promise<void>;
+  /** Where the maps that are not open live (see library.ts). Without one the
+   *  editor keeps them in a session-only library. */
+  readonly library?: DocumentLibrary;
 }
 
 /**

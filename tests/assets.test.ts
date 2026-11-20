@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   IndexedDbAssetStore,
   collectOrphans,
+  ensureStoragePersistent,
   getAssetStore,
+  getStorageEstimate,
   referencedAssetIds,
   sha256Hex,
   type AssetBlob,
@@ -278,5 +280,45 @@ describe("getAssetStore", () => {
 
   it("picks IndexedDB when no Tauri global is present (the node test env)", () => {
     expect(getAssetStore()).toBeInstanceOf(IndexedDbAssetStore);
+  });
+});
+
+describe("batched reads (getMany / metaMany)", () => {
+  it("fetches multiple blobs and metas in one batch and skips missing ids", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+    const id1 = await store.put(makeLevels("ASSET-1"), meta({ name: "one.png" }));
+    const id2 = await store.put(makeLevels("ASSET-2"), meta({ name: "two.png" }));
+
+    const blobs = await store.getMany([id1, "missing", id2, id1], "small");
+    expect(blobs.size).toBe(2);
+    expect(await blobs.get(id1)?.text()).toBe("SMALL-256");
+    expect(await blobs.get(id2)?.text()).toBe("SMALL-256");
+
+    const metas = await store.metaMany([id1, "missing", id2]);
+    expect(metas.size).toBe(2);
+    expect(metas.get(id1)?.name).toBe("one.png");
+    expect(metas.get(id2)?.name).toBe("two.png");
+  });
+});
+
+describe("storage persistence and batched writes", () => {
+  it("handles navigator.storage.persist and estimate safely", async () => {
+    expect(typeof (await ensureStoragePersistent())).toBe("boolean");
+    const est = await getStorageEstimate();
+    expect(est === null || (typeof est.usage === "number" && typeof est.quota === "number")).toBe(true);
+  });
+
+  it("putMany stores a batch in one transaction and skips duplicates", async () => {
+    const store = new IndexedDbAssetStore(uniqueDb());
+    const m1: AssetMeta = { id: "batch-1", mime: "image/png", w: 100, h: 100, bytes: 10, name: "1.png" };
+    const m2: AssetMeta = { id: "batch-2", mime: "image/png", w: 200, h: 200, bytes: 20, name: "2.png" };
+    await store.putMany([
+      { id: "batch-1", levels: makeLevels("B1"), meta: m1 },
+      { id: "batch-2", levels: makeLevels("B2"), meta: m2 },
+      { id: "batch-1", levels: makeLevels("B1-DUP"), meta: { ...m1, name: "dup.png" } },
+    ]);
+    expect((await store.list()).sort()).toEqual(["batch-1", "batch-2"]);
+    expect((await store.meta("batch-1"))?.name).toBe("1.png");
+    expect(await (await store.get("batch-2", "original"))?.text()).toBe("B2");
   });
 });

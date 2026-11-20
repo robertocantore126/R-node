@@ -365,7 +365,9 @@ describe("desktop save flow", () => {
     const store = new EditorStore(new TauriStorageAdapter());
     await store.init();
     await store.loadFile(); // open FileOnDisk.rnode (internal title: Internal Title)
-    expect(store.getSnapshot().docs.length).toBe(2);
+    // One map open; the one it replaced is in the library.
+    expect(store.getSnapshot().docs.length).toBe(1);
+    expect(store.getSnapshot().library.length).toBe(2);
 
     // The name in the GUI is the name of the file you opened. Showing the
     // stored "Internal Title" instead is what made the two disagree from the
@@ -461,8 +463,8 @@ describe("per-document files (two open maps cannot overwrite each other)", () =>
     // Switch back to the first document and press Ctrl+S. The OLD behaviour
     // wrote the first document into B.rnode and renamed the file away; the
     // fixed behaviour writes the document's OWN file.
-    const aId = store.getSnapshot().docs.find((d) => d.documentId !== "doc-b")!.documentId;
-    store.switchToDoc(aId);
+    const aId = store.getSnapshot().library.find((d) => d.documentId !== "doc-b")!.documentId;
+    await store.switchToDoc(aId);
     await store.saveNow();
     const writes = bk.calls.filter((c) => c.cmd === "write_document");
     expect(writes[writes.length - 1].args.path).toBe("C:/A.rnode");
@@ -511,7 +513,7 @@ describe("per-document files (two open maps cannot overwrite each other)", () =>
     // Trash the only open map: a fresh blank replaces it. It must NOT keep
     // pointing at A.rnode, or Ctrl+S would try to write the blank over the
     // old map (and the overwrite guard would refuse, stranding the new doc).
-    store.deleteDocument(store.getSnapshot().activeDocId);
+    await store.deleteDocument(store.getSnapshot().activeDocId);
     bk.queuePick("C:/Fresh.rnode");
     await store.saveNow(); // must be a Save-as to a NEW file
     const writes = bk.calls.filter((c) => c.cmd === "write_document");
@@ -529,10 +531,9 @@ describe("per-document files (two open maps cannot overwrite each other)", () =>
     await store.saveNow(); // sample -> A.rnode
     bk.queuePick("C:/B.rnode");
     await store.openDesktop(); // active is now B, root = B.rnode
-    const aId = store.getSnapshot().docs.find((d) => d.documentId !== "doc-b")!.documentId;
-    store.renameDocument(aId, "Renamed"); // rename the OTHER document
-    await Promise.resolve();
-    await Promise.resolve();
+    const aId = store.getSnapshot().library.find((d) => d.documentId !== "doc-b")!.documentId;
+    store.renameDocument(aId, "Renamed"); // rename the OTHER document (parked: read back from its file)
+    await new Promise((r) => setTimeout(r, 0));
     const renames = bk.calls.filter((c) => c.cmd === "rename_document");
     expect(renames).toHaveLength(1);
     expect(renames[0].args).toMatchObject({ from: "C:/A.rnode", to: "C:/Renamed.rnode" });

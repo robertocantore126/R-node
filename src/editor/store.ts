@@ -43,9 +43,10 @@ import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewp
 import { asThemeName, isThemeDependentColor, THEME_ORDER, THEMES, type ThemeName } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, readForOverwrite, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
-import { collectOrphans, getAssetStore, referencedAssetIds, TauriAssetStore, type AssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../persist/assets";
+import { collectOrphans, ensureStoragePersistent, getAssetStore, getStorageEstimate, referencedAssetIds, TauriAssetStore, type AssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../persist/assets";
 import { buildRnodeZip, estimateRnodeZip, importRnodeZip, type RnodeZipMode } from "./exportBridge";
 import { buildRnodeFile, isSqliteFile, readRnodeFile } from "../persist/rnodeFile";
+import { MemoryLibrary, type DocumentLibrary, type LibraryEntry } from "../persist/library";
 import { importImageFile, mimeFromName, validateImageSource, computeLevelDims, LEVEL_LONG_SIDE as IMAGE_LEVEL_LONG_SIDE, type ImportedImage } from "./imageImport";
 import { viewSize } from "./view";
 
@@ -211,7 +212,11 @@ export interface InkSettings {
 }
 
 export interface EditorState {
+  /** The ONE open document (a one-element list: everything else lives in the
+   *  library and is loaded only when opened). */
   docs: RnodeDocument[];
+  /** Every known document, the open one included: what the sidebar lists. */
+  library: LibraryEntry[];
   activeDocId: string;
   selection: string[];
   camera: Camera;
@@ -337,6 +342,8 @@ export class EditorStore {
   private workspaceDirty = false;
   /** Stored documents that failed the open check at startup (see storedDocs). */
   private unopenable: RnodeDocument[] = [];
+  /** The documents that are not open (see persist/library.ts). */
+  private library: DocumentLibrary;
   /** Set when the last import was declined to protect unsaved changes. */
   private importDeclined = false;
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -386,6 +393,7 @@ export class EditorStore {
 
   constructor(adapter: StorageAdapter = new LocalStorageAdapter()) {
     this.adapter = adapter;
+    this.library = adapter.library ?? new MemoryLibrary();
     this.model = new DocumentModel(DocumentModel.sample());
     this.state = this.makeState();
     this.snap = this.state;
@@ -442,6 +450,7 @@ export class EditorStore {
     const d = this.model.doc;
     return {
       docs: [d],
+      library: [{ documentId: d.documentId, title: d.title, updatedAt: d.updatedAt, archived: d.archived ? true : undefined }],
       activeDocId: d.documentId,
       selection: [],
       camera: { x: 0, y: 0, scale: 1 },
@@ -675,6 +684,11 @@ export class EditorStore {
       initError ??= `${documentLoadErrorLabel("incompatible-schema")} — ${this.unopenable.length} kept untouched`;
     }
     docs = openable;
+    // ONE document is open. An adapter that still hands over several (the old
+    // single-key store, the tests) has the others parked in the library: they
+    // are listed, and loaded only when opened.
+    for (const d of docs.slice(1)) await this.library.put(d);
+    docs = docs.slice(0, 1);
     if (docs.length > 0) {
       this.model = new DocumentModel(docs[0]);
       // The restored document keeps its file for the whole session: switching
@@ -692,8 +706,15 @@ export class EditorStore {
     this.normalizeBranchColors(this.model.sheet);
     this.dropGroupPlaceholders(this.model.sheet);
     this.state = this.makeState();
-    if (docs.length > 0) this.state.docs = docs;
     if (docs.length === 0) this.state.sync = "dirty";
+    const stored = await this.refreshLibrary();
+    // Changes parked in the browser library but never written to the file
+    // are still unsaved after a restart (read from the STORED entry: the
+    // list now shows the open map as this session sees it).
+    if (stored.find((e) => e.documentId === this.model.doc.documentId)?.unsaved) {
+      this.markDirty(this.model.doc.documentId);
+      this.upsertEntry(this.activeEntry());
+    }
     // The file name is the document's name (the user's choice). Adopting it
     // here is what makes the title in the GUI and the name on disk the same
     // thing across a restart, instead of two values that drift apart.
@@ -745,7 +766,11 @@ export class EditorStore {
    *  close guard asks before the window or tab goes away. */
   hasUnsavedChanges(): boolean {
     if (this.workspaceDirty || this.isDocDirty(this.model.doc.documentId)) return true;
-    return this.state.docs.some((d) => this.isDocDirty(d.documentId));
+    // A parked map with unsaved changes survives the close only in a library
+    // that persists (the browser's); a session library loses it.
+    if (this.library.persistent) return false;
+    for (const id of this.editRev.keys()) if (this.isDocDirty(id)) return true;
+    return false;
   }
 
   /** Apply ops, record them in history, mark dirty, schedule layout. */
@@ -1092,6 +1117,7 @@ export class EditorStore {
       for (const [id, rev] of revs) this.markSaved(id, rev);
       if (!localError) this.workspaceDirty = false;
       this.refreshSync();
+      this.upsertEntry(this.activeEntry());
       trace.mark("state", "state:sync", { status: this.state.sync, via: this.adapter.label });
       this.toast(
         localError
@@ -1221,8 +1247,7 @@ export class EditorStore {
   private adoptFileTitle(path: string): void {
     const title = titleFromDocPath(path);
     this.model.doc.title = title;
-    const entry = this.state.docs.find((d) => d.documentId === this.model.doc.documentId);
-    if (entry) entry.title = title;
+    this.upsertEntry(this.activeEntry());
   }
 
   /**
@@ -1627,11 +1652,12 @@ export class EditorStore {
     const { file, handle } = picked;
     trace.mark("files", "files:open", { name: file.name, bytes: file.size });
     try {
-      const buf = await file.arrayBuffer();
-      if (isSqliteFile(new Uint8Array(buf, 0, Math.min(16, buf.byteLength)))) {
-        await this.openRnodeBytes(new Uint8Array(buf), file.name, handle);
+      const head16 = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+      if (isSqliteFile(head16)) {
+        await this.openRnodeBytes(new Uint8Array(await file.arrayBuffer()), file.name, handle);
         return;
       }
+      const buf = await file.arrayBuffer();
       const head = new Uint8Array(buf, 0, Math.min(4, buf.byteLength));
       const isZip = head.length === 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
       if (isZip) {
@@ -1780,24 +1806,28 @@ export class EditorStore {
     this.importDeclined = false;
     const doc = this.validateImportedDoc(raw);
     if (!doc) return null;
-    const existing = this.state.docs.findIndex((d) => d.documentId === doc.documentId);
-    // Opening a file whose document is already open REPLACES the open copy
-    // (identity is the documentId — a copy made in Explorer has the same one).
-    // With unsaved changes on the open copy that silently threw them away.
-    if (existing >= 0 && this.isDocDirty(doc.documentId)) {
+    // Opening a file whose document is already known REPLACES the known copy
+    // (identity is the documentId — a copy made in Explorer has the same one):
+    // the open map, or one parked in the library. With unsaved changes on that
+    // copy, ask first — replacing it silently threw them away.
+    const isActive = doc.documentId === this.model.doc.documentId;
+    const known = this.state.library.find((e) => e.documentId === doc.documentId);
+    const unsaved = isActive ? this.isDocDirty(doc.documentId) : this.isDocDirty(doc.documentId) || !!known?.unsaved;
+    if (unsaved) {
+      const title = isActive ? this.model.doc.title : known?.title ?? doc.title;
       const ok =
         typeof window === "undefined" || typeof window.confirm !== "function" ||
-        window.confirm(`"${this.state.docs[existing].title}" is open with unsaved changes. Replace it with the file's version and lose them?`);
+        window.confirm(`"${title}" has unsaved changes. Replace it with the file's version and lose them?`);
       if (!ok) {
         this.importDeclined = true;
         this.toast("Open cancelled — the open copy keeps its unsaved changes");
         return null;
       }
     }
-    if (existing >= 0) this.state.docs[existing] = doc;
-    else this.state.docs = [...this.state.docs, doc];
     trace.mark("data", "data:import", { docId: doc.documentId, nodes: Object.keys(doc.sheets[0].nodes).length });
-    this.switchToDoc(doc.documentId);
+    // One document at a time: the map being left goes to the library.
+    if (!isActive) this.parkActive();
+    this.activate(doc);
     this.markDirty(doc.documentId); // loaded from disk — not yet in app storage
     this.normalizeBranchColors(this.sheet);
     this.dropGroupPlaceholders(this.sheet);
@@ -4219,7 +4249,9 @@ export class EditorStore {
    */
   private async importToCard(
     file: Blob & { name?: string },
+    signal?: AbortSignal,
   ): Promise<{ ok: true; card: AttachmentInfo } | { ok: false; reason: string }> {
+    if (signal?.aborted) return { ok: false, reason: "Import cancelled" };
     // A cross-app drag (web browser → app) delivers the picture as a temp file
     // with an EMPTY type — only the name says what it is. Sniff it before the
     // allowlist, or every browser drag is refused as "unsupported mime".
@@ -4235,17 +4267,19 @@ export class EditorStore {
     }
     let imported: ImportedImage;
     try {
-      imported = await importImageFile(file, mime);
+      imported = await importImageFile(file, mime, signal);
     } catch (err) {
       trace.ignored("drop", "decode failed", { error: String(err) });
       return { ok: false, reason: String(err) };
     }
     const assetStore = getAssetStore();
-    const id = await assetStore.put(imported.levels, imported.meta);
+    const fullMeta: AssetMeta = { ...imported.meta, id: imported.id };
+    await assetStore.putUnderId(imported.id, imported.levels, fullMeta);
+    void ensureStoragePersistent();
     return {
       ok: true,
       card: {
-        id,
+        id: imported.id,
         mime: imported.meta.mime,
         w: imported.meta.w,
         h: imported.meta.h,
@@ -4253,6 +4287,46 @@ export class EditorStore {
         name: imported.meta.name,
       },
     };
+  }
+
+  /** Import a batch of image files in parallel through the worker pool, with progress + cancel. */
+  private async importFilesBatch(
+    files: (Blob & { name?: string })[],
+  ): Promise<{ cards: AttachmentInfo[]; failed: number; reason?: string; cancelled: boolean }> {
+    if (files.length === 0) return { cards: [], failed: 0, cancelled: false };
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const est = await getStorageEstimate();
+    if (est && est.usage + totalBytes > est.quota) {
+      this.toast(`Low browser storage: importing ${formatBytes(totalBytes)} with ${formatBytes(Math.max(0, est.quota - est.usage))} free`);
+    }
+    const showProgress = files.length > 1;
+    const signal = showProgress ? this.beginLongOp(`Importing 0 of ${files.length}…`, true, "import") : undefined;
+    let done = 0;
+    try {
+      const results = await Promise.all(
+        files.map(async (file) => {
+          const res = await this.importToCard(file, signal);
+          done++;
+          if (showProgress && !signal?.aborted) {
+            this.setOpProgress(`Importing ${done} of ${files.length}…`, done / files.length, "import");
+          }
+          return res;
+        }),
+      );
+      const cards: AttachmentInfo[] = [];
+      let failed = 0;
+      let reason: string | undefined;
+      for (const res of results) {
+        if (res.ok) cards.push(res.card);
+        else {
+          failed++;
+          if (reason === undefined) reason = res.reason;
+        }
+      }
+      return { cards, failed, reason, cancelled: signal?.aborted ?? false };
+    } finally {
+      if (showProgress) this.endLongOp("import");
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -4306,23 +4380,22 @@ export class EditorStore {
   ): Promise<{ added: number; failed: number; reason?: string }> {
     if (!this.model.node(nodeId)) return { added: 0, failed: 0 };
     if (this.model.node(nodeId)?.style.gallery?.chart) return this.fillChartSlots(nodeId, files);
+    const sheet = this.sheet;
+    const { cards, failed, reason } = await this.importFilesBatch(files);
+    if (this.sheet !== sheet || !this.model.node(nodeId)) {
+      return { added: 0, failed: failed + cards.length, reason: reason ?? "Target topic is no longer open" };
+    }
     const items = this.galleryItems(nodeId);
+    const knownIds = new Set(this.sheet.attachments.map((a) => a.id));
     let added = 0;
-    let failed = 0;
-    let reason: string | undefined;
-    for (const file of files) {
-      const res = await this.importToCard(file);
-      if (!res.ok) {
-        failed++;
-        if (reason === undefined) reason = res.reason;
-        continue;
-      }
+    for (const card of cards) {
       // The card is shared and content-addressed: the same picture in two
       // cells (or in a slot and a cell) is one entry here and one blob.
-      if (!this.sheet.attachments.some((a) => a.id === res.card.id)) {
-        this.sheet.attachments.push({ ...res.card });
+      if (!knownIds.has(card.id)) {
+        knownIds.add(card.id);
+        this.sheet.attachments.push({ ...card });
       }
-      items.push({ id: res.card.id, caption: captionFromFileName(res.card.name) });
+      items.push({ id: card.id, caption: captionFromFileName(card.name) });
       added++;
     }
     if (added > 0) {
@@ -4685,17 +4758,7 @@ export class EditorStore {
     at?: number,
   ): Promise<{ added: number; failed: number; reason?: string }> {
     const sheet = this.sheet;
-    const cards: AttachmentInfo[] = [];
-    let failed = 0;
-    let reason: string | undefined;
-    for (const file of files) {
-      const res = await this.importToCard(file);
-      if (res.ok) cards.push(res.card);
-      else {
-        failed++;
-        if (reason === undefined) reason = res.reason;
-      }
-    }
+    const { cards, failed, reason } = await this.importFilesBatch(files);
     const g = this.model.node(nodeId)?.style.gallery;
     if (this.sheet !== sheet || !g?.chart) return { added: 0, failed: failed + cards.length, reason: reason ?? "Target chart is no longer open" };
     if (cards.length === 0) {
@@ -4708,8 +4771,12 @@ export class EditorStore {
     if (cursor < 0) cursor = items.length;
     let first = at !== undefined;
     let lastIndex = cursor;
+    const knownIds = new Set(this.sheet.attachments.map((a) => a.id));
     for (const card of cards) {
-      if (!this.sheet.attachments.some((a) => a.id === card.id)) this.sheet.attachments.push({ ...card });
+      if (!knownIds.has(card.id)) {
+        knownIds.add(card.id);
+        this.sheet.attachments.push({ ...card });
+      }
       // Past the first, skip filled slots: a multi-file drop fills holes, it
       // does not overwrite the pictures already on the board.
       if (!first) while (cursor < items.length && items[cursor].id) cursor++;
@@ -4946,16 +5013,18 @@ export class EditorStore {
    */
   async gcOrphans(assetStore?: AssetStore): Promise<void> {
     const store = assetStore ?? getAssetStore();
-    // Every other sheet this session knows — the other sheets of this
-    // document and every other open document — keeps its blobs alive.
+    // Everything else that can reach the shared image store keeps its blobs
+    // alive: the other sheets of this document, and every map in the library
+    // — which is NOT in memory, so its references come from the library's
+    // own record. Missing them would delete the pictures of every other map.
     const others = new Set<Sheet>();
-    // The active document is read from the model only: a copy of it in the
-    // docs list may be an older version that still references what is now
+    // The active document is read from the model only: its parked copy in the
+    // library may be an older version that still references what is now
     // garbage, and would keep it alive forever.
     const activeId = this.model.doc.documentId;
-    const docs = [this.model.doc, ...this.state.docs.filter((d) => d.documentId !== activeId)];
-    for (const d of docs) for (const sh of d.sheets) if (sh !== this.sheet) others.add(sh);
-    const report = await collectOrphans(this.sheet, store, others);
+    for (const sh of this.model.doc.sheets) if (sh !== this.sheet) others.add(sh);
+    const parkedIds = await this.library.assetIds(activeId);
+    const report = await collectOrphans(this.sheet, store, others, parkedIds);
     if (report.cards.length === 0 && report.blobs.length === 0) {
       this.toast("Nothing to collect — no orphaned images");
       return;
@@ -6845,37 +6914,154 @@ export class EditorStore {
   // Document management
   // -------------------------------------------------------------------------
 
+  /**
+   * ONE document is open at a time. The others are library entries — a
+   * title for the sidebar and a stored body — loaded only when opened. These
+   * helpers keep `state.library` (what the sidebar shows) in step with the
+   * library and with the open map.
+   */
+  private activeEntry(): LibraryEntry {
+    const d = this.model.doc;
+    return {
+      documentId: d.documentId,
+      title: d.title,
+      updatedAt: d.updatedAt,
+      archived: d.archived ? true : undefined,
+      unsaved: this.isDocDirty(d.documentId) ? true : undefined,
+    };
+  }
+
+  /** Put or replace one entry of the sidebar list (synchronous: the UI shows it now). */
+  private upsertEntry(entry: LibraryEntry): void {
+    const list = this.state.library.filter((e) => e.documentId !== entry.documentId);
+    list.push(entry);
+    list.sort((a, b) => a.title.localeCompare(b.title) || a.documentId.localeCompare(b.documentId));
+    this.state.library = list;
+  }
+
+  /** Reload the sidebar list from the library, with the open map as it is now. */
+  private async refreshLibrary(): Promise<LibraryEntry[]> {
+    let entries: LibraryEntry[] = [];
+    try {
+      entries = await this.library.list();
+    } catch (e) {
+      trace.error("library:list", String(e));
+    }
+    const activeId = this.model.doc.documentId;
+    this.state.library = entries.filter((e) => e.documentId !== activeId);
+    this.upsertEntry(this.activeEntry());
+    this.notify(false);
+    return entries;
+  }
+
+  /**
+   * Move the open map to the library before another one replaces it. Its
+   * body is serialized NOW (library.put does it before its first await), so
+   * edits made after this call cannot leak into what was parked. A desktop
+   * map with a file and nothing unsaved is parked without a body: it is read
+   * back from its file when reopened.
+   */
+  private parkActive(): Promise<void> {
+    this.commitDraftOnLeave();
+    const doc = this.model.doc;
+    const id = doc.documentId;
+    const unsaved = this.isDocDirty(id);
+    const body = !(this.adapter instanceof TauriStorageAdapter && this.docFilePaths.has(id) && !unsaved);
+    this.upsertEntry({ ...this.activeEntry(), unsaved: unsaved ? true : undefined });
+    const write = this.library.put(doc, { unsaved, body });
+    write.catch((e: unknown) => {
+      trace.error("library:park", String(e));
+      this.toast(`Could not store "${doc.title}" in the browser — ${e instanceof Error ? e.message : String(e)}`);
+    });
+    return write;
+  }
+
+  /** Make `doc` THE open document (no parking: callers park first). */
+  private activate(doc: RnodeDocument): void {
+    this.model = new DocumentModel(doc);
+    this.state.docs = [doc];
+    // Documents loaded at startup are normalized by init(); a document opened
+    // later has to get the same pass, or its legacy colour stamps would only
+    // disappear after a restart.
+    this.normalizeBranchColors(this.model.sheet);
+    this.dropGroupPlaceholders(this.model.sheet);
+    this.history.clear();
+    // Each document keeps its own file: switching moves the single-file
+    // adapter (and the asset store with it) to this document's file, or
+    // clears it when the document has no file yet — so a never-saved
+    // document can never write over another document's file.
+    this.applyDocFile(doc.documentId);
+    this.state.activeDocId = doc.documentId;
+    // Everything below names things in the document being left.
+    this.setSelectionTarget({ kind: "none" });
+    this.state.relFrom = null;
+    this.state.shownCanvasNote = null;
+    this.state.drop = null;
+    this.state.hoverId = null;
+    this.state.editingId = null;
+    this.state.search = "";
+    this.state.searchResults = [];
+    this.state.searchOpen = false;
+    this.state.quizOpen = null;
+    this.state.aiDiagramOpen = null;
+    this.state.flashcardsOpen = null;
+    this.upsertEntry(this.activeEntry());
+    void this.library.setLastOpen(doc.documentId).catch(() => undefined);
+    this.refreshSync();
+    this.focusRoot();
+    this.notify();
+    this.scheduleLayout(false);
+  }
+
+  /** The stored body of a library entry: the library's copy, or (desktop) its file. */
+  private async loadFromLibrary(id: string): Promise<RnodeDocument | null> {
+    let raw: RnodeDocument | null = null;
+    try {
+      raw = await this.library.get(id);
+      const path = this.docFilePaths.get(id);
+      if (!raw && path && this.adapter instanceof TauriStorageAdapter) raw = await this.adapter.readDocumentAt(path);
+    } catch (e) {
+      trace.error("library:get", String(e));
+      return null;
+    }
+    return raw ? this.validateImportedDoc(raw) : null;
+  }
+
   newDocument(): void {
+    void this.parkActive();
     const doc = DocumentModel.blank("Untitled map");
     doc.settings.theme = "light";
-    this.state.docs = [...this.state.docs, doc];
-    this.state.activeDocId = doc.documentId;
-    this.switchToDoc(doc.documentId);
+    this.activate(doc);
     this.markDirty(doc.documentId); // new doc not persisted until the user saves
+    this.upsertEntry(this.activeEntry());
     this.notify();
     this.toast("New document created");
   }
 
-  /** Create a doc from the roadmap template; returns its id. */
+  /** Create a doc from the roadmap template in the library; returns its id. */
   duplicateSample(): string {
     const doc = DocumentModel.sample();
     doc.settings.theme = "light";
-    this.state.docs = [...this.state.docs, doc];
+    void this.library.put(doc, { unsaved: true });
     this.markDirty(doc.documentId);
+    this.upsertEntry({ documentId: doc.documentId, title: doc.title, updatedAt: doc.updatedAt, unsaved: true });
     this.notify();
     return doc.documentId;
   }
 
   async duplicateDocument(id: string): Promise<void> {
-    const src = this.state.docs.find((d) => d.documentId === id);
+    const src = id === this.model.doc.documentId ? this.model.doc : await this.loadFromLibrary(id);
     if (!src) return;
     const copy: RnodeDocument = structuredClone(src);
     copy.documentId = uid("d");
     copy.title = src.title + " (copy)";
     copy.createdAt = nowIso();
     copy.updatedAt = nowIso();
-    this.state.docs = [...this.state.docs, copy];
+    // The copy goes to the library, not on screen — as before, duplicating
+    // does not switch maps.
+    await this.library.put(copy, { unsaved: true });
     this.markDirty(copy.documentId);
+    this.upsertEntry({ documentId: copy.documentId, title: copy.title, updatedAt: copy.updatedAt, archived: copy.archived ? true : undefined, unsaved: true });
     this.notify();
     // Desktop: the copy has no file yet, so its images are read from the
     // scratch file until its first Save as — and the source's images live in
@@ -6896,59 +7082,98 @@ export class EditorStore {
     this.toast(skipped > 0 ? `Document duplicated — ${skipped} image${skipped === 1 ? "" : "s"} missing from the source` : "Document duplicated");
   }
 
+  /**
+   * Change a stored (not open) map: load it, apply `edit`, park it back as
+   * unsaved. The open map is edited in place by the callers instead.
+   */
+  private async editParked(id: string, edit: (doc: RnodeDocument) => void): Promise<RnodeDocument | null> {
+    const doc = await this.loadFromLibrary(id);
+    if (!doc) return null;
+    edit(doc);
+    doc.updatedAt = nowIso();
+    await this.library.put(doc, { unsaved: true });
+    this.markDirty(id);
+    this.upsertEntry({ documentId: id, title: doc.title, updatedAt: doc.updatedAt, archived: doc.archived ? true : undefined, unsaved: true });
+    this.notify();
+    return doc;
+  }
+
   renameDocument(id: string, title: string): void {
-    const doc = this.state.docs.find((d) => d.documentId === id);
-    if (!doc) return;
+    if (id !== this.model.doc.documentId) {
+      void this.editParked(id, (d) => {
+        d.title = title;
+      }).then((doc) => {
+        if (doc) void this.syncFileNameToTitle(doc);
+      });
+      return;
+    }
+    const doc = this.model.doc;
     doc.title = title;
     doc.updatedAt = nowIso();
-    // The active document's model is what gets saved (and what the desktop
-    // rename-on-save detection reads): keep the two titles in sync so the
-    // GUI name becomes the real file's name.
-    if (this.state.activeDocId === id) {
-      this.model.doc.title = title;
-    }
     // Desktop: the file on disk takes the new name NOW, for any document,
     // not at the next save. Fire-and-forget — the rename reports its own
     // outcome and must not make renaming in the GUI feel like a blocking
     // operation.
     void this.syncFileNameToTitle(doc);
     this.markDirty(id);
+    this.upsertEntry(this.activeEntry());
     this.notify();
   }
 
   toggleArchive(id: string): void {
-    const doc = this.state.docs.find((d) => d.documentId === id);
-    if (!doc) return;
-    doc.archived = !doc.archived;
+    if (id !== this.model.doc.documentId) {
+      void this.editParked(id, (d) => {
+        d.archived = !d.archived;
+      });
+      return;
+    }
+    this.model.doc.archived = !this.model.doc.archived;
     this.markDirty(id);
+    this.upsertEntry(this.activeEntry());
     this.notify();
   }
 
-  deleteDocument(id: string): void {
-    this.state.docs = this.state.docs.filter((d) => d.documentId !== id);
-    this.docFilePaths.delete(id);
+  /**
+   * "Close document": take the map off the list. Web: its copy in browser
+   * storage is removed (a file saved on disk is untouched). Desktop: only the
+   * entry goes; the file stays. Closing the open map opens the next one, or a
+   * blank map when none is left.
+   */
+  async deleteDocument(id: string): Promise<void> {
+    const wasActive = id === this.model.doc.documentId;
     // A deleted document has nothing left to save; keeping its counters
     // would make the close guard ask about a map that no longer exists.
     this.editRev.delete(id);
     this.savedRev.delete(id);
-    if (this.state.activeDocId === id) {
-      const next = this.state.docs[0];
-      if (next) this.switchToDoc(next.documentId);
-      else {
+    this.state.library = this.state.library.filter((e) => e.documentId !== id);
+    if (wasActive) {
+      const nextEntry = this.state.library.find((e) => !e.archived) ?? this.state.library[0];
+      const next = nextEntry ? await this.loadFromLibrary(nextEntry.documentId) : null;
+      if (next) {
+        this.activate(next);
+        if (nextEntry?.unsaved && !this.isDocDirty(next.documentId)) this.markDirty(next.documentId);
+      } else {
         this.model = new DocumentModel(DocumentModel.blank());
+        const library = this.state.library;
         this.state = this.makeState();
+        this.state.library = library;
+        this.upsertEntry(this.activeEntry());
         // The replacement blank belongs to NO file: the adapter must not keep
         // pointing at the deleted document's file, or the next Ctrl+S would
         // try to write the blank over it — and the overwrite guard would
         // refuse, stranding the new document.
         this.applyDocFile(null);
         this.markDirty(this.model.doc.documentId); // a blank nobody has saved
+        this.upsertEntry(this.activeEntry());
       }
     }
-    // Web: browser storage still holds the deleted map until the next save,
-    // and the close guard must say so. Desktop: deleting only closes the
-    // document; its file is untouched and there is nothing to save.
-    if (!(this.adapter instanceof TauriStorageAdapter)) this.workspaceDirty = true;
+    this.docFilePaths.delete(id);
+    try {
+      await this.library.remove(id);
+    } catch (e) {
+      trace.error("library:remove", String(e));
+      this.toast(`Could not remove the map from browser storage — ${e instanceof Error ? e.message : String(e)}`);
+    }
     this.refreshSync();
     this.notify();
   }
@@ -6968,42 +7193,29 @@ export class EditorStore {
     if (assetStore instanceof TauriAssetStore) assetStore.setRoot(path);
   }
 
-  switchToDoc(id: string): void {
+  /**
+   * Open another map from the library. The target is loaded FIRST — a map
+   * that cannot be read leaves the open one where it is — then the open map
+   * is parked (with its unsaved changes, marked as such) and leaves memory.
+   */
+  async switchToDoc(id: string): Promise<void> {
+    if (id === this.model.doc.documentId) return;
     this.commitDraftOnLeave();
-    const doc = this.state.docs.find((d) => d.documentId === id);
-    if (!doc) return;
-    this.model = new DocumentModel(doc);
-    // Documents loaded at startup are normalized by init(); a document opened
-    // later has to get the same pass, or its legacy colour stamps would only
-    // disappear after a restart.
-    this.normalizeBranchColors(this.model.sheet);
-    this.dropGroupPlaceholders(this.model.sheet);
-    this.history.clear();
-    // Each document keeps its own file: switching moves the single-file
-    // adapter (and the asset store with it) to this document's file, or
-    // clears it when the document has no file yet — so a never-saved
-    // document can never write over another document's file.
-    this.applyDocFile(id);
-    this.state.activeDocId = id;
-    // Everything below names things in the document being left.
-    this.setSelectionTarget({ kind: "none" });
-    this.state.relFrom = null;
-    this.state.shownCanvasNote = null;
-    this.state.drop = null;
-    this.state.hoverId = null;
-    this.state.editingId = null;
-    this.state.search = "";
-    this.state.searchResults = [];
-    this.state.searchOpen = false;
-    this.state.quizOpen = null;
-    this.state.aiDiagramOpen = null;
-    this.state.flashcardsOpen = null;
+    const entry = this.state.library.find((e) => e.documentId === id);
+    const doc = await this.loadFromLibrary(id);
+    if (!doc) {
+      this.toast(`Cannot open "${entry?.title ?? "document"}" — ${documentLoadErrorLabel("incompatible-schema")}`);
+      return;
+    }
+    if (id === this.model.doc.documentId) return; // a second click already opened it
+    void this.parkActive();
+    this.activate(doc);
     // Each document keeps its own unsaved state: coming back to a map edited
-    // earlier must still say so (this used to reset to "saved" on every switch).
+    // earlier must still say so — in this session (the counters) and after a
+    // restart (the library's flag).
+    if (entry?.unsaved && !this.isDocDirty(id)) this.markDirty(id);
     this.refreshSync();
-    this.focusRoot();
     this.notify();
-    this.scheduleLayout(false);
   }
 
   setSheetTitle(title: string): void {

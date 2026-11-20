@@ -11,6 +11,15 @@ No benchmark step: each change below removes a cost that the code shows exists.
 Steps are ordered by value / effort; each one stands alone and can be merged on
 its own.
 
+**Status (branch `feat/image-scale`, 2026-11-20):** steps 1–7 and 11 are in.
+Step 8 (WebP display levels) is in for new imports. Step 9 is in only as
+"derive nearby buckets from a cached larger bitmap"; the device-local 4096 px
+WebP cache was dropped (it showed a re-encoded copy instead of the original
+and was never cleaned). Step 10 (OPFS `.rnode`) was dropped: it could write a
+`.rnode` without its images and leaked OPFS files. In its place the web build
+now keeps **one document open at a time** (`src/persist/library.ts`): the other
+maps are IndexedDB library entries, loaded only when opened.
+
 ---
 
 ## Where we are (2026-11-20)
