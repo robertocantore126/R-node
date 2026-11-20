@@ -40,6 +40,8 @@ export interface RenderState {
   hoverId: string | null;
   drop: DropIndicator | null;
   themeName: ThemeName;
+  /** Optional document-level canvas background override. */
+  background?: string;
   viewW: number;
   viewH: number;
   relSel?: string | null;
@@ -592,7 +594,8 @@ export class Renderer {
 
   render(state: RenderState): void {
     const ctx = this.ctx;
-    const theme = THEMES[state.themeName];
+    const baseTheme = THEMES[state.themeName];
+    const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, state.viewW, state.viewH);
     ctx.fillStyle = theme.background;
@@ -611,7 +614,7 @@ export class Renderer {
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
-    this.drawGrid(theme, state);
+    if (!theme.noGrid) this.drawGrid(theme, state);
 
     const tStart = typeof performance !== "undefined" ? performance.now() : 0;
     this.textHits = 0;
@@ -800,8 +803,8 @@ export class Renderer {
     const s = state.camera.scale;
     let step = 40;
     while (step * s < 14) step *= 2;
-    const r = 1.4 / s;
-    ctx.fillStyle = theme.grid;
+    ctx.strokeStyle = theme.grid;
+    ctx.lineWidth = 1 / s;
     ctx.beginPath();
     const x0 = state.camera.x - state.viewW / 2 / s;
     const x1 = state.camera.x + state.viewW / 2 / s;
@@ -810,12 +813,14 @@ export class Renderer {
     const startX = Math.floor(x0 / step) * step;
     const startY = Math.floor(y0 / step) * step;
     for (let gx = startX; gx <= x1; gx += step) {
-      for (let gy = startY; gy <= y1; gy += step) {
-        ctx.moveTo(gx + r, gy);
-        ctx.arc(gx, gy, r, 0, Math.PI * 2);
-      }
+      ctx.moveTo(gx, y0);
+      ctx.lineTo(gx, y1);
     }
-    ctx.fill();
+    for (let gy = startY; gy <= y1; gy += step) {
+      ctx.moveTo(x0, gy);
+      ctx.lineTo(x1, gy);
+    }
+    ctx.stroke();
   }
 
   private drawConnector(
@@ -1067,7 +1072,7 @@ export class Renderer {
   private drawFreeform(theme: RenderTheme, p: Placed, state?: RenderState): void {
     const ctx = this.ctx;
     ctx.save();
-    ctx.fillStyle = p.node.style.fill ?? theme.background;
+    ctx.fillStyle = p.node.style.fill ?? theme.freeformFill ?? theme.background;
     ctx.strokeStyle = p.node.style.stroke ?? theme.nodeBorder;
     ctx.lineWidth = p.node.style.borderWidth ?? 1;
     const box = p.node.style.container;

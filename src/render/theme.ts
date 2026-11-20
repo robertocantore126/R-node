@@ -6,20 +6,22 @@
  */
 import type { CodePalette } from "../core/codeHighlight";
 
-export type ThemeName = "light" | "dark" | "vanilla";
+export type ThemeName = "light" | "dark" | "vanilla" | "matte";
 
 /** Cycle order of the theme button. Light first: it is the default. */
-export const THEME_ORDER: ThemeName[] = ["light", "dark", "vanilla"];
+export const THEME_ORDER: ThemeName[] = ["light", "dark", "vanilla", "matte"];
 
 /** Coerce an arbitrary stored value to a known theme (unknown -> light). */
 export function asThemeName(value: unknown): ThemeName {
-  return value === "dark" || value === "vanilla" ? value : "light";
+  return value === "dark" || value === "vanilla" || value === "matte" ? value : "light";
 }
 
 export interface RenderTheme {
   name: ThemeName;
   background: string;
   grid: string;
+  /** Solid matte canvas: skip drawing the dot grid pattern. */
+  noGrid?: boolean;
   text: string;
   textMuted: string;
   selection: string;
@@ -30,6 +32,8 @@ export interface RenderTheme {
   searchMatchActive: string;
   rootFill: string;
   rootText: string;
+  /** Default fill for a freeform canvas (falls back to `background` when unset). */
+  freeformFill?: string;
   branch: string[]; // branch palette, rotated by main-branch index
   branchSoft: string[]; // lighter fills for the children of each main branch
   deepFill: string; // depth 3+: everything below a branch's children (white in light)
@@ -188,6 +192,42 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     collapsedBadgeText: "#5b4a37",
     nodeBorder: "rgba(91,74,55,0.14)",
     shadow: "rgba(91,74,55,0.22)",
+  },
+  matte: {
+    name: "matte",
+    background: "#878787",
+    grid: "transparent",
+    noGrid: true,
+    text: "#13131f",
+    textMuted: "#3d3b48",
+    selection: "#4f46e5",
+    selectionFill: "rgba(79, 70, 229, 0.14)",
+    dropIndicator: "#4f46e5",
+    searchMatch: "#f59e0b",
+    searchMatchActive: "#d97706",
+    rootFill: "#ffffff",
+    rootText: "#13131f",
+    freeformFill: "#ffffff",
+    branch: ["#ff646b", "#ff9a66", "#4eb5e8", "#55c9bd", "#a7d9bb", "#d979e5", "#70b9e8", "#f0bd62"],
+    branchSoft: ["#ffdfe1", "#ffe8dc", "#dff4ff", "#dff8f5", "#e5f6ec", "#f6e1f9", "#deeffb", "#fff0d3"],
+    deepFill: "#ffffff",
+    code: {
+      id: "matte",
+      plain: "#13131f",
+      keyword: "#cf222e",
+      string: "#0a3069",
+      number: "#0550ae",
+      comment: "#545261",
+      fn: "#6c68c9",
+      punct: "#57606a",
+    },
+    codeBg: "#f7f7f9",
+    codeBar: "#e2e1e6",
+    connector: "#3d3b48",
+    collapsedBadge: "#c2c1c7",
+    collapsedBadgeText: "#13131f",
+    nodeBorder: "rgba(19,19,31,0.12)",
+    shadow: "rgba(19,19,31,0.22)",
   },
 };
 

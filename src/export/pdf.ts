@@ -733,7 +733,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   };
 
   const drawFreeform = (cmds: string[], p: Placed, fr: Frame): void => {
-    const fill=p.node.style.fill??theme.background;
+    const fill=p.node.style.fill??theme.freeformFill??theme.background;
     const box=p.node.style.container;
     if (box) {
       // A diagram container, as on screen: header band, no grid, centred title.

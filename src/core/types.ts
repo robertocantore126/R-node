@@ -741,7 +741,8 @@ export interface RnodeDocument {
   archived: boolean;
   pinned: boolean;
   settings: {
-    theme: "light" | "dark" | "vanilla";
+    theme: "light" | "dark" | "vanilla" | "matte";
+    background?: string;
     showOutliner: boolean;
     showInspector: boolean;
   };

@@ -249,6 +249,7 @@ export interface EditorState {
   canRedo: boolean;
   docTitle: string;
   theme: ThemeName;
+  background?: string;
   structureType: string;
   mode: EditorMode;
   /** The pen's settings: session-wide, not saved with a document. */
@@ -478,6 +479,7 @@ export class EditorStore {
       canRedo: false,
       docTitle: d.title,
       theme: asThemeName(d.settings?.theme),
+      background: d.settings?.background,
       structureType: d.sheets[0].structure.structureType,
       mode: "select",
       ink: { tool: "pen", color: null, width: INK_DEFAULT_WIDTH },
@@ -524,6 +526,7 @@ export class EditorStore {
       canRedo: this.history.canRedo,
       docTitle: d.title,
       theme: asThemeName(d.settings?.theme),
+      background: d.settings?.background,
       structureType: d.sheets[0].structure.structureType,
     };
     this.snap = { ...this.state, selection: [...this.state.selection], searchResults: [...this.state.searchResults] };
@@ -1934,6 +1937,7 @@ export class EditorStore {
       pinned: !!d.pinned,
       settings: {
         theme: asThemeName(d.settings?.theme),
+        background: typeof d.settings?.background === "string" ? d.settings.background : undefined,
         showOutliner: !!d.settings?.showOutliner,
         showInspector: d.settings?.showInspector ?? true,
       },
@@ -6722,10 +6726,21 @@ export class EditorStore {
     const doc = this.model.doc;
     if (asThemeName(doc.settings?.theme) === theme) return;
     doc.settings.theme = theme;
+    doc.settings.background = undefined;
     doc.themeId = `r-node-${theme}`;
     doc.updatedAt = nowIso();
     this.markDirty(doc.documentId);
     this.notify();
+  }
+
+  setBackgroundColor(color: string | undefined): void {
+    const doc = this.model.doc;
+    const next = color && /^#[0-9a-f]{6}$/i.test(color) ? color : undefined;
+    if (doc.settings.background === next) return;
+    doc.settings.background = next;
+    doc.updatedAt = nowIso();
+    this.markDirty(doc.documentId);
+    this.notify(false);
   }
 
   /** TopBar button: light -> dark -> vanilla -> light. */

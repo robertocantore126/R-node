@@ -4,12 +4,13 @@ import { useStore } from "../editor/context";
 import { runExportHtml, runExportPdf } from "../editor/exportBridge";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
-import type { ThemeName } from "../render/theme";
+import { THEMES, type ThemeName } from "../render/theme";
 
 const THEME_LABELS: Record<ThemeName, string> = {
   light: "Light",
   dark: "Dark",
   vanilla: "Vanilla",
+  matte: "Matte",
 };
 
 export function TopBar(): JSX.Element {
@@ -116,12 +117,43 @@ export function TopBar(): JSX.Element {
         <button
           className="btn theme-btn"
           data-help="Theme"
-          data-help-more="Switches between Light (white), Dark and Vanilla (warm paper). The choice is saved with the document."
+          data-help-more="Switches between Light (white), Dark, Vanilla (warm paper) and Matte (solid slate). The choice is saved with the document."
           title={`Theme: ${THEME_LABELS[state.theme]} — click for the next one`}
           onClick={() => store.cycleTheme()}
         >
           ◐ {THEME_LABELS[state.theme]}
         </button>
+        <span className="bg-picker-wrap">
+          <label
+            className="bg-picker-btn"
+            data-help="Background colour"
+            data-help-more="Pick a custom canvas background colour in real time."
+            title={`Canvas background: ${state.background ?? THEMES[state.theme].background} — click to pick`}
+          >
+            <span
+              className="bg-picker-swatch"
+              style={{ background: state.background ?? THEMES[state.theme].background }}
+            />
+            <input
+              type="color"
+              className="bg-picker-input"
+              aria-label="Canvas background color"
+              value={state.background ?? THEMES[state.theme].background}
+              onInput={(e) => store.setBackgroundColor(e.currentTarget.value)}
+              onChange={(e) => store.setBackgroundColor(e.currentTarget.value)}
+            />
+          </label>
+          {state.background && (
+            <button
+              className="btn icon"
+              title="Reset background to theme default"
+              aria-label="Reset background color"
+              onClick={() => store.setBackgroundColor(undefined)}
+            >
+              ↺
+            </button>
+          )}
+        </span>
       </div>
 
       <div className="topbar-group">
