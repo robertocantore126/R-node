@@ -24,6 +24,8 @@
  */
 import type { RnodeDocument, Sheet } from "../core/types";
 import {
+  fetchAssetBlobs,
+  fetchAssetMetas,
   referencedAssetIds,
   type AssetBlob,
   type AssetLevel,
@@ -253,11 +255,13 @@ export async function estimateRnodeZip(
   const ids = [...referencedAssetIds(sheet)];
   let assets = 0;
   const level = levelForMode(mode);
-  for (let i = 0; i < ids.length; i++) {
+  const BATCH = 16;
+  for (let start = 0; start < ids.length; start += BATCH) {
     throwIfAborted(hooks.signal);
-    const blob = await store.get(ids[i], level);
-    if (blob) assets += blob.size;
-    hooks.onProgress?.("prepare", (i + 1) / ids.length);
+    const chunk = ids.slice(start, start + BATCH);
+    const blobs = await fetchAssetBlobs(store, chunk, level);
+    for (const b of blobs.values()) assets += b.size;
+    hooks.onProgress?.("prepare", Math.min(1, (start + chunk.length) / ids.length));
   }
   return docJson + manifest + assets + ids.length * ZIP_ENTRY_OVERHEAD + ZIP_BASE_OVERHEAD;
 }
@@ -283,15 +287,24 @@ export async function buildRnodeZip(
     },
   ];
   const level = levelForMode(mode);
-  for (let i = 0; i < ids.length; i++) {
+  const BATCH = 16;
+  for (let start = 0; start < ids.length; start += BATCH) {
     throwIfAborted(hooks.signal);
-    const [meta, blob] = await Promise.all([store.meta(ids[i]), store.get(ids[i], level)]);
-    if (!meta || !blob) continue; // referenced but absent: the zip cannot carry it
-    entries.push({
-      name: `assets/${ids[i]}.${extForMime(meta.mime)}`,
-      data: new Uint8Array(await blob.arrayBuffer()),
-    });
-    hooks.onProgress?.("read", (i + 1) / ids.length);
+    const chunk = ids.slice(start, start + BATCH);
+    const [metas, blobs] = await Promise.all([
+      fetchAssetMetas(store, chunk),
+      fetchAssetBlobs(store, chunk, level),
+    ]);
+    for (const id of chunk) {
+      const meta = metas.get(id);
+      const blob = blobs.get(id);
+      if (!meta || !blob) continue; // referenced but absent: the zip cannot carry it
+      entries.push({
+        name: `assets/${id}.${extForMime(meta.mime)}`,
+        data: new Uint8Array(await blob.arrayBuffer()),
+      });
+    }
+    hooks.onProgress?.("read", Math.min(1, (start + chunk.length) / ids.length));
   }
   return zipAsyncStreaming(entries, hooks);
 }

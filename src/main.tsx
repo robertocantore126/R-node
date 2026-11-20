@@ -5,15 +5,17 @@ import { EditorStore } from "./editor/store";
 import { inspectMachines } from "./editor/machine";
 import { StoreContext } from "./editor/context";
 import { installCloseGuard } from "./editor/closeGuard";
-import { LocalStorageAdapter, TauriStorageAdapter } from "./persist/storage";
+import { TauriStorageAdapter } from "./persist/storage";
+import { BrowserLibraryAdapter } from "./persist/library";
 import { generateStressMap, type StressOptions } from "./dev/stress";
 import "./styles.css";
 
 // Same runtime switch as the asset factory (T19): the Tauri webview carries
 // window.__TAURI__, a plain browser tab does not. On desktop the document is
-// a single .rnode file, so localStorage never touches the document.
+// a single .rnode file, so browser storage never touches the document. The
+// browser keeps one map open and the others in its IndexedDB library.
 const adapter =
-  typeof window !== "undefined" && window.__TAURI__ ? new TauriStorageAdapter() : new LocalStorageAdapter();
+  typeof window !== "undefined" && window.__TAURI__ ? new TauriStorageAdapter() : new BrowserLibraryAdapter();
 
 const store = new EditorStore(adapter);
 

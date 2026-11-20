@@ -392,7 +392,9 @@ describe("save / load file", () => {
     const id = store.importDocumentFromJson(JSON.stringify(second));
 
     expect(id).toBe("d_other");
-    expect(store.getSnapshot().docs.length).toBe(2);
+    // One map open at a time: the previous one moved to the library.
+    expect(store.getSnapshot().docs.length).toBe(1);
+    expect(store.getSnapshot().library.length).toBe(2);
     expect(store.getSnapshot().activeDocId).toBe("d_other");
     expect(store.getSnapshot().docTitle).toBe("Imported map");
     // loaded from disk → needs a save to persist in app storage
@@ -469,11 +471,11 @@ describe("save / load file", () => {
     // inspect the state and cancel.
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => { release = r; });
-    const assetStore = getAssetStore();
-    const realGet = assetStore.get.bind(assetStore);
-    const getSpy = vi.spyOn(assetStore, "get").mockImplementation(async (id, level) => {
+    const assetStore = getAssetStore() as Required<ReturnType<typeof getAssetStore>>;
+    const realGetMany = assetStore.getMany.bind(assetStore);
+    const getSpy = vi.spyOn(assetStore, "getMany").mockImplementation(async (ids, level) => {
       await gate;
-      return realGet(id, level);
+      return realGetMany(ids, level);
     });
     try {
       const saving = store.saveNow();
@@ -1188,6 +1190,29 @@ describe("orphan GC (T21-A)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps the pictures of maps that are in the library but not open", async () => {
+    // One map in memory: the others are only library entries. Their images
+    // are still live — judging by the open map alone deleted them.
+    const assetStore = new IndexedDbAssetStore(`gc-parked-${Date.now()}-${Math.random()}`);
+    const id = await putAsset(assetStore);
+    const confirm = vi.fn((_message: string) => true);
+    vi.stubGlobal("window", { confirm });
+
+    const store = new EditorStore(memoryAdapter);
+    store.createChild();
+    const root = store.doc.node(store.sheet.rootNodeId)!;
+    store.attachImage(root.childrenIds[root.childrenIds.length - 1], { id, mime: "image/png", w: 1200, h: 800, bytes: 8 });
+    // Open another map: the one with the picture is parked.
+    store.newDocument();
+    expect(store.getSnapshot().docs).toHaveLength(1);
+
+    await store.gcOrphans(assetStore);
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(await assetStore.list()).toEqual([id]);
+    vi.unstubAllGlobals();
+  });
+
   it("does not ask when there is nothing to collect", async () => {
     const assetStore = new IndexedDbAssetStore(`gc-none-${Date.now()}-${Math.random()}`);
     const id = await putAsset(assetStore);
@@ -1266,7 +1291,7 @@ describe("focusRoot — the view starts on the root node", () => {
     expect(cam.x).toBeCloseTo(-500 + measureNode(store.doc.rootNode, measurer).w / 2, 5);
   });
 
-  it("re-centers on the new root when switching between open documents", () => {
+  it("re-centers on the new root when switching between open documents", async () => {
     const store = new EditorStore(memoryAdapter);
     const a = DocumentModel.blank("A");
     const b = DocumentModel.blank("B");
@@ -1278,7 +1303,7 @@ describe("focusRoot — the view starts on the root node", () => {
     expect(cam.x).toBeCloseTo(800 + measureNode(store.doc.rootNode, measurer).w / 2, 5);
     expect(cam.y).toBeCloseTo(600 + measureNode(store.doc.rootNode, measurer).h / 2, 5);
     // Switch back to A — camera follows the root.
-    store.switchToDoc(a.documentId);
+    await store.switchToDoc(a.documentId);
     cam = store.getSnapshot().camera;
     expect(cam.x).toBeCloseTo(measureNode(store.doc.rootNode, measurer).w / 2, 5);
     expect(cam.y).toBeCloseTo(measureNode(store.doc.rootNode, measurer).h / 2, 5);

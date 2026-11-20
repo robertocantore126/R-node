@@ -18,7 +18,7 @@
  */
 import type { Database, SqlJsStatic } from "sql.js";
 import type { RnodeDocument, Sheet } from "../core/types";
-import { referencedAssetIds, type AssetBlob, type AssetLevel, type AssetMeta, type AssetStore } from "./assets";
+import { fetchAssetBlobs, fetchAssetMetas, referencedAssetIds, type AssetBlob, type AssetLevel, type AssetMeta, type AssetStore } from "./assets";
 
 /** Same text as `SCHEMA` in src-tauri/src/lib.rs. */
 const SCHEMA = `
@@ -132,20 +132,29 @@ export async function buildRnodeFile(
     const ids = [...referencedAssetIds(sheet)];
     const insert = db.prepare("INSERT OR IGNORE INTO assets (id, level, bytes) VALUES (?, ?, ?)");
     let skipped = 0;
+    const enc = new TextEncoder();
+    const BATCH = 16;
     try {
-      for (let i = 0; i < ids.length; i++) {
+      for (let start = 0; start < ids.length; start += BATCH) {
         throwIfAborted(hooks.signal);
-        const id = ids[i];
-        const [meta, ...blobs] = await Promise.all([store.meta(id), ...LEVELS.map((l) => store.get(id, l))]);
-        if (!meta || blobs.some((b) => !b)) {
-          skipped++; // referenced but absent: same rule as the desktop adoptFile
-        } else {
-          for (let l = 0; l < LEVELS.length; l++) {
-            insert.run([id, LEVELS[l], new Uint8Array(await blobs[l]!.arrayBuffer())]);
+        const chunk = ids.slice(start, start + BATCH);
+        const [metas, ...levelMaps] = await Promise.all([
+          fetchAssetMetas(store, chunk),
+          ...LEVELS.map((l) => fetchAssetBlobs(store, chunk, l)),
+        ]);
+        for (const id of chunk) {
+          const meta = metas.get(id);
+          const blobs = levelMaps.map((m) => m.get(id));
+          if (!meta || blobs.some((b) => !b)) {
+            skipped++; // referenced but absent: same rule as the desktop adoptFile
+          } else {
+            for (let l = 0; l < LEVELS.length; l++) {
+              insert.run([id, LEVELS[l], new Uint8Array(await blobs[l]!.arrayBuffer())]);
+            }
+            insert.run([id, "meta", enc.encode(JSON.stringify(meta))]);
           }
-          insert.run([id, "meta", new TextEncoder().encode(JSON.stringify(meta))]);
         }
-        hooks.onProgress?.((i + 1) / ids.length);
+        hooks.onProgress?.(Math.min(1, (start + chunk.length) / ids.length));
       }
     } finally {
       insert.free();

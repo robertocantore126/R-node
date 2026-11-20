@@ -22,7 +22,7 @@ import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core
 import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
 import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, chartGrowPitch, CHART_COLS, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
-import { getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
+import { fetchAssetBlobs, getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
 import { THEMES, lighten, readableOn, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
@@ -40,6 +40,8 @@ export interface RenderState {
   hoverId: string | null;
   drop: DropIndicator | null;
   themeName: ThemeName;
+  /** Optional document-level canvas background override. */
+  background?: string;
   viewW: number;
   viewH: number;
   relSel?: string | null;
@@ -116,6 +118,50 @@ interface Placed {
   w: number;
   h: number;
   visible: boolean;
+  order?: number;
+  visStamp?: number;
+}
+
+const GRID_CELL = 1024;
+
+interface PlacedGrid {
+  cells: Map<number, Placed[]>;
+  alwaysCheck: Placed[];
+  stamp: number;
+}
+
+function gridKey(gx: number, gy: number): number {
+  return gx * 67108864 + gy;
+}
+
+function buildPlacedGrid(placed: Placed[]): PlacedGrid | null {
+  if (placed.length <= 128) return null;
+  const cells = new Map<number, Placed[]>();
+  const alwaysCheck: Placed[] = [];
+  for (let i = 0; i < placed.length; i++) {
+    const p = placed[i];
+    p.order = i;
+    const gx0 = Math.floor(p.x / GRID_CELL);
+    const gx1 = Math.floor((p.x + p.w) / GRID_CELL);
+    const gy0 = Math.floor(p.y / GRID_CELL);
+    const gy1 = Math.floor((p.y + p.h) / GRID_CELL);
+    if ((gx1 - gx0 + 1) * (gy1 - gy0 + 1) > 64) {
+      alwaysCheck.push(p);
+      continue;
+    }
+    for (let gx = gx0; gx <= gx1; gx++) {
+      for (let gy = gy0; gy <= gy1; gy++) {
+        const k = gridKey(gx, gy);
+        let bucket = cells.get(k);
+        if (!bucket) {
+          bucket = [];
+          cells.set(k, bucket);
+        }
+        bucket.push(p);
+      }
+    }
+  }
+  return { cells, alwaysCheck, stamp: 0 };
 }
 
 /**
@@ -148,8 +194,12 @@ export class Renderer {
   private quizMarkerCache: { sheet: Sheet; rev: number; targets: Set<string> } | null = null;
   /** Same measurer the layout engine uses — extents always agree. */
   private measurer: TextMeasurer = createCanvasTextMeasurer();
-  /** Camera scale of the current frame (used to pick the text-cache resolution). */
+  /** Camera scale and viewport of the current frame (used for text/image cache resolution and decode priority). */
   private curScale = 1;
+  private curCamX = 0;
+  private curCamY = 0;
+  private curViewW = 1;
+  private curViewH = 1;
   /** Where each relationship's label chip was last painted (world), for dragging it. */
   private relLabelRects = new Map<string, Rect>();
   /**
@@ -184,6 +234,14 @@ export class Renderer {
    */
   private imageCache = new Map<string, { bitmap: ImageBitmap; bytes: number }>();
   private imageBytes = 0;
+  /** Per-image index of cached bucket widths for O(buckets) fallback lookup. */
+  private imageBuckets = new Map<string, Set<number>>();
+  /** Cache keys drawn (or freshly decoded) in the current frame — never evicted while visible. */
+  private frameKeys = new Set<string>();
+  /** Images with any bucket >= 1448 drawn this frame; their largest original-derived bitmap stays protected. */
+  private frameOriginalImages = new Set<string>();
+  /** Memoised positionedImageSlots per Placed object. */
+  private slotsCache = new WeakMap<Placed, { style: MindNode["style"]; w: number; h: number; slots: ReturnType<typeof positionedImageSlots> }>();
   /** Decode failures by key, with when they happened: retried after IMAGE_RETRY_MS
    *  instead of never (a transient read error used to break a picture until restart). */
   private imageFailed = new Map<string, number>();
@@ -195,16 +253,37 @@ export class Renderer {
     this.imageFailed.delete(key);
     return false;
   }
-  /** Decodes in flight, key → requesting nodeId (a finished one for a node
-   * that scrolled off is closed immediately, never cached). */
-  private inflight = new Map<string, string>();
-  private inflightCount = 0;
-  private readonly IMAGE_BUDGET = 128 * 1024 * 1024;
-  private readonly MAX_INFLIGHT = 5;
+  /** Decodes in flight, key → bucket width (used to separate small vs large concurrency). */
+  private inflight = new Map<string, number>();
+  private inflightSmall = 0;
+  private inflightLarge = 0;
+  private get inflightCount(): number {
+    return this.inflightSmall + this.inflightLarge;
+  }
+  /** Prioritized decode queue populated during render(), flushed at frame end. */
+  private decodeQueue = new Map<
+    string,
+    { key: string; imageId: string; nodeId: string; level: AssetLevel; bucket: number; priority: number }
+  >();
+  private static computeImageBudget(): number {
+    const dm =
+      typeof navigator !== "undefined"
+        ? (navigator as Navigator & { deviceMemory?: number }).deviceMemory
+        : undefined;
+    if (typeof dm === "number" && Number.isFinite(dm) && dm > 0) {
+      const gb = Math.min(dm, 8);
+      return Math.min(512 * 1024 * 1024, Math.max(128 * 1024 * 1024, gb * 48 * 1024 * 1024));
+    }
+    return 128 * 1024 * 1024;
+  }
+  private readonly IMAGE_BUDGET = Renderer.computeImageBudget();
+  private readonly MAX_INFLIGHT_SMALL = 8;
+  private readonly MAX_INFLIGHT_LARGE = 2;
   /** Decode-size buckets. The max is the width of the `large` level: decoding
    *  wider than the stored source costs memory and adds no detail. */
-  private readonly IMAGE_BUCKET_MIN = 128;
+  private readonly IMAGE_BUCKET_MIN = 32;
   private readonly IMAGE_BUCKET_MAX = 1024;
+  private readonly IMAGE_ORIGINAL_PROTECT_MIN = 1448;
   /** Above the `large` level a picture is decoded from the ORIGINAL, at most
    *  this many pixels (32 MB): one picture never shows more on any screen, and
    *  the cap keeps a few big pictures inside IMAGE_BUDGET. */
@@ -300,6 +379,9 @@ export class Renderer {
     byId: Map<string, Placed>;
     /** Camera + viewport the `visible` flags were computed for. */
     viewKey: string;
+    visiblePlaced: Placed[];
+    visibleImageNodes: Set<string>;
+    grid: PlacedGrid | null;
     resolveImage: (id: string) => { w: number; h: number } | null;
   } | null = null;
 
@@ -320,18 +402,61 @@ export class Renderer {
     return `${state.camera.x}|${state.camera.y}|${state.camera.scale}|${state.viewW}|${state.viewH}`;
   }
 
-  /** Recompute `visible` on cached placements for the current camera. Same
-   *  test and 40px margin as computePlacement; no measuring, no allocation. */
-  private refreshVisibility(state: RenderState, placed: Placed[]): void {
+  /** Recompute `visible` on cached placements for the current camera using the
+   *  spatial grid when available so pan/zoom stays O(visible). */
+  private refreshVisibility(
+    state: RenderState,
+    placed: Placed[],
+    grid: PlacedGrid | null,
+    prevVisible: Placed[],
+  ): { visiblePlaced: Placed[]; visibleImageNodes: Set<string> } {
     const { camera } = state;
     const vw = state.viewW / camera.scale;
     const vh = state.viewH / camera.scale;
     const minX = camera.x - vw / 2 - 40, maxX = camera.x + vw / 2 + 40;
     const minY = camera.y - vh / 2 - 40, maxY = camera.y + vh / 2 + 40;
     const all = state.showHidden === true;
+    const visImg = new Set<string>();
+    const visiblePlaced: Placed[] = [];
+
+    if (!all && grid) {
+      const gx0 = Math.floor(minX / GRID_CELL);
+      const gx1 = Math.floor(maxX / GRID_CELL);
+      const gy0 = Math.floor(minY / GRID_CELL);
+      const gy1 = Math.floor(maxY / GRID_CELL);
+      const cellCount = (gx1 - gx0 + 1) * (gy1 - gy0 + 1);
+      if (cellCount <= placed.length) {
+        for (const p of prevVisible) p.visible = false;
+        const stamp = ++grid.stamp;
+        const check = (p: Placed) => {
+          if (p.visStamp === stamp) return;
+          p.visStamp = stamp;
+          if (p.x + p.w >= minX && p.x <= maxX && p.y + p.h >= minY && p.y <= maxY) {
+            p.visible = true;
+            visiblePlaced.push(p);
+            if (nodeImageIds(p.node).length > 0) visImg.add(p.node.id);
+          }
+        };
+        for (const p of grid.alwaysCheck) check(p);
+        for (let gx = gx0; gx <= gx1; gx++) {
+          for (let gy = gy0; gy <= gy1; gy++) {
+            const bucket = grid.cells.get(gridKey(gx, gy));
+            if (bucket) for (const p of bucket) check(p);
+          }
+        }
+        visiblePlaced.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        return { visiblePlaced, visibleImageNodes: visImg };
+      }
+    }
+
     for (const p of placed) {
       p.visible = all || (p.x + p.w >= minX && p.x <= maxX && p.y + p.h >= minY && p.y <= maxY);
+      if (p.visible) {
+        visiblePlaced.push(p);
+        if (nodeImageIds(p.node).length > 0) visImg.add(p.node.id);
+      }
     }
+    return { visiblePlaced, visibleImageNodes: visImg };
   }
 
   /** Placements by id for this turn (cached with the placement). */
@@ -365,12 +490,24 @@ export class Renderer {
       this.resolveImage = c.resolveImage;
       const vk = this.viewKey(state);
       if (c.viewKey !== vk) {
-        this.refreshVisibility(state, c.value);
+        const res = this.refreshVisibility(state, c.value, c.grid, c.visiblePlaced);
+        c.visiblePlaced = res.visiblePlaced;
+        c.visibleImageNodes = res.visibleImageNodes;
         c.viewKey = vk;
       }
+      this.visibleImageNodes = c.visibleImageNodes;
       return c.value;
     }
     const out = this.computePlacement(state);
+    const visPlaced: Placed[] = [];
+    const visImg = new Set<string>();
+    for (const p of out) {
+      if (p.visible) {
+        visPlaced.push(p);
+        if (nodeImageIds(p.node).length > 0) visImg.add(p.node.id);
+      }
+    }
+    this.visibleImageNodes = visImg;
     if (key !== null && this.resolveImage) {
       this.placedCache = {
         key,
@@ -378,10 +515,21 @@ export class Renderer {
         value: out,
         byId: new Map(out.map((p) => [p.node.id, p])),
         viewKey: this.viewKey(state),
+        visiblePlaced: visPlaced,
+        visibleImageNodes: visImg,
+        grid: buildPlacedGrid(out),
         resolveImage: this.resolveImage,
       };
     }
     return out;
+  }
+
+  /** Only the visible placements for `state` (O(visible) when spatial grid is active). */
+  private visiblePlacedList(state: RenderState): Placed[] {
+    const placed = this.placedNodes(state);
+    const c = this.placedCache;
+    if (c && c.value === placed) return c.visiblePlaced;
+    return placed.filter((p) => p.visible);
   }
 
   private computePlacement(state: RenderState): Placed[] {
@@ -446,7 +594,8 @@ export class Renderer {
 
   render(state: RenderState): void {
     const ctx = this.ctx;
-    const theme = THEMES[state.themeName];
+    const baseTheme = THEMES[state.themeName];
+    const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, state.viewW, state.viewH);
     ctx.fillStyle = theme.background;
@@ -454,20 +603,25 @@ export class Renderer {
 
     const s = state.camera.scale;
     this.curScale = s;
+    this.curCamX = state.camera.x;
+    this.curCamY = state.camera.y;
+    this.curViewW = state.viewW;
+    this.curViewH = state.viewH;
+    this.frameKeys.clear();
+    this.frameOriginalImages.clear();
+    this.decodeQueue.clear();
     const ox = state.viewW / 2 - state.camera.x * s;
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
-    this.drawGrid(theme, state);
+    if (!theme.noGrid) this.drawGrid(theme, state);
 
     const tStart = typeof performance !== "undefined" ? performance.now() : 0;
     this.textHits = 0;
     this.textMisses = 0;
 
     const placed = this.placedNodes(state);
-    // A node counts as "has an image" when ANY of its four slots is set — a
-    // node with only side images must keep its decodes like the top one does.
-    this.visibleImageNodes = new Set(placed.filter((p) => p.visible && nodeImageIds(p.node).length > 0).map((p) => p.node.id));
+    const visiblePlaced = this.visiblePlacedList(state);
     const byId = this.placedById(state);
 
     // Viewport in world units, with the same 40px margin placedNodes uses.
@@ -490,7 +644,7 @@ export class Renderer {
         Math.max(a.y + a.h, b.y + b.h) >= viewMinY &&
         Math.min(a.y, b.y) <= viewMaxY);
 
-    for (const p of placed) if (p.visible && p.node.style.freeform) this.drawFreeform(theme, p, state);
+    for (const p of visiblePlaced) if (p.node.style.freeform) this.drawFreeform(theme, p, state);
 
     // 0) group fills, under everything they enclose
     this.drawGroupFills(state, byId);
@@ -542,7 +696,7 @@ export class Renderer {
     }
 
     // 3) nodes
-    for (const p of placed) {
+    for (const p of visiblePlaced) {
       if (noteLinks.length > 0 && isChartNote(p.node)) {
         for (const [parent, kid] of noteLinks) {
           // Mind-map style whatever the sheet's structure: the branch runs
@@ -551,20 +705,19 @@ export class Renderer {
         }
         noteLinks.length = 0;
       }
-      if (!p.visible) continue;
       this.drawNode(theme, p, state, false);
     }
     for (const [a, b, rel] of overRels) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
     // Handwriting goes over the items on its canvas, to annotate them.
-    for (const p of placed) if (p.visible && p.node.style.freeform) this.drawInk(theme, p, state);
+    for (const p of visiblePlaced) if (p.node.style.freeform) this.drawInk(theme, p, state);
 
     // 3b) in-map search highlights. Drawn from the placed list, so only VISIBLE
     // matches are ringed — a match inside a collapsed branch is not on screen,
     // and the bar's count is what reports how many exist in total. The current
     // match is solid and heavier; the rest are dashed.
     if (state.searchMatches && state.searchMatches.size > 0) {
-      for (const p of placed) {
-        if (!p.visible || !state.searchMatches.has(p.node.id)) continue;
+      for (const p of visiblePlaced) {
+        if (!state.searchMatches.has(p.node.id)) continue;
         const isCurrent = state.searchCurrent === p.node.id;
         const pad = RING_PAD + (isCurrent ? 1 : 0);
         ctx.setLineDash(isCurrent ? [] : [5, 3]);
@@ -615,6 +768,7 @@ export class Renderer {
     // Evict only at the end of the frame: a closed bitmap still referenced by
     // the current paint would throw.
     this.evictToBudget();
+    this.flushDecodeQueue();
 
     // Per-frame counters: they are what separates "not drawn" from "drawn but
     // invisible" when someone reports something missing on screen.
@@ -622,7 +776,7 @@ export class Renderer {
       {
         scale: s,
         nodes: placed.length,
-        visible: placed.reduce((a, p) => a + (p.visible ? 1 : 0), 0),
+        visible: visiblePlaced.length,
         rels,
         relsDrawn,
         links,
@@ -649,8 +803,8 @@ export class Renderer {
     const s = state.camera.scale;
     let step = 40;
     while (step * s < 14) step *= 2;
-    const r = 1.4 / s;
-    ctx.fillStyle = theme.grid;
+    ctx.strokeStyle = theme.grid;
+    ctx.lineWidth = 1 / s;
     ctx.beginPath();
     const x0 = state.camera.x - state.viewW / 2 / s;
     const x1 = state.camera.x + state.viewW / 2 / s;
@@ -659,12 +813,14 @@ export class Renderer {
     const startX = Math.floor(x0 / step) * step;
     const startY = Math.floor(y0 / step) * step;
     for (let gx = startX; gx <= x1; gx += step) {
-      for (let gy = startY; gy <= y1; gy += step) {
-        ctx.moveTo(gx + r, gy);
-        ctx.arc(gx, gy, r, 0, Math.PI * 2);
-      }
+      ctx.moveTo(gx, y0);
+      ctx.lineTo(gx, y1);
     }
-    ctx.fill();
+    for (let gy = startY; gy <= y1; gy += step) {
+      ctx.moveTo(x0, gy);
+      ctx.lineTo(x1, gy);
+    }
+    ctx.stroke();
   }
 
   private drawConnector(
@@ -916,7 +1072,7 @@ export class Renderer {
   private drawFreeform(theme: RenderTheme, p: Placed, state?: RenderState): void {
     const ctx = this.ctx;
     ctx.save();
-    ctx.fillStyle = p.node.style.fill ?? theme.background;
+    ctx.fillStyle = p.node.style.fill ?? theme.freeformFill ?? theme.background;
     ctx.strokeStyle = p.node.style.stroke ?? theme.nodeBorder;
     ctx.lineWidth = p.node.style.borderWidth ?? 1;
     const box = p.node.style.container;
@@ -1233,7 +1389,7 @@ export class Renderer {
     // positioned cells the painter and the hit test use, so the ring cannot
     // land anywhere but on the picture the keys will act on.
     if (state.gallerySel?.nodeId === n.id) {
-      const { cells, gallery } = positionedImageSlots(p, p.node, this.resolveImage);
+      const { cells, gallery } = this.imageSlots(p);
       const c = cells[state.gallerySel.index];
       if (c) {
         const h = c.h + (gallery && gallery.captionH > 0 ? gallery.captionH : 0);
@@ -1495,12 +1651,17 @@ export class Renderer {
     // topic. Confining the text to the silhouette's interior — which is what
     // this did first — wrapped it one word per line and made the drawing read
     // as a container it is not.
-    const slots = positionedImageSlots(p, n, this.resolveImage);
+    const slots = this.imageSlots(p);
     const maxW = Math.max(20, p.w - pad * 2 - TEXT_INSET - slots.sidePadW);
     const topBlock = slots.insets.top;
     const botBlock = slots.insets.bottom;
     const startX = p.x + pad + slots.insets.left;
-    if (vector) {
+    // Above 100% the text is drawn as vectors, every frame: a cached bitmap
+    // is a picture of the text, rescaled between its resolution steps and
+    // capped at 4×, so zoomed in it read soft. Zoomed in few topics are on
+    // screen, so the direct path costs little; at 100% and below — where a
+    // whole map can be visible — the bitmap cache stays.
+    if (vector || this.curScale > 1) {
       const size = n.style.fontSize ?? 14;
       const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, this.measurer, n.style);
       let totalH = 0;
@@ -1548,7 +1709,7 @@ export class Renderer {
    * geometry the layout and the editing overlay use, so nothing can drift.
    */
   private drawImage(p: Placed): void {
-    const { items } = positionedImageSlots(p, p.node, this.resolveImage);
+    const { items } = this.imageSlots(p);
     for (const it of items) this.paintSlot(p, it.id, it.size.w, it.size.h, it.x, it.y);
   }
 
@@ -1564,7 +1725,7 @@ export class Renderer {
    * decides the wrap, and the exports call the same function.
    */
   private drawGallery(theme: RenderTheme, p: Placed, sheet: Sheet): void {
-    const { cells, gallery } = positionedImageSlots(p, p.node, this.resolveImage);
+    const { cells, gallery } = this.imageSlots(p);
     if (!gallery) return;
     const ctx = this.ctx;
     for (let i = 0; i < cells.length; i++) {
@@ -1636,6 +1797,114 @@ export class Renderer {
    * the pixels, and driving the bucket from the destination width alone left
    * wide pictures visibly soft in a tier list while the slots looked fine.
    */
+  /** Memoised positionedImageSlots per Placed object (invalidates on style/size change). */
+  private imageSlots(p: Placed): ReturnType<typeof positionedImageSlots> {
+    const cached = this.slotsCache.get(p);
+    if (cached && cached.style === p.node.style && cached.w === p.w && cached.h === p.h) {
+      return cached.slots;
+    }
+    const slots = positionedImageSlots(p, p.node, this.resolveImage);
+    this.slotsCache.set(p, { style: p.node.style, w: p.w, h: p.h, slots });
+    return slots;
+  }
+
+  /** Record a decoded bitmap in the cache and its per-image bucket index. */
+  private cacheImageBitmap(key: string, imageId: string, bucket: number, bitmap: ImageBitmap): number {
+    const existing = this.imageCache.get(key);
+    if (existing) {
+      this.imageCache.delete(key);
+      this.imageBytes -= existing.bytes;
+      existing.bitmap.close();
+    }
+    const bytes = bitmap.width * bitmap.height * 4;
+    this.imageCache.set(key, { bitmap, bytes });
+    this.imageBytes += bytes;
+    let buckets = this.imageBuckets.get(imageId);
+    if (!buckets) {
+      buckets = new Set();
+      this.imageBuckets.set(imageId, buckets);
+    }
+    buckets.add(bucket);
+    return bytes;
+  }
+
+  /** Find the nearest cached bucket for `imageId`: smallest > target, else largest < target. */
+  private findFallbackBitmap(
+    imageId: string,
+    targetBucket: number,
+  ): { key: string; entry: { bitmap: ImageBitmap; bytes: number } } | null {
+    const buckets = this.imageBuckets.get(imageId);
+    if (!buckets || buckets.size === 0) return null;
+    let larger = Infinity;
+    let smaller = -1;
+    for (const b of buckets) {
+      if (b > targetBucket && b < larger) larger = b;
+      else if (b < targetBucket && b > smaller) smaller = b;
+    }
+    const pick = larger < Infinity ? larger : smaller;
+    if (pick < 0) return null;
+    const key = `${imageId}@${pick}`;
+    const entry = this.imageCache.get(key);
+    return entry ? { key, entry } : null;
+  }
+
+  /** Find a cached bitmap for `imageId` at least `minBucket` wide (for Step 9 downscaling). */
+  private findLargerCachedBitmap(imageId: string, minBucket: number): ImageBitmap | null {
+    const buckets = this.imageBuckets.get(imageId);
+    if (!buckets || buckets.size === 0) return null;
+    let best = Infinity;
+    for (const b of buckets) {
+      if (b >= minBucket && b < best) best = b;
+    }
+    if (best === Infinity) return null;
+    return this.imageCache.get(`${imageId}@${best}`)?.bitmap ?? null;
+  }
+
+  private drawBitmapSlot(
+    bitmap: ImageBitmap,
+    imgW: number,
+    imgH: number,
+    x: number,
+    y: number,
+    crop?: { sx: number; sy: number; sw: number; sh: number } | null,
+  ): void {
+    // Smoothing stays the context default, as it always was: switching the
+    // quality per image changed how pictures look, and the setting outlived
+    // the call, so the cached text bitmaps blitted after it changed too.
+    if (crop) {
+      const bw = bitmap.width;
+      const bh = bitmap.height;
+      this.ctx.drawImage(bitmap, crop.sx * bw, crop.sy * bh, crop.sw * bw, crop.sh * bh, x, y, imgW, imgH);
+    } else {
+      this.ctx.drawImage(bitmap, x, y, imgW, imgH);
+    }
+  }
+
+  private slotPriority(x: number, y: number, imgW: number, imgH: number, noFallback: boolean): number {
+    const area = Math.max(1, imgW * this.curScale * (imgH * this.curScale));
+    const cx = x + imgW / 2;
+    const cy = y + imgH / 2;
+    const dx = ((cx - this.curCamX) * this.curScale) / Math.max(1, this.curViewW / 2);
+    const dy = ((cy - this.curCamY) * this.curScale) / Math.max(1, this.curViewH / 2);
+    const centreBoost = 1 + 2 / (1 + dx * dx + dy * dy);
+    return (noFallback ? 1e12 : 0) + area * centreBoost;
+  }
+
+  private enqueueDecode(
+    key: string,
+    imageId: string,
+    nodeId: string,
+    level: AssetLevel,
+    bucket: number,
+    priority: number,
+  ): void {
+    if (this.failedRecently(key) || this.inflight.has(key) || this.imageCache.has(key)) return;
+    const prev = this.decodeQueue.get(key);
+    if (!prev || priority > prev.priority) {
+      this.decodeQueue.set(key, { key, imageId, nodeId, level, bucket, priority });
+    }
+  }
+
   private paintSlot(
     p: Placed,
     imageId: string,
@@ -1660,24 +1929,27 @@ export class Renderer {
     // keying by level would reuse a 384px bitmap when 900 are needed and leave
     // that image blurred with nothing to invalidate it.
     const key = `${imageId}@${bucket}`;
+    if (bucket >= this.IMAGE_ORIGINAL_PROTECT_MIN) this.frameOriginalImages.add(imageId);
 
     const entry = this.imageCache.get(key);
     if (entry) {
       // LRU refresh (Map insertion order = recency).
       this.imageCache.delete(key);
       this.imageCache.set(key, entry);
-      if (crop) {
-        const bw = entry.bitmap.width;
-        const bh = entry.bitmap.height;
-        this.ctx.drawImage(entry.bitmap, crop.sx * bw, crop.sy * bh, crop.sw * bw, crop.sh * bh, x, y, imgW, imgH);
-      } else {
-        this.ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
-      }
+      this.frameKeys.add(key);
+      this.drawBitmapSlot(entry.bitmap, imgW, imgH, x, y, crop);
       return;
     }
-    if (this.failedRecently(key)) return; // corrupt/unavailable: not per frame
-    if (this.inflight.has(key) || this.inflightCount >= this.MAX_INFLIGHT) return;
-    this.startDecode(key, imageId, p.node.id, level, bucket);
+
+    const fb = this.findFallbackBitmap(imageId, bucket);
+    if (fb) {
+      this.imageCache.delete(fb.key);
+      this.imageCache.set(fb.key, fb.entry);
+      this.frameKeys.add(fb.key);
+      this.drawBitmapSlot(fb.entry.bitmap, imgW, imgH, x, y, crop);
+    }
+
+    this.enqueueDecode(key, imageId, p.node.id, level, bucket, this.slotPriority(x, y, imgW, imgH, fb === null));
   }
 
   /** The blob of a level; an original that is gone (a compact .rnode.zip
@@ -1687,48 +1959,165 @@ export class Renderer {
     return blob ?? (level === "original" ? await this.assetStore.get(assetId, "large") : null);
   }
 
-  private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel, bucket: number): Promise<void> {
-    this.inflight.set(key, nodeId);
-    this.inflightCount++;
+  private flushDecodeQueue(): void {
+    if (this.decodeQueue.size === 0) return;
+    if (this.inflightSmall >= this.MAX_INFLIGHT_SMALL && this.inflightLarge >= this.MAX_INFLIGHT_LARGE) return;
+
+    const candidates = Array.from(this.decodeQueue.values()).sort((a, b) => b.priority - a.priority);
+    const picked: typeof candidates = [];
+    for (const item of candidates) {
+      // Stale entries leave the queue: off screen, already cached or running,
+      // or broken. One that only waits for a free slot STAYS: decodeBatch
+      // flushes again when its batch ends, and it must find the rest there —
+      // dropping it left the picture blank or soft until the next repaint,
+      // which never comes when the running decodes fail or land off screen.
+      if (!this.visibleImageNodes.has(item.nodeId) || this.inflight.has(item.key) || this.imageCache.has(item.key) || this.failedRecently(item.key)) {
+        this.decodeQueue.delete(item.key);
+        continue;
+      }
+      const isSmall = item.bucket <= 256;
+      if (isSmall) {
+        if (this.inflightSmall >= this.MAX_INFLIGHT_SMALL) continue;
+        this.inflightSmall++;
+      } else {
+        if (this.inflightLarge >= this.MAX_INFLIGHT_LARGE) continue;
+        this.inflightLarge++;
+      }
+      this.decodeQueue.delete(item.key);
+      this.inflight.set(item.key, item.bucket);
+      picked.push(item);
+      if (this.inflightSmall >= this.MAX_INFLIGHT_SMALL && this.inflightLarge >= this.MAX_INFLIGHT_LARGE) break;
+    }
+
+    if (picked.length > 0) void this.decodeBatch(picked);
+  }
+
+  private async decodeBatch(
+    items: { key: string; imageId: string; nodeId: string; level: AssetLevel; bucket: number; priority: number }[],
+  ): Promise<void> {
+    // Step 9: derive original-level buckets by downscaling an already-cached larger bitmap when possible.
+    const needFetch: typeof items = [];
+    const derivedPromises: Promise<void>[] = [];
+    for (const item of items) {
+      if (item.bucket > this.IMAGE_BUCKET_MAX) {
+        const src = this.findLargerCachedBitmap(item.imageId, item.bucket);
+        if (src) {
+          derivedPromises.push(this.decodeOneFromSource(item, src));
+          continue;
+        }
+      }
+      needFetch.push(item);
+    }
+
+    // Group remaining items by level for batched IndexedDB reads (Step 5).
+    const byLevel = new Map<AssetLevel, typeof items>();
+    for (const item of needFetch) {
+      let list = byLevel.get(item.level);
+      if (!list) {
+        list = [];
+        byLevel.set(item.level, list);
+      }
+      list.push(item);
+    }
+
+    const fetchPromises = Array.from(byLevel.entries()).map(async ([level, group]) => {
+      try {
+        // Above 1024 px the ORIGINAL is decoded, never a re-encoded copy: a
+        // deep zoom shows the user's own pixels.
+        const ids = group.map((g) => g.imageId);
+        const blobs = await fetchAssetBlobs(this.assetStore, ids, level);
+        if (level === "original") {
+          // A compact .rnode.zip carries no originals: the large level stands in.
+          const missingIds = ids.filter((id) => !blobs.has(id));
+          if (missingIds.length > 0) {
+            const fallbackBlobs = await fetchAssetBlobs(this.assetStore, missingIds, "large");
+            for (const [id, b] of fallbackBlobs) blobs.set(id, b);
+          }
+        }
+        await Promise.all(group.map((item) => this.decodeOneFromBlob(item, blobs.get(item.imageId) ?? null)));
+      } catch (e) {
+        for (const item of group) {
+          this.imageFailed.set(item.key, Date.now());
+          trace.mark("render", "render:image-decode", { assetId: item.imageId, level: item.level, bucket: item.bucket, error: String(e) });
+          this.releaseInflight(item.key);
+        }
+      }
+    });
+
+    await Promise.all([...derivedPromises, ...fetchPromises]);
+    this.flushDecodeQueue();
+  }
+
+  private releaseInflight(key: string): void {
+    const bucket = this.inflight.get(key);
+    if (bucket === undefined) return;
+    this.inflight.delete(key);
+    if (bucket <= 256) this.inflightSmall = Math.max(0, this.inflightSmall - 1);
+    else this.inflightLarge = Math.max(0, this.inflightLarge - 1);
+  }
+
+  private async decodeOneFromSource(
+    item: { key: string; imageId: string; nodeId: string; level: AssetLevel; bucket: number },
+    source: ImageBitmap,
+  ): Promise<void> {
     const t0 = typeof performance !== "undefined" ? performance.now() : 0;
     try {
-      const blob = await this.storedLevel(assetId, level);
+      const bitmap = await createImageBitmap(source, { resizeWidth: item.bucket, resizeQuality: "high" });
+      this.finishDecode(item, bitmap, t0);
+    } catch (e) {
+      this.imageFailed.set(item.key, Date.now());
+      trace.mark("render", "render:image-decode", { assetId: item.imageId, level: item.level, bucket: item.bucket, error: String(e) });
+    } finally {
+      this.releaseInflight(item.key);
+    }
+  }
+
+  private async decodeOneFromBlob(
+    item: { key: string; imageId: string; nodeId: string; level: AssetLevel; bucket: number },
+    blob: Blob | null,
+  ): Promise<void> {
+    const t0 = typeof performance !== "undefined" ? performance.now() : 0;
+    try {
       if (!blob) {
-        this.imageFailed.set(key, Date.now());
-        trace.mark("render", "render:image-decode", { assetId, level, bucket, error: "missing" });
+        this.imageFailed.set(item.key, Date.now());
+        trace.mark("render", "render:image-decode", { assetId: item.imageId, level: item.level, bucket: item.bucket, error: "missing" });
         return;
       }
       // resizeWidth downsamples DURING decode: the full-resolution surface is
       // never materialised. Height is omitted on purpose — the browser derives
       // it from the aspect ratio, and passing both risks distortion.
-      const bitmap = await createImageBitmap(blob, { resizeWidth: bucket, resizeQuality: "high" });
-      if (!this.visibleImageNodes.has(nodeId)) {
-        // The requesting node scrolled off while decoding: close immediately,
-        // never cache it.
-        bitmap.close();
-        return;
-      }
-      const bytes = bitmap.width * bitmap.height * 4;
-      this.imageCache.set(key, { bitmap, bytes });
-      this.imageBytes += bytes;
-      trace.mark("render", "render:image-decode", {
-        assetId,
-        level,
-        bucket,
-        bytes,
-        ms: Math.round(((typeof performance !== "undefined" ? performance.now() : 0) - t0) * 100) / 100,
-      });
-      trace.mark("render", "render:image-cache", { kind: "insert", bytes });
-      this.evictToBudget();
-      // A repaint lets the fresh bitmap appear without waiting for the next
-      // user gesture (and starts the next pending decodes).
-      this.onRepaint?.();
+      const bitmap = await createImageBitmap(blob, { resizeWidth: item.bucket, resizeQuality: "high" });
+      this.finishDecode(item, bitmap, t0);
     } catch (e) {
-      this.imageFailed.set(key, Date.now());
-      trace.mark("render", "render:image-decode", { assetId, level, bucket, error: String(e) });
+      this.imageFailed.set(item.key, Date.now());
+      trace.mark("render", "render:image-decode", { assetId: item.imageId, level: item.level, bucket: item.bucket, error: String(e) });
     } finally {
-      if (this.inflight.delete(key)) this.inflightCount--;
+      this.releaseInflight(item.key);
     }
+  }
+
+  private finishDecode(
+    item: { key: string; imageId: string; nodeId: string; level: AssetLevel; bucket: number },
+    bitmap: ImageBitmap,
+    t0: number,
+  ): void {
+    if (!this.visibleImageNodes.has(item.nodeId)) {
+      bitmap.close();
+      return;
+    }
+    const bytes = this.cacheImageBitmap(item.key, item.imageId, item.bucket, bitmap);
+    this.frameKeys.add(item.key);
+    if (item.bucket >= this.IMAGE_ORIGINAL_PROTECT_MIN) this.frameOriginalImages.add(item.imageId);
+    trace.mark("render", "render:image-decode", {
+      assetId: item.imageId,
+      level: item.level,
+      bucket: item.bucket,
+      bytes,
+      ms: Math.round(((typeof performance !== "undefined" ? performance.now() : 0) - t0) * 100) / 100,
+    });
+    trace.mark("render", "render:image-cache", { kind: "insert", bytes });
+    this.evictToBudget();
+    this.onRepaint?.();
   }
 
   /**
@@ -1751,12 +2140,14 @@ export class Renderer {
     const { bucket, level } = this.imageDecodeSize(ghost.imageId, neededPx);
     const key = `${ghost.imageId}@${bucket}`;
     const entry = this.imageCache.get(key);
+    const fb = entry ? null : this.findFallbackBitmap(ghost.imageId, bucket);
+    const drawEntry = entry ?? fb?.entry ?? null;
+    if (entry) this.frameKeys.add(key);
+    else if (fb) this.frameKeys.add(fb.key);
     if (!entry) {
-      if (!this.inflight.has(key) && this.inflightCount < this.MAX_INFLIGHT) {
-        this.startDecode(key, ghost.imageId, ghost.nodeId, level, bucket);
-      }
-      return;
+      this.enqueueDecode(key, ghost.imageId, ghost.nodeId, level, bucket, 1e13);
     }
+    if (!drawEntry) return;
     // Snapped to a slot of the target node when the cursor is over one.
     let x = ghost.x - imgW / 2;
     let y = ghost.y - imgH / 2;
@@ -1769,7 +2160,7 @@ export class Renderer {
     }
     ctx.save();
     ctx.globalAlpha = 0.6;
-    ctx.drawImage(entry.bitmap, x, y, imgW, imgH);
+    ctx.drawImage(drawEntry.bitmap, x, y, imgW, imgH);
     ctx.strokeStyle = theme.selection;
     ctx.lineWidth = 2.5;
     ctx.setLineDash([6, 4]);
@@ -1794,21 +2185,61 @@ export class Renderer {
     if (count > 0) trace.mark("render", "render:cache-evict", { kind: "text", entries: count, freed });
   }
 
-  /** LRU eviction under the byte budget. Only ever called between frames. */
+  /** Delete one image cache entry and close its bitmap. */
+  private evictImageKey(k: string, v: { bitmap: ImageBitmap; bytes: number }): void {
+    this.imageCache.delete(k);
+    this.imageBytes -= v.bytes;
+    v.bitmap.close();
+    const at = k.lastIndexOf("@");
+    if (at > 0) {
+      const imageId = k.slice(0, at);
+      const bucket = Number(k.slice(at + 1));
+      const set = this.imageBuckets.get(imageId);
+      if (set) {
+        set.delete(bucket);
+        if (set.size === 0) this.imageBuckets.delete(imageId);
+      }
+    }
+    // A closed ImageBitmap is GPU memory returned to the system (tracer 2.0).
+    trace.mark("render", "render:gpu-free", { bytes: v.bytes });
+  }
+
+  /**
+   * LRU eviction under the byte budget. Only ever called between frames.
+   * Evicts off-screen keys first; never evicts keys drawn this frame unless
+   * total memory exceeds the hard ceiling (2× budget).
+   */
   private evictToBudget(): void {
+    if (this.imageBytes <= this.IMAGE_BUDGET) return;
+    // Step 9: protect the largest cached >= 1448 bucket for any image currently shown >= 1448.
+    const protectedKeys = new Set(this.frameKeys);
+    for (const imageId of this.frameOriginalImages) {
+      const buckets = this.imageBuckets.get(imageId);
+      if (!buckets) continue;
+      let maxB = -1;
+      for (const b of buckets) {
+        if (b >= this.IMAGE_ORIGINAL_PROTECT_MIN && b > maxB) maxB = b;
+      }
+      if (maxB >= 0) protectedKeys.add(`${imageId}@${maxB}`);
+    }
+
     let freed = 0;
     let count = 0;
-    while (this.imageBytes > this.IMAGE_BUDGET && this.imageCache.size > 0) {
-      const first = this.imageCache.entries().next().value;
-      if (!first) break;
-      const [k, v] = first as [string, { bitmap: ImageBitmap; bytes: number }];
-      this.imageCache.delete(k);
-      this.imageBytes -= v.bytes;
-      v.bitmap.close();
+    // Pass 1: evict off-screen entries in LRU order down to IMAGE_BUDGET.
+    for (const [k, v] of Array.from(this.imageCache.entries())) {
+      if (this.imageBytes <= this.IMAGE_BUDGET) break;
+      if (protectedKeys.has(k)) continue;
+      this.evictImageKey(k, v);
       freed += v.bytes;
       count++;
-      // A closed ImageBitmap is GPU memory returned to the system (tracer 2.0).
-      trace.mark("render", "render:gpu-free", { bytes: v.bytes });
+    }
+    // Pass 2: if still above hard ceiling (2× budget), evict even on-screen entries.
+    const hardCeiling = this.IMAGE_BUDGET * 2;
+    for (const [k, v] of Array.from(this.imageCache.entries())) {
+      if (this.imageBytes <= hardCeiling) break;
+      this.evictImageKey(k, v);
+      freed += v.bytes;
+      count++;
     }
     if (count > 0) trace.mark("render", "render:cache-evict", { kind: "image", entries: count, freed });
   }
@@ -1913,6 +2344,14 @@ export class Renderer {
   private drawCodeBlock(theme: RenderTheme, p: Placed): void {
     const n = p.node;
     const lang = asCodeLang(n.style.code?.lang);
+    // Above 100%, vectors (see drawText): no rescaled bitmap when zoomed in.
+    if (this.curScale > 1) {
+      this.ctx.save();
+      this.ctx.translate(p.x, p.y);
+      this.paintCodeBlock(this.ctx, theme, p, lang);
+      this.ctx.restore();
+      return;
+    }
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
     const key = `code:${n.id}|${JSON.stringify(n.titleRuns ?? n.title)}|${lang}|${theme.code.id}|${p.w}|${p.h}|${res}|${n.style.fontSize ?? 14}|${n.style.padding ?? 10}`;
     let entry = this.textCache.get(key);
@@ -1939,15 +2378,22 @@ export class Renderer {
    *  (the codeBg fill) — this bitmap is transparent there, like the rich-text
    *  bitmaps, so a user-chosen fill shows through. */
   private renderCodeBitmap(theme: RenderTheme, p: Placed, lang: CodeLang, res: number): { canvas: HTMLCanvasElement; w: number; h: number } {
-    const n = p.node;
-    const size = n.style.fontSize ?? 14;
-    const pad = n.style.padding ?? 10;
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.ceil(p.w * res));
     canvas.height = Math.max(1, Math.ceil(p.h * res));
     const bctx = canvas.getContext("2d");
     if (!bctx) return { canvas, w: p.w, h: p.h };
     bctx.scale(res, res);
+    this.paintCodeBlock(bctx, theme, p, lang);
+    return { canvas, w: p.w, h: p.h };
+  }
+
+  /** The code block's chrome and lines, in box-local units (origin = the
+   *  box's top-left): into the cached bitmap, or straight onto the canvas. */
+  private paintCodeBlock(bctx: CanvasRenderingContext2D, theme: RenderTheme, p: Placed, lang: CodeLang): void {
+    const n = p.node;
+    const size = n.style.fontSize ?? 14;
+    const pad = n.style.padding ?? 10;
     bctx.textBaseline = "alphabetic";
 
     // Window chrome: a strip with the language — the part that makes the
@@ -1990,7 +2436,6 @@ export class Renderer {
         }
       }
     }
-    return { canvas, w: p.w, h: p.h };
   }
 
   /** The boxes an elbow arrow routes around (none for the other line styles). */
@@ -2672,7 +3117,7 @@ export class Renderer {
   /** Decode every picture this node uses, at the size the export will draw it. */
   private async preloadNodeImages(placed: Placed, scale: number, strict = false): Promise<void> {
     const wanted: { id: string; w: number; crop?: { sw: number } | null }[] = [];
-    const pos = positionedImageSlots(placed, placed.node, this.resolveImage);
+    const pos = this.imageSlots(placed);
     for (const it of pos.items) wanted.push({ id: it.id, w: it.size.w });
     for (const c of pos.cells) wanted.push({ id: c.id, w: c.w, crop: c.crop });
     const results = await Promise.allSettled(
@@ -2695,8 +3140,7 @@ export class Renderer {
             return;
           }
           const bitmap = await createImageBitmap(blob, { resizeWidth: bucket, resizeQuality: "high" });
-          this.imageCache.set(key, { bitmap, bytes: bitmap.width * bitmap.height * 4 });
-          this.imageBytes += bitmap.width * bitmap.height * 4;
+          this.cacheImageBitmap(key, id, bucket, bitmap);
         } catch (error) {
           this.imageFailed.set(key, Date.now());
           if (strict) throw error;
@@ -2889,7 +3333,7 @@ export class Renderer {
     // First PRESENT slot: the drag offset, the resize handle and the ring all
     // target whichever image exists. The EXACT slot for the ring and handle
     // comes from selectedImageRect, which has `state`.
-    const it = positionedImageSlots(p, p.node, this.resolveImage).items[0];
+    const it = this.imageSlots(p).items[0];
     return it ? { x: it.x, y: it.y, w: it.size.w, h: it.size.h } : null;
   }
 
@@ -2898,7 +3342,7 @@ export class Renderer {
     // A bare picture has no image "inside" it to select or resize apart: the
     // item's own free-transform handles are the picture's.
     if (isBarePicture(p.node)) return null;
-    const items = positionedImageSlots(p, p.node, this.resolveImage).items;
+    const items = this.imageSlots(p).items;
     const slot = state.imageSlot ?? "top";
     const it = items.find((i) => i.slot === slot) ?? items[0];
     return it ? { x: it.x, y: it.y, w: it.size.w, h: it.size.h } : null;
@@ -2908,7 +3352,7 @@ export class Renderer {
   imageSlotWorldRect(state: RenderState, id: string, slot: ImageSlot): { x: number; y: number; w: number; h: number } | null {
     const p = this.placedNodes(state).find((p) => p.node.id === id);
     if (!p) return null;
-    const it = positionedImageSlots(p, p.node, this.resolveImage).items.find((i) => i.slot === slot);
+    const it = this.imageSlots(p).items.find((i) => i.slot === slot);
     return it ? { x: it.x, y: it.y, w: it.size.w, h: it.size.h } : null;
   }
 
@@ -2928,14 +3372,15 @@ export class Renderer {
     worldX: number,
     worldY: number,
   ): { nodeId: string; slot: ImageSlot; rect: { x: number; y: number; w: number; h: number } } | null {
-    const placed = this.placedNodes(state).filter((p) => p.visible);
+    const placed = this.visiblePlacedList(state);
     for (let i = placed.length - 1; i >= 0; i--) {
-      // A bare picture is hit as the item itself (select, move, transform).
-      if (isBarePicture(placed[i].node)) continue;
-      const items = positionedImageSlots(placed[i], placed[i].node, this.resolveImage).items;
+      const p = placed[i];
+      if (isBarePicture(p.node)) continue;
+      if (worldX < p.x || worldX > p.x + p.w || worldY < p.y || worldY > p.y + p.h) continue;
+      const items = this.imageSlots(p).items;
       for (const it of items) {
         if (worldX >= it.x && worldX <= it.x + it.size.w && worldY >= it.y && worldY <= it.y + it.size.h) {
-          return { nodeId: placed[i].node.id, slot: it.slot, rect: { x: it.x, y: it.y, w: it.size.w, h: it.size.h } };
+          return { nodeId: p.node.id, slot: it.slot, rect: { x: it.x, y: it.y, w: it.size.w, h: it.size.h } };
         }
       }
     }
@@ -2959,23 +3404,23 @@ export class Renderer {
     worldX: number,
     worldY: number,
   ): { nodeId: string; index: number; part: "picture" | "caption"; rect: { x: number; y: number; w: number; h: number } } | null {
-    const placed = this.placedNodes(state).filter((p) => p.visible);
+    const placed = this.visiblePlacedList(state);
     for (let i = placed.length - 1; i >= 0; i--) {
       // A topic painted OVER a grid (an open chart note does exactly that)
       // owns the point: the cell under it is hidden, so it is not a target.
       const p = placed[i];
-      const inBox = worldX >= p.x && worldX <= p.x + p.w && worldY >= p.y && worldY <= p.y + p.h;
-      if (inBox && !p.node.style.gallery && !p.node.style.freeform) return null;
-      const { cells } = positionedImageSlots(placed[i], placed[i].node, this.resolveImage);
+      if (worldX < p.x || worldX > p.x + p.w || worldY < p.y || worldY > p.y + p.h) continue;
+      if (!p.node.style.gallery && !p.node.style.freeform) return null;
+      const { cells } = this.imageSlots(p);
       for (let k = 0; k < cells.length; k++) {
         const c = cells[k];
         if (worldX >= c.x && worldX <= c.x + c.w && worldY >= c.y && worldY <= c.y + c.h) {
-          return { nodeId: placed[i].node.id, index: k, part: "picture", rect: { x: c.x, y: c.y, w: c.w, h: c.h } };
+          return { nodeId: p.node.id, index: k, part: "picture", rect: { x: c.x, y: c.y, w: c.w, h: c.h } };
         }
         // The caption band only exists when some cell in the grid is
         // captioned — a bandless grid has nothing to hit.
         if (c.captionH > 0 && worldX >= c.x && worldX <= c.x + c.w && worldY >= c.captionY && worldY <= c.captionY + c.captionH) {
-          return { nodeId: placed[i].node.id, index: k, part: "caption", rect: { x: c.x, y: c.captionY, w: c.w, h: c.captionH } };
+          return { nodeId: p.node.id, index: k, part: "caption", rect: { x: c.x, y: c.captionY, w: c.w, h: c.captionH } };
         }
       }
     }
@@ -2990,7 +3435,7 @@ export class Renderer {
   galleryCellRects(state: RenderState, nodeId: string): { x: number; y: number; w: number; h: number }[] {
     const p = this.placedNodes(state).find((q) => q.node.id === nodeId);
     if (!p) return [];
-    return positionedImageSlots(p, p.node, this.resolveImage).cells.map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }));
+    return this.imageSlots(p).cells.map((c) => ({ x: c.x, y: c.y, w: c.w, h: c.h }));
   }
 
   /**
@@ -3002,7 +3447,7 @@ export class Renderer {
   galleryCaptionRect(state: RenderState, nodeId: string, index: number): { x: number; y: number; w: number; h: number } | null {
     const p = this.placedNodes(state).find((q) => q.node.id === nodeId);
     if (!p) return null;
-    const c = positionedImageSlots(p, p.node, this.resolveImage).cells[index];
+    const c = this.imageSlots(p).cells[index];
     if (!c) return null;
     if (c.captionH > 0) return { x: c.x, y: c.captionY, w: c.w, h: c.captionH };
     return { x: c.x, y: c.y + c.h - GALLERY_CAPTION_LINE_H, w: c.w, h: GALLERY_CAPTION_LINE_H };
@@ -3103,7 +3548,14 @@ export class Renderer {
     this.quizMarkerCache=null;
     for (const item of this.imageCache.values()) item.bitmap.close();
     for (const item of this.textCache.values()) { item.canvas.width=0;item.canvas.height=0; }
-    this.imageCache.clear();this.textCache.clear();this.imageBytes=0;this.textBytes=0;
+    this.imageCache.clear();
+    this.imageBuckets.clear();
+    this.frameKeys.clear();
+    this.frameOriginalImages.clear();
+    this.decodeQueue.clear();
+    this.textCache.clear();
+    this.imageBytes = 0;
+    this.textBytes = 0;
   }
 
   exportPng(state: RenderState, transparent = false, maxSize = 8192): HTMLCanvasElement {

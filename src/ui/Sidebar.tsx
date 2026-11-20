@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
-import type { RnodeDocument } from "../core/types";
+import type { LibraryEntry } from "../persist/library";
 import logoUrl from "../assets/logo.png";
 
 export function Sidebar(): JSX.Element {
@@ -17,8 +17,11 @@ export function Sidebar(): JSX.Element {
     return () => window.removeEventListener("r-node:focus-search", onFocus);
   }, []);
 
-  const docs = state.docs.filter((d) => !d.archived && (query === "" || d.title.toLowerCase().includes(query.toLowerCase())));
-  const archived = state.docs.filter((d) => d.archived);
+  // The library lists every map; only the active one is loaded. Its title is
+  // the live one (renaming the open map shows at once).
+  const entries = state.library.map((e) => (e.documentId === state.activeDocId ? { ...e, title: state.docTitle } : e));
+  const docs = entries.filter((d) => !d.archived && (query === "" || d.title.toLowerCase().includes(query.toLowerCase())));
+  const archived = entries.filter((d) => d.archived);
 
   return (
     <aside className="sidebar">
@@ -59,7 +62,7 @@ export function Sidebar(): JSX.Element {
   );
 }
 
-function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { doc: RnodeDocument; active: boolean; renaming: boolean; onRename: (t: string) => void; onStartRename: () => void; archived?: boolean }): JSX.Element {
+function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { doc: LibraryEntry; active: boolean; renaming: boolean; onRename: (t: string) => void; onStartRename: () => void; archived?: boolean }): JSX.Element {
   const store = useStore();
   const [text, setText] = useState(doc.title);
 
@@ -84,7 +87,7 @@ function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { 
       className={`doc-row${active ? " active" : ""}`}
       data-help={`Document: ${doc.title}`}
       data-help-more={archived ? "Archived — click to open, double-click to rename." : "Click to open this document, double-click to rename."}
-      onClick={() => store.switchToDoc(doc.documentId)}
+      onClick={() => void store.switchToDoc(doc.documentId)}
       onDoubleClick={onStartRename}
     >
       <span className="doc-title">{doc.title}</span>
@@ -120,7 +123,7 @@ function DocRow({ doc, active, renaming, onRename, onStartRename, archived }: { 
           data-help="Close document"
           data-help-more="Removes the document from the open list. The file on disk is kept."
           title="Close document"
-          onClick={(e) => { e.stopPropagation(); store.deleteDocument(doc.documentId); }}
+          onClick={(e) => { e.stopPropagation(); void store.deleteDocument(doc.documentId); }}
         >
           🗑
         </button>

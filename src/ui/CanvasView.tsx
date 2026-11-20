@@ -214,6 +214,7 @@ export function CanvasView(): JSX.Element {
       hoverId: s.hoverId,
       drop: s.drop,
       themeName: s.theme,
+      background: s.background,
       viewW: w,
       viewH: h,
       relSel: s.relSel,
@@ -369,10 +370,11 @@ export function CanvasView(): JSX.Element {
       if (!node) return;
       store.beginExport(type === "image/jpeg" ? "Building JPEG…" : "Building PNG…");
       try {
+        const snap = store.getSnapshot();
         const blob = await renderer.renderNodeImage(currentRenderState(), nodeId, {
           scale: 2,
           type,
-          background: type === "image/jpeg" ? THEMES[store.getSnapshot().theme].background : null,
+          background: type === "image/jpeg" ? (snap.background ?? THEMES[snap.theme].background) : null,
         });
         if (!blob) {
           store.toast("Could not render that topic");
@@ -408,7 +410,7 @@ export function CanvasView(): JSX.Element {
           linkColorOf: (id) => renderer.branchColorOf(rs, id),
           borderOf: (id) => renderer.nodeBorder(rs, id),
           relColorOf: (relId) => renderer.relationshipColorOf(rs, relId),
-          background: THEMES[s.theme].background,
+          background: s.background ?? THEMES[s.theme].background,
           // The `small` level (256px), not `large` (1024px).
           //
           // An image is drawn at MAX_IMAGE_W = 240 units at most, so 256px is
@@ -458,7 +460,7 @@ export function CanvasView(): JSX.Element {
         const out = await sheetToHtmlViewer(store.sheet, {
           title: store.doc.doc.title,
           theme: s.theme,
-          background: THEMES[s.theme].background,
+          background: s.background ?? THEMES[s.theme].background,
           // `small` (256px), not `large` (1024px). Choosing `large` for the
           // sharpness it allows when zoomed deep in cost 103MB of a 109MB
           // export — 94% of the file, the same proportion and the same mistake

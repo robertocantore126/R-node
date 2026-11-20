@@ -60,11 +60,13 @@ export function Palette(): JSX.Element | null {
       },
       { label: "Find in map…", hint: "Ctrl+F", run: () => store.openSearch() },
       { label: "Search documents…", hint: "Ctrl+Shift+F", run: () => window.dispatchEvent(new CustomEvent("r-node:focus-search")) },
-      ...state.docs.filter((d) => !d.archived).map<PaletteItem>((d) => ({ label: `Open: ${d.title}`, hint: "document", run: () => store.switchToDoc(d.documentId) })),
+      ...state.library
+        .filter((d) => !d.archived && d.documentId !== state.activeDocId)
+        .map<PaletteItem>((d) => ({ label: `Open: ${d.title}`, hint: "document", run: () => void store.switchToDoc(d.documentId) })),
     ];
     const q = query.trim().toLowerCase();
     return q ? base.filter((i) => i.label.toLowerCase().includes(q) || (i.hint ?? "").toLowerCase().includes(q)) : base;
-  }, [query, state.docs, store]);
+  }, [query, state.library, state.activeDocId, store]);
 
   if (!state.showPalette) return null;
   const clamped = Math.min(index, Math.max(items.length - 1, 0));

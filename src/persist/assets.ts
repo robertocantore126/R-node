@@ -48,8 +48,11 @@ export interface AssetStore {
    * `originalLost` flag on their AttachmentInfo card so an export can warn.
    */
   putUnderId(id: string, levels: Record<AssetLevel, AssetBlob>, meta: AssetMeta): Promise<void>;
+  putMany?(items: { id: string; levels: Record<AssetLevel, AssetBlob>; meta: AssetMeta }[]): Promise<void>;
   get(id: string, level: AssetLevel): Promise<Blob | null>;
+  getMany?(ids: string[], level: AssetLevel): Promise<Map<string, Blob>>;
   meta(id: string): Promise<AssetMeta | null>;
+  metaMany?(ids: string[]): Promise<Map<string, AssetMeta>>;
   /**
    * Exact byte weight of every stored level of an asset (original + large +
    * small + the meta row). Used by the orphan-GC command to tell the user
@@ -167,14 +170,79 @@ export class IndexedDbAssetStore implements AssetStore {
     });
   }
 
+  async putMany(items: { id: string; levels: Record<AssetLevel, AssetBlob>; meta: AssetMeta }[]): Promise<void> {
+    if (items.length === 0) return;
+    const db = await this.db();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+      const s = tx.objectStore(STORE);
+      const seen = new Set<string>();
+      for (const item of items) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        const record: AssetRecord = { id: item.id, ...item.levels, meta: item.meta };
+        const getReq = s.get(item.id);
+        getReq.onsuccess = () => {
+          if (getReq.result === undefined) s.put(record);
+        };
+        getReq.onerror = () => reject(getReq.error);
+      }
+    });
+  }
+
+  private async getRecords(ids: string[]): Promise<Map<string, AssetRecord>> {
+    const out = new Map<string, AssetRecord>();
+    const unique = Array.from(new Set(ids));
+    if (unique.length === 0) return out;
+    const db = await this.db();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const s = tx.objectStore(STORE);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+      for (const id of unique) {
+        const req = s.get(id);
+        req.onsuccess = () => {
+          const rec = req.result as AssetRecord | undefined;
+          if (rec) out.set(id, rec);
+        };
+      }
+    });
+    return out;
+  }
+
   async get(id: string, level: AssetLevel): Promise<Blob | null> {
     const record = await txGet<AssetRecord>(await this.db(), id);
     return record?.[level]?.blob ?? null;
   }
 
+  /** One level of many assets in ONE read transaction (a zoom-out needs hundreds). */
+  async getMany(ids: string[], level: AssetLevel): Promise<Map<string, Blob>> {
+    const out = new Map<string, Blob>();
+    const records = await this.getRecords(ids);
+    for (const [id, rec] of records) {
+      const blob = rec[level]?.blob;
+      if (blob) out.set(id, blob);
+    }
+    return out;
+  }
+
   async meta(id: string): Promise<AssetMeta | null> {
     const record = await txGet<AssetRecord>(await this.db(), id);
     return record?.meta ?? null;
+  }
+
+  async metaMany(ids: string[]): Promise<Map<string, AssetMeta>> {
+    const out = new Map<string, AssetMeta>();
+    const records = await this.getRecords(ids);
+    for (const [id, rec] of records) {
+      if (rec.meta) out.set(id, rec.meta);
+    }
+    return out;
   }
 
   async size(id: string): Promise<number> {
@@ -322,6 +390,16 @@ export class TauriAssetStore implements AssetStore {
     return new Blob([bytes], mime ? { type: mime } : undefined);
   }
 
+  async getMany(ids: string[], level: AssetLevel): Promise<Map<string, Blob>> {
+    const unique = Array.from(new Set(ids));
+    const entries = await Promise.all(unique.map(async (id) => [id, await this.get(id, level)] as const));
+    const out = new Map<string, Blob>();
+    for (const [id, blob] of entries) {
+      if (blob) out.set(id, blob);
+    }
+    return out;
+  }
+
   async meta(id: string): Promise<AssetMeta | null> {
     const cached = this.metaCache.get(id);
     if (cached) return cached;
@@ -332,6 +410,16 @@ export class TauriAssetStore implements AssetStore {
     const meta = JSON.parse(new TextDecoder().decode(bytes)) as AssetMeta;
     this.metaCache.set(id, meta);
     return meta;
+  }
+
+  async metaMany(ids: string[]): Promise<Map<string, AssetMeta>> {
+    const unique = Array.from(new Set(ids));
+    const entries = await Promise.all(unique.map(async (id) => [id, await this.meta(id)] as const));
+    const out = new Map<string, AssetMeta>();
+    for (const [id, m] of entries) {
+      if (m) out.set(id, m);
+    }
+    return out;
   }
 
   async size(id: string): Promise<number> {
@@ -426,6 +514,80 @@ export function getAssetStore(): AssetStore {
 }
 
 /**
+ * Batch-fetch one level for many asset ids, using `store.getMany` when the
+ * backend supports it and falling back to parallel `store.get` calls.
+ */
+export async function fetchAssetBlobs(
+  store: AssetStore,
+  ids: string[],
+  level: AssetLevel,
+): Promise<Map<string, Blob>> {
+  const unique = Array.from(new Set(ids));
+  if (unique.length === 0) return new Map();
+  if (store.getMany) return store.getMany(unique, level);
+  const entries = await Promise.all(unique.map(async (id) => [id, await store.get(id, level)] as const));
+  const out = new Map<string, Blob>();
+  for (const [id, blob] of entries) {
+    if (blob) out.set(id, blob);
+  }
+  return out;
+}
+
+/**
+ * Ask the browser for persistent storage once per session so IndexedDB / OPFS
+ * is not evicted under disk pressure (Step 11).
+ */
+let persistRequested = false;
+export async function ensureStoragePersistent(): Promise<boolean> {
+  if (persistRequested) return true;
+  persistRequested = true;
+  try {
+    const storage = typeof navigator !== "undefined" ? navigator.storage : undefined;
+    if (!storage?.persist) return false;
+    const already = storage.persisted ? await storage.persisted() : false;
+    return already || (await storage.persist());
+  } catch {
+    return false;
+  }
+}
+
+export async function getStorageEstimate(): Promise<{ usage: number; quota: number } | null> {
+  try {
+    const est = await (typeof navigator !== "undefined" ? navigator.storage?.estimate?.() : undefined);
+    if (!est || typeof est.usage !== "number" || typeof est.quota !== "number") return null;
+    return { usage: est.usage, quota: est.quota };
+  } catch {
+    return null;
+  }
+}
+
+/** Batch-fetch asset metadata cards, using `store.metaMany` when available. */
+export async function fetchAssetMetas(
+  store: AssetStore,
+  ids: string[],
+): Promise<Map<string, AssetMeta>> {
+  const unique = Array.from(new Set(ids));
+  if (unique.length === 0) return new Map();
+  if (store.metaMany) return store.metaMany(unique);
+  const entries = await Promise.all(unique.map(async (id) => [id, await store.meta(id)] as const));
+  const out = new Map<string, AssetMeta>();
+  for (const [id, m] of entries) {
+    if (m) out.set(id, m);
+  }
+  return out;
+}
+
+/** Batch-store pre-hashed assets, using `store.putMany` when available. */
+export async function putAssetsBatch(
+  store: AssetStore,
+  items: { id: string; levels: Record<AssetLevel, AssetBlob>; meta: AssetMeta }[],
+): Promise<void> {
+  if (items.length === 0) return;
+  if (store.putMany) return store.putMany(items);
+  await Promise.all(items.map((it) => store.putUnderId(it.id, it.levels, it.meta)));
+}
+
+/**
  * The single source of truth for "which asset is in use". The roots are the
  * nodes alone: an `attachments` card whose node is gone is garbage too, so
  * it must never act as a root. Future referrers (callouts, boundaries) are
@@ -451,7 +613,13 @@ export interface OrphanReport {
  * deleting anything: garbage collection must be an explicit user action (a
  * command), never a side-effect of undo or save.
  */
-export async function collectOrphans(sheet: Sheet, store: AssetStore, otherSheets: Iterable<Sheet> = []): Promise<OrphanReport> {
+export async function collectOrphans(
+  sheet: Sheet,
+  store: AssetStore,
+  otherSheets: Iterable<Sheet> = [],
+  /** Ids referenced by maps that are not loaded (the library's other maps). */
+  otherIds: Iterable<string> = [],
+): Promise<OrphanReport> {
   const referenced = referencedAssetIds(sheet);
   const cards = sheet.attachments.map((a) => a.id).filter((id) => !referenced.has(id));
   // The BLOB store can be shared beyond this sheet: on the web every document
@@ -460,6 +628,7 @@ export async function collectOrphans(sheet: Sheet, store: AssetStore, otherSheet
   // judging by this sheet alone deleted the pictures of every other map.
   const live = new Set(referenced);
   for (const other of otherSheets) for (const id of referencedAssetIds(other)) live.add(id);
+  for (const id of otherIds) live.add(id);
   const ids = await store.list();
   const blobs = ids.filter((id) => !live.has(id));
   return { cards, blobs };
