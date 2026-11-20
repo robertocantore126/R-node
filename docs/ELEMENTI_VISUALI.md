@@ -228,7 +228,9 @@ Rendering sul canvas: completato → **ribbon**; priorità → pallino colorato
 - **Collapsed/expand**: badge con conteggio nascosti (`collapsedBadge`).
 - **Posizione manuale**: `position.manual` (branch a posizionamento libero).
 - **Immagine**: sopra il testo, proporzioni bloccate, livelli original /
-  1024px / 256px, decodifica al livello giusto per lo zoom.
+  1024px / 256px, decodifica al livello giusto per lo zoom. Oltre 1024px a
+  schermo decodifica dall'originale (mezze ottave, max 8 MP per immagine,
+  `Renderer.imageDecodeSize`); senza originale (zip compatto) usa il 1024px.
 
 ---
 

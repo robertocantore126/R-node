@@ -250,6 +250,29 @@ describe("canvas resize from every corner", () => {
     return { store, id };
   };
 
+  it("keeps its line breaks when scaled far up or down (no re-wrap at 280 px)", () => {
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    const one = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 120, "digimon")!;
+    const many = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 300, "A longer note that wraps over a few lines at the default size of fourteen pixels")!;
+    store.cancelEdit?.();
+    for (const id of [one, many]) {
+      for (const k of [4, 0.5]) {
+        const g0 = store.itemGeometry(id)!;
+        store.beginItemResize(id, "se");
+        store.setItemResizeDraft(g0.w * (k - 1), g0.h * (k - 1), true);
+        store.commitItemResize();
+        const g1 = store.itemGeometry(id)!;
+        // Same lines: the height scales with the font. A re-wrap adds or
+        // drops a whole line (font × ~1.2); fixed constants (the +4 px strut
+        // margin) move it by far less than half of one.
+        const line = (store.doc.requireNode(id).style.fontSize ?? 14) * 1.2;
+        expect(Math.abs(g1.h - g0.h * k)).toBeLessThan(line * 0.4);
+      }
+    }
+  });
+
   it("folds the even part of a stretch into the font size, with no 5× cap", () => {
     const { store, id } = freshItem();
     const g = store.itemGeometry(id)!;

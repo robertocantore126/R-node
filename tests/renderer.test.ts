@@ -117,6 +117,44 @@ describe("print rendering", () => {
   });
 });
 
+describe("image decode size", () => {
+  function decoder(nat: { w: number; h: number } | null) {
+    const ctx = make2dCtx();
+    vi.stubGlobal("document", { createElement: () => makeFakeCanvas(ctx) });
+    const r = new Renderer(makeFakeCanvas(ctx)) as unknown as {
+      resolveImage: (id: string) => { w: number; h: number } | null;
+      imageDecodeSize: (id: string, px: number) => { bucket: number; level: string };
+    };
+    r.resolveImage = () => nat;
+    return (px: number) => r.imageDecodeSize("img", px);
+  }
+
+  it("keeps the stored levels up to 1024 px, as before", () => {
+    const at = decoder({ w: 4000, h: 3000 });
+    expect(at(90)).toEqual({ bucket: 128, level: "small" });
+    expect(at(300)).toEqual({ bucket: 512, level: "large" });
+    expect(at(1024)).toEqual({ bucket: 1024, level: "large" });
+  });
+
+  it("decodes from the original past 1024 px, in half-octave steps", () => {
+    const at = decoder({ w: 4000, h: 3000 });
+    expect(at(1100)).toEqual({ bucket: 1448, level: "original" });
+    expect(at(2400)).toEqual({ bucket: 2896, level: "original" });
+  });
+
+  it("never decodes wider than the source, nor past 8 MP", () => {
+    expect(decoder({ w: 1300, h: 900 })(3000)).toEqual({ bucket: 1300, level: "original" });
+    expect(decoder({ w: 900, h: 600 })(3000)).toEqual({ bucket: 1024, level: "large" });
+    const square = decoder({ w: 8000, h: 8000 })(8000);
+    expect(square.level).toBe("original");
+    expect(square.bucket * square.bucket).toBeLessThanOrEqual(8 * 1024 * 1024);
+  });
+
+  it("stays on the large level when the image size is unknown", () => {
+    expect(decoder(null)(3000)).toEqual({ bucket: 1024, level: "large" });
+  });
+});
+
 describe("text cache (T21-D)", () => {
   it("evicts by byte budget and refreshes recency on hit (true LRU)", () => {
     const ctx = make2dCtx();

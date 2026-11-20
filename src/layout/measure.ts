@@ -1290,7 +1290,7 @@ function extentKey(n: MindNode, slots: SlotSizes): string {
   const gal = g
     ? `${g.items.length}:${g.cellW ?? ""}:${g.aspect ?? ""}:${g.cols ?? ""}:${g.items.some((it) => (it.caption ?? "").trim() !== "") ? 1 : 0}:${g.chart ? "chart" : ""}`
     : "";
-  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.textScaleX ?? 1}|${s.textScaleY ?? 1}|${s.imageWidth ?? ""}|${s.imageHeight ?? ""}|${isBarePicture(n) ? "pic" : ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
+  return `${runs}|${s.code ? "code:" + s.code.lang : ""}|${s.width ?? ""}|${s.height ?? ""}|${s.fontSize ?? ""}|${s.fontFamily ?? ""}|${s.fontWeight ?? ""}|${s.italic ? 1 : 0}|${s.padding ?? ""}|${s.shape ?? ""}|${s.textScaleX ?? 1}|${s.textScaleY ?? 1}|${s.imageWidth ?? ""}|${s.imageHeight ?? ""}|${isBarePicture(n) ? "pic" : ""}|${s.freeformPosition && s.freeTransform !== false ? "ft" : ""}|${sz(slots.top)}|${sz(slots.bottom)}|${sz(slots.left)}|${sz(slots.right)}|${gal}`;
 }
 
 /**
@@ -1405,7 +1405,15 @@ function measureTopicUncached(
   // A fixed box in a freeform canvas (width AND height set: a diagram shape)
   // may be narrower than a map topic — draw.io icons and small symbols are.
   const minW = style.width && style.height && style.freeformPosition ? FREEFORM_MIN_W : MIN_TOPIC_W;
-  const maxW = style.width ? Math.max(minW, style.width) : MAX_TOPIC_W;
+  // Free-transform text of a canvas keeps its line breaks when a drag scales
+  // it: the auto-wrap limit follows the font (MAX_TOPIC_W at 14 px). The text
+  // column scales exactly with the font and the padding, since the drag scales
+  // both; only the fixed TEXT_INSET is kept out of the product. A map topic
+  // keeps the fixed limit.
+  const autoMaxW = style.freeformPosition && style.freeTransform !== false
+    ? Math.max(MIN_TOPIC_W, (MAX_TOPIC_W - TEXT_INSET) * (fontSize / 14) + TEXT_INSET)
+    : MAX_TOPIC_W;
+  const maxW = style.width ? Math.max(minW, style.width) : autoMaxW;
   const textW = Math.max(24, maxW - pad * 2 - TEXT_INSET - sidePadW);
   const runs = nodeRuns(n.title, n.titleRuns);
   let lines = wrapRunLines(runs, textW, measurer, style);
@@ -1418,7 +1426,7 @@ function measureTopicUncached(
   // could. With no side images sidePadW is 0 and this is the old formula.
   let w = style.width
     ? Math.max(minW, style.width)
-    : Math.min(MAX_TOPIC_W, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET)) + sidePadW;
+    : Math.min(autoMaxW, Math.max(MIN_TOPIC_W, Math.ceil(maxLineW) + pad * 2 + TEXT_INSET)) + sidePadW;
   // The middle column must fit the top/bottom images and the gallery grid
   // (the side columns are already part of sidePadW). The grid's own width is
   // already bounded — GALLERY_COLS cells by default, or an explicit `cols` —

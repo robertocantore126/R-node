@@ -205,6 +205,34 @@ export class Renderer {
    *  wider than the stored source costs memory and adds no detail. */
   private readonly IMAGE_BUCKET_MIN = 128;
   private readonly IMAGE_BUCKET_MAX = 1024;
+  /** Above the `large` level a picture is decoded from the ORIGINAL, at most
+   *  this many pixels (32 MB): one picture never shows more on any screen, and
+   *  the cap keeps a few big pictures inside IMAGE_BUDGET. */
+  private readonly IMAGE_ORIGINAL_MAX_PIXELS = 8 * 1024 * 1024;
+
+  /**
+   * Decode width and stored level for an image painted `neededPx` device
+   * pixels wide. Powers of two up to the 1024px `large` level (as before);
+   * past it, half-octave steps decoded from the original — a full octave
+   * could decode four times the pixels needed — never wider than the source
+   * has pixels, nor past the area cap.
+   */
+  private imageDecodeSize(imageId: string, neededPx: number): { bucket: number; level: AssetLevel } {
+    const need = Math.max(1, neededPx);
+    let bucket = 2 ** Math.ceil(Math.log2(need));
+    if (bucket > this.IMAGE_BUCKET_MAX) {
+      const nat = this.resolveImage?.(imageId);
+      bucket = this.IMAGE_BUCKET_MAX;
+      if (nat && nat.w > 0 && nat.h > 0) {
+        const step = Math.round(2 ** (Math.ceil(Math.log2(need) * 2) / 2));
+        const areaW = Math.floor(Math.sqrt((this.IMAGE_ORIGINAL_MAX_PIXELS * nat.w) / nat.h));
+        const w = Math.min(step, nat.w, areaW);
+        if (w > this.IMAGE_BUCKET_MAX) return { bucket: w, level: "original" };
+      }
+    }
+    bucket = Math.max(this.IMAGE_BUCKET_MIN, bucket);
+    return { bucket, level: bucket <= 256 ? "small" : "large" };
+  }
   private assetStore: AssetStore;
   private onRepaint: (() => void) | null = null;
 
@@ -1623,12 +1651,11 @@ export class Renderer {
     // bitmap on the 1024px level above zoom 0.5 on a retina screen — 3MB each,
     // so fifty visible image nodes blew the budget and the cache thrashed.
     const neededPx = (imgW * this.curScale * this.dpr) / (crop && crop.sw > 0 ? crop.sw : 1);
-    // Quantised to powers of two: an exact size would mint a new cache key on
-    // every micro-change of zoom and nothing would ever hit.
-    const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
-    // Smallest stored level that can serve the bucket. The original is never
-    // decoded: the hard 1024px cap of ADR-001 §12 is enforced here.
-    const level: AssetLevel = bucket <= 256 ? "small" : "large";
+    // Quantised (imageDecodeSize): an exact size would mint a new cache key on
+    // every micro-change of zoom and nothing would ever hit. Pictures shown
+    // wider than the 1024px level decode from the original, so a big picture
+    // or a deep zoom stays sharp instead of upscaling the large level.
+    const { bucket, level } = this.imageDecodeSize(imageId, neededPx);
     // The BUCKET keys the cache, not the level — with a variable decode size,
     // keying by level would reuse a 384px bitmap when 900 are needed and leave
     // that image blurred with nothing to invalidate it.
@@ -1653,12 +1680,19 @@ export class Renderer {
     this.startDecode(key, imageId, p.node.id, level, bucket);
   }
 
+  /** The blob of a level; an original that is gone (a compact .rnode.zip
+   *  carries only the display levels) falls back to the large one. */
+  private async storedLevel(assetId: string, level: AssetLevel): Promise<Blob | null> {
+    const blob = await this.assetStore.get(assetId, level);
+    return blob ?? (level === "original" ? await this.assetStore.get(assetId, "large") : null);
+  }
+
   private async startDecode(key: string, assetId: string, nodeId: string, level: AssetLevel, bucket: number): Promise<void> {
     this.inflight.set(key, nodeId);
     this.inflightCount++;
     const t0 = typeof performance !== "undefined" ? performance.now() : 0;
     try {
-      const blob = await this.assetStore.get(assetId, level);
+      const blob = await this.storedLevel(assetId, level);
       if (!blob) {
         this.imageFailed.set(key, Date.now());
         trace.mark("render", "render:image-decode", { assetId, level, bucket, error: "missing" });
@@ -1714,8 +1748,7 @@ export class Renderer {
     const imgW = Math.min(att.w, MAX_IMAGE_W);
     const imgH = (imgW * att.h) / att.w;
     const neededPx = imgW * this.curScale * this.dpr;
-    const bucket = Math.max(this.IMAGE_BUCKET_MIN, Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx)))));
-    const level: AssetLevel = bucket <= 256 ? "small" : "large";
+    const { bucket, level } = this.imageDecodeSize(ghost.imageId, neededPx);
     const key = `${ghost.imageId}@${bucket}`;
     const entry = this.imageCache.get(key);
     if (!entry) {
@@ -2647,10 +2680,7 @@ export class Renderer {
         // Same bucket arithmetic paintSlot uses, so the draw finds these
         // entries instead of missing and starting its own decode.
         const neededPx = (w * scale) / (crop && crop.sw > 0 ? crop.sw : 1);
-        const bucket = Math.max(
-          this.IMAGE_BUCKET_MIN,
-          Math.min(this.IMAGE_BUCKET_MAX, 2 ** Math.ceil(Math.log2(Math.max(1, neededPx))))
-        );
+        const { bucket, level } = this.imageDecodeSize(id, neededPx);
         const key = `${id}@${bucket}`;
         if (this.imageCache.has(key)) return;
         if (this.failedRecently(key)) {
@@ -2658,7 +2688,7 @@ export class Renderer {
           return;
         }
         try {
-          const blob = await this.assetStore.get(id, bucket <= 256 ? "small" : "large");
+          const blob = await this.storedLevel(id, level);
           if (!blob) {
             this.imageFailed.set(key, Date.now());
             if (strict) throw new Error(`Missing image ${id}`);
