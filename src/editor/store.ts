@@ -40,7 +40,7 @@ import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPla
 import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
 import { CHART_COLS, CHART_MAX_SIDE, CHART_ROWS, createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
-import { asThemeName, isThemeDependentColor, THEME_ORDER, THEMES, type ThemeName } from "../render/theme";
+import { asGridPattern, asThemeName, isThemeDependentColor, THEME_ORDER, THEMES, type GridPattern, type ThemeName } from "../render/theme";
 import type { DropIndicator } from "../render/renderer";
 import { DocumentLoadError, documentLoadErrorLabel, LocalStorageAdapter, readForOverwrite, TauriStorageAdapter, type StorageAdapter } from "../persist/storage";
 import { collectOrphans, ensureStoragePersistent, getAssetStore, getStorageEstimate, referencedAssetIds, TauriAssetStore, type AssetStore, type AssetBlob, type AssetLevel, type AssetMeta } from "../persist/assets";
@@ -250,6 +250,7 @@ export interface EditorState {
   docTitle: string;
   theme: ThemeName;
   background?: string;
+  grid?: GridPattern;
   structureType: string;
   mode: EditorMode;
   /** The pen's settings: session-wide, not saved with a document. */
@@ -480,6 +481,7 @@ export class EditorStore {
       docTitle: d.title,
       theme: asThemeName(d.settings?.theme),
       background: d.settings?.background,
+      grid: d.settings?.grid,
       structureType: d.sheets[0].structure.structureType,
       mode: "select",
       ink: { tool: "pen", color: null, width: INK_DEFAULT_WIDTH },
@@ -527,6 +529,7 @@ export class EditorStore {
       docTitle: d.title,
       theme: asThemeName(d.settings?.theme),
       background: d.settings?.background,
+      grid: d.settings?.grid,
       structureType: d.sheets[0].structure.structureType,
     };
     this.snap = { ...this.state, selection: [...this.state.selection], searchResults: [...this.state.searchResults] };
@@ -1938,6 +1941,7 @@ export class EditorStore {
       settings: {
         theme: asThemeName(d.settings?.theme),
         background: typeof d.settings?.background === "string" ? d.settings.background : undefined,
+        grid: asGridPattern(d.settings?.grid),
         showOutliner: !!d.settings?.showOutliner,
         showInspector: d.settings?.showInspector ?? true,
       },
@@ -6738,6 +6742,19 @@ export class EditorStore {
     const next = color && /^#[0-9a-f]{6}$/i.test(color) ? color : undefined;
     if (doc.settings.background === next) return;
     doc.settings.background = next;
+    doc.updatedAt = nowIso();
+    this.markDirty(doc.documentId);
+    this.notify(false);
+  }
+
+  /** Background pattern: lines, dots, graph paper or none. `undefined` means
+   *  "whatever the theme draws". Kept across theme switches: it is about the
+   *  paper, not the palette. */
+  setGridPattern(grid: GridPattern | undefined): void {
+    const doc = this.model.doc;
+    const next = asGridPattern(grid);
+    if (doc.settings.grid === next) return;
+    doc.settings.grid = next;
     doc.updatedAt = nowIso();
     this.markDirty(doc.documentId);
     this.notify(false);

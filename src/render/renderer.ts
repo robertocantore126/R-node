@@ -23,7 +23,7 @@ import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
 import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, chartGrowPitch, CHART_COLS, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { fetchAssetBlobs, getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
-import { THEMES, lighten, readableOn, type RenderTheme, type ThemeName } from "./theme";
+import { THEMES, defaultGridPattern, gridInk, lighten, readableOn, type GridPattern, type RenderTheme, type ThemeName } from "./theme";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
@@ -42,6 +42,8 @@ export interface RenderState {
   themeName: ThemeName;
   /** Optional document-level canvas background override. */
   background?: string;
+  /** Optional document-level background pattern (unset = theme default). */
+  grid?: GridPattern;
   viewW: number;
   viewH: number;
   relSel?: string | null;
@@ -614,7 +616,7 @@ export class Renderer {
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
-    if (!theme.noGrid) this.drawGrid(theme, state);
+    this.drawGrid(theme, state);
 
     const tStart = typeof performance !== "undefined" ? performance.now() : 0;
     this.textHits = 0;
@@ -798,29 +800,87 @@ export class Renderer {
   // Pieces
   // -------------------------------------------------------------------------
 
+  /**
+   * The canvas pattern. Marks are inked from the background (see `gridInk`)
+   * at a few percent alpha, so they are felt rather than seen; the theme's
+   * own `grid` colour is kept only for its default lines on its own colour.
+   *
+   * - lines: one square grid, 40 units, doubled when cells get under 14 px.
+   * - dots:  a dot per 20-unit cell, ~1 px radius on screen whatever the zoom.
+   * - graph: graph paper, minor every 10 units and major every 5 minors.
+   *          Zooming out, the minor lines fade to nothing by 6 px apart and
+   *          then hand over to the old majors (which reach the minor alpha
+   *          just as they become minors), so the paper never pops.
+   * - fine:  draw.io's grid: 10-unit squares, a stronger line every 4, kept
+   *          down to 4 px apart before it coarsens (by 4, the same handover).
+   */
   private drawGrid(theme: RenderTheme, state: RenderState): void {
+    const pattern = state.grid ?? defaultGridPattern(theme);
+    if (pattern === "none") return;
     const ctx = this.ctx;
     const s = state.camera.scale;
-    let step = 40;
-    while (step * s < 14) step *= 2;
-    ctx.strokeStyle = theme.grid;
-    ctx.lineWidth = 1 / s;
-    ctx.beginPath();
     const x0 = state.camera.x - state.viewW / 2 / s;
     const x1 = state.camera.x + state.viewW / 2 / s;
     const y0 = state.camera.y - state.viewH / 2 / s;
     const y1 = state.camera.y + state.viewH / 2 / s;
-    const startX = Math.floor(x0 / step) * step;
-    const startY = Math.floor(y0 / step) * step;
-    for (let gx = startX; gx <= x1; gx += step) {
-      ctx.moveTo(gx, y0);
-      ctx.lineTo(gx, y1);
+    const custom = state.background !== undefined;
+
+    const strokeLines = (step: number, color: string, skipEvery = 0): void => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1 / s;
+      ctx.beginPath();
+      const sx = Math.floor(x0 / step), sy = Math.floor(y0 / step);
+      for (let i = sx; i * step <= x1; i++) {
+        if (skipEvery && i % skipEvery === 0) continue;
+        ctx.moveTo(i * step, y0);
+        ctx.lineTo(i * step, y1);
+      }
+      for (let j = sy; j * step <= y1; j++) {
+        if (skipEvery && j % skipEvery === 0) continue;
+        ctx.moveTo(x0, j * step);
+        ctx.lineTo(x1, j * step);
+      }
+      ctx.stroke();
+    };
+
+    if (pattern === "lines") {
+      let step = 40;
+      while (step * s < 14) step *= 2;
+      strokeLines(step, custom || theme.noGrid ? gridInk(theme.background, 0.1) : theme.grid);
+      return;
     }
-    for (let gy = startY; gy <= y1; gy += step) {
-      ctx.moveTo(x0, gy);
-      ctx.lineTo(x1, gy);
+
+    if (pattern === "dots") {
+      let step = 20;
+      while (step * s < 12) step *= 2;
+      const r = 1.1 / s;
+      ctx.fillStyle = gridInk(theme.background, 0.22);
+      ctx.beginPath();
+      const sx = Math.floor(x0 / step), sy = Math.floor(y0 / step);
+      for (let i = sx; i * step <= x1 + step; i++) {
+        for (let j = sy; j * step <= y1 + step; j++) {
+          ctx.moveTo(i * step + r, j * step);
+          ctx.arc(i * step, j * step, r, 0, Math.PI * 2);
+        }
+      }
+      ctx.fill();
+      return;
     }
-    ctx.stroke();
+
+    // graph paper / fine (draw.io)
+    const fine = pattern === "fine";
+    const MAJOR_EVERY = fine ? 4 : 5;
+    const MAJOR_A = 0.13, MINOR_A = fine ? 0.075 : 0.06;
+    const MIN_PX = fine ? 4 : 6; // closest the minor lines get on screen
+    const TOP_PX = MIN_PX * MAJOR_EVERY; // where a minor line becomes the old major
+    let minor = 10;
+    while (minor * s < MIN_PX) minor *= MAJOR_EVERY;
+    const px = minor * s; // minor spacing on screen, in [MIN_PX, TOP_PX)
+    const fadeIn = Math.min(1, (px - MIN_PX) / (fine ? 2 : 4));
+    const toMajor = Math.max(0, Math.min(1, (px - TOP_PX * 0.6) / (TOP_PX * 0.4))); // reaches the major alpha at TOP_PX
+    const minorA = fadeIn * (MINOR_A + (MAJOR_A - MINOR_A) * toMajor);
+    if (minorA > 0.004) strokeLines(minor, gridInk(theme.background, minorA), MAJOR_EVERY);
+    strokeLines(minor * MAJOR_EVERY, gridInk(theme.background, MAJOR_A));
   }
 
   private drawConnector(

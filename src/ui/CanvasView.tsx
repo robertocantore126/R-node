@@ -215,6 +215,7 @@ export function CanvasView(): JSX.Element {
       drop: s.drop,
       themeName: s.theme,
       background: s.background,
+      grid: s.grid,
       viewW: w,
       viewH: h,
       relSel: s.relSel,

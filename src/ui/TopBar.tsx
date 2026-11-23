@@ -4,13 +4,14 @@ import { useStore } from "../editor/context";
 import { runExportHtml, runExportPdf } from "../editor/exportBridge";
 import { viewSize } from "../editor/view";
 import { trace } from "../dev/trace";
-import { THEMES, type ThemeName } from "../render/theme";
+import { THEMES, asGridPattern, defaultGridPattern, type ThemeName } from "../render/theme";
 
 const THEME_LABELS: Record<ThemeName, string> = {
   light: "Light",
   dark: "Dark",
   vanilla: "Vanilla",
   matte: "Matte",
+  fog: "Fog",
 };
 
 export function TopBar(): JSX.Element {
@@ -117,7 +118,7 @@ export function TopBar(): JSX.Element {
         <button
           className="btn theme-btn"
           data-help="Theme"
-          data-help-more="Switches between Light (white), Dark, Vanilla (warm paper) and Matte (solid slate). The choice is saved with the document."
+          data-help-more="Switches between Light (white), Dark, Vanilla (warm paper), Matte (solid slate) and Fog (soft grey on graph paper). The choice is saved with the document."
           title={`Theme: ${THEME_LABELS[state.theme]} — click for the next one`}
           onClick={() => store.cycleTheme()}
         >
@@ -153,6 +154,21 @@ export function TopBar(): JSX.Element {
               ↺
             </button>
           )}
+          <select
+            className="btn grid-picker"
+            data-help="Background pattern"
+            data-help-more="Lines, dots, graph paper (10-unit squares, a bolder line every 5), a fine draw.io-style grid (a bolder line every 4, stays dense when zoomed out) or a plain canvas. The marks are inked from the background colour at low contrast, so they stay quiet on any colour. Saved with the document."
+            title="Background pattern"
+            aria-label="Background pattern"
+            value={state.grid ?? defaultGridPattern(THEMES[state.theme])}
+            onChange={(e) => store.setGridPattern(asGridPattern(e.currentTarget.value))}
+          >
+            <option value="lines">▦ Lines</option>
+            <option value="dots">⁘ Dots</option>
+            <option value="graph">▩ Graph paper</option>
+            <option value="fine">▦ Fine grid (draw.io)</option>
+            <option value="none">□ Plain</option>
+          </select>
         </span>
       </div>
 

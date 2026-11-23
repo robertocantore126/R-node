@@ -6,14 +6,39 @@
  */
 import type { CodePalette } from "../core/codeHighlight";
 
-export type ThemeName = "light" | "dark" | "vanilla" | "matte";
+export type ThemeName = "light" | "dark" | "vanilla" | "matte" | "fog";
 
 /** Cycle order of the theme button. Light first: it is the default. */
-export const THEME_ORDER: ThemeName[] = ["light", "dark", "vanilla", "matte"];
+export const THEME_ORDER: ThemeName[] = ["light", "dark", "vanilla", "matte", "fog"];
 
 /** Coerce an arbitrary stored value to a known theme (unknown -> light). */
 export function asThemeName(value: unknown): ThemeName {
-  return value === "dark" || value === "vanilla" || value === "matte" ? value : "light";
+  return value === "dark" || value === "vanilla" || value === "matte" || value === "fog" ? value : "light";
+}
+
+export type GridPattern = "lines" | "dots" | "graph" | "fine" | "none";
+
+/** Coerce a stored value to a pattern; anything unknown means "theme default". */
+export function asGridPattern(value: unknown): GridPattern | undefined {
+  return value === "lines" || value === "dots" || value === "graph" || value === "fine" || value === "none" ? value : undefined;
+}
+
+/** What a theme draws when the document picked no pattern. */
+export function defaultGridPattern(theme: RenderTheme): GridPattern {
+  return theme.defaultGrid ?? (theme.noGrid ? "none" : "lines");
+}
+
+/**
+ * Ink for background marks, derived from the background itself: black on a
+ * light or mid canvas, white on a dark one, at a low alpha. A fixed theme grid
+ * colour is wrong as soon as the user picks their own background (a light grey
+ * line on a mid grey reads as a scratch, not as paper).
+ */
+export function gridInk(background: string, alpha: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(background.trim());
+  const n = m ? parseInt(m[1], 16) : 0xf3f4f6;
+  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum >= 0.4 ? `rgba(0,0,0,${alpha.toFixed(3)})` : `rgba(255,255,255,${(alpha * 0.8).toFixed(3)})`;
 }
 
 export interface RenderTheme {
@@ -22,6 +47,8 @@ export interface RenderTheme {
   grid: string;
   /** Solid matte canvas: skip drawing the dot grid pattern. */
   noGrid?: boolean;
+  /** The pattern a document gets when it picked none (overrides noGrid). */
+  defaultGrid?: GridPattern;
   text: string;
   textMuted: string;
   selection: string;
@@ -228,6 +255,47 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     collapsedBadgeText: "#13131f",
     nodeBorder: "rgba(19,19,31,0.12)",
     shadow: "rgba(19,19,31,0.22)",
+  },
+  /**
+   * Fog: a soft grey-white at ~77% brightness (Light is ~96%, Matte ~53%) on
+   * graph paper. Topic fills are pulled off pure white so no box glares
+   * against the dimmer canvas.
+   */
+  fog: {
+    name: "fog",
+    background: "#c4c3be",
+    grid: "rgba(0,0,0,0.1)",
+    defaultGrid: "graph",
+    text: "#1d1e24",
+    textMuted: "#4f515a",
+    selection: "#4f46e5",
+    selectionFill: "rgba(79, 70, 229, 0.12)",
+    dropIndicator: "#4f46e5",
+    searchMatch: "#d97706",
+    searchMatchActive: "#b45309",
+    rootFill: "#ecebe6",
+    rootText: "#1d1e24",
+    freeformFill: "#e6e5e0",
+    branch: ["#f2575e", "#f58a55", "#3fa6da", "#45b8ac", "#8fc9a6", "#c96ad6", "#5fa9d9", "#e2ad50"],
+    branchSoft: ["#f6d6d7", "#f6e0d4", "#d6eaf4", "#d6eeeb", "#dcebe2", "#ecd8ef", "#d6e6f1", "#f3e6cc"],
+    deepFill: "#ecebe6",
+    code: {
+      id: "fog",
+      plain: "#24292f",
+      keyword: "#cf222e",
+      string: "#0a3069",
+      number: "#0550ae",
+      comment: "#5f6670",
+      fn: "#8250df",
+      punct: "#57606a",
+    },
+    codeBg: "#efeeea",
+    codeBar: "#dddcd6",
+    connector: "#6f7280",
+    collapsedBadge: "#d6d5cf",
+    collapsedBadgeText: "#2c2e36",
+    nodeBorder: "rgba(0,0,0,0.08)",
+    shadow: "rgba(30,30,36,0.16)",
   },
 };
 

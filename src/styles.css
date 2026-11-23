@@ -145,6 +145,110 @@
   color: #d6d4ff;
 }
 
+/* Fog theme: graphite menus around the soft grey canvas, light inputs
+   pulled off pure white so nothing glares. Mirrors the Matte rules. */
+:root[data-theme="fog"] .topbar {
+  background: #3b3c40;
+  border-bottom: 2px solid #1f2024;
+}
+
+:root[data-theme="fog"] .statusbar {
+  background: #3b3c40;
+  border-top: 1px solid #1f2024;
+}
+
+:root[data-theme="fog"] .doc-title-input {
+  background: transparent;
+  color: var(--text);
+}
+
+:root[data-theme="fog"] .doc-title-input:hover,
+:root[data-theme="fog"] .doc-title-input:focus {
+  background: #4a4b50;
+  border-color: #606166;
+  color: #ffffff;
+}
+
+:root[data-theme="fog"] input:not(.doc-title-input):not([type="color"]),
+:root[data-theme="fog"] select,
+:root[data-theme="fog"] textarea {
+  background: #ecebe6;
+  color: #1f2024;
+  border-color: #2d2e33;
+}
+
+:root[data-theme="fog"] input:not(.doc-title-input)::placeholder,
+:root[data-theme="fog"] textarea::placeholder {
+  color: #606166;
+}
+
+:root[data-theme="fog"] input:disabled,
+:root[data-theme="fog"] select:disabled,
+:root[data-theme="fog"] textarea:disabled {
+  background: #c9c8c3;
+  color: #505157;
+  border-color: #2d2e33;
+  opacity: 0.85;
+}
+
+:root[data-theme="fog"] .btn {
+  background: #606166;
+  border-color: #2d2e33;
+  color: #ffffff;
+}
+
+:root[data-theme="fog"] .btn:hover:not(:disabled) {
+  background: #6e6f75;
+}
+
+:root[data-theme="fog"] .btn.small.danger {
+  background: #6b2c35;
+  border-color: #3d1d22;
+  color: #ffd6d6;
+}
+
+:root[data-theme="fog"] .btn.small.danger:hover:not(:disabled) {
+  background: #823641;
+}
+
+:root[data-theme="fog"] .topbar .btn {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+
+:root[data-theme="fog"] .topbar .btn:disabled {
+  opacity: 0.52;
+}
+
+:root[data-theme="fog"] .topbar .btn:hover:not(:disabled) {
+  background: #606166;
+}
+
+:root[data-theme="fog"] .btn.primary,
+:root[data-theme="fog"] .topbar .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+:root[data-theme="fog"] .btn.icon.on,
+:root[data-theme="fog"] .topbar .btn.icon.on,
+:root[data-theme="fog"] .topbar .btn.on {
+  background: #606166;
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px #c9c8c3;
+}
+
+:root[data-theme="fog"] .doc-row.active {
+  background: #606166;
+  box-shadow: inset 3px 0 0 #c9c8c3;
+}
+
+:root[data-theme="fog"] .status-hint {
+  color: #d6d4ff;
+}
+
 :root[data-theme="dark"] {
   --bg: #0f1319;
   --surface: #171b22;
@@ -158,6 +262,21 @@
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   --hover: rgba(255, 255, 255, 0.08);
   color-scheme: dark;
+}
+
+:root[data-theme="fog"] {
+  --bg: #c4c3be;
+  --surface: #4a4b50;
+  --surface-2: #606166;
+  --border: #2d2e33;
+  --text: #eeede9;
+  --text-muted: #c9c8c3;
+  --accent: #6366f1;
+  --accent-soft: rgba(255, 255, 255, 0.14);
+  --danger: #f87171;
+  --shadow: 0 10px 30px rgba(20, 20, 24, 0.4);
+  --hover: rgba(255, 255, 255, 0.09);
+  color-scheme: light;
 }
 
 :root[data-theme="vanilla"] {

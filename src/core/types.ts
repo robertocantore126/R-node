@@ -741,8 +741,10 @@ export interface RnodeDocument {
   archived: boolean;
   pinned: boolean;
   settings: {
-    theme: "light" | "dark" | "vanilla" | "matte";
+    theme: "light" | "dark" | "vanilla" | "matte" | "fog";
     background?: string;
+    /** Canvas pattern; unset = the theme's own (lines; none on Matte). */
+    grid?: "lines" | "dots" | "graph" | "fine" | "none";
     showOutliner: boolean;
     showInspector: boolean;
   };
