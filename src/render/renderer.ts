@@ -296,6 +296,16 @@ export class Renderer {
   private shadowSprites = new Map<string, HTMLCanvasElement>();
   /** E6: Count of topics drawn as greeking bars this frame. */
   private greekedCount = 0;
+  /**
+   * The on-screen canvas is opaque (`alpha: false`). Chrome only gives canvas
+   * text subpixel (ClearType) antialiasing on an opaque context; on a
+   * transparent one every glyph is grey-scale, thinner and softer than the
+   * same text in the DOM editor — it read like a JPEG next to a PNG the moment
+   * editing ended. The scene cache it is blitted from is opaque too, and the
+   * CSS vignette that showed through the transparent canvas is gone (the
+   * background is filled flat).
+   */
+  private readonly opaqueCanvas: boolean;
   /** E2: Offscreen scene cache for pan/zoom. */
   private sceneCacheCanvas: HTMLCanvasElement | null = null;
   private sceneCacheBuf: HTMLCanvasElement | null = null;
@@ -379,9 +389,10 @@ export class Renderer {
 
   constructor(
     canvas: HTMLCanvasElement,
-    opts: { assetStore?: AssetStore; onRepaint?: () => void; overlayCanvas?: HTMLCanvasElement | null } = {}
+    opts: { assetStore?: AssetStore; onRepaint?: () => void; overlayCanvas?: HTMLCanvasElement | null; opaque?: boolean } = {}
   ) {
-    const ctx = canvas.getContext("2d");
+    this.opaqueCanvas = !!opts.opaque;
+    const ctx = canvas.getContext("2d", this.opaqueCanvas ? { alpha: false } : undefined);
     if (!ctx) throw new Error("2d context unavailable");
     this.ctx = ctx;
     if (opts.overlayCanvas) {
@@ -721,8 +732,15 @@ export class Renderer {
 
   private ensureSceneCache(w: number, h: number): { main: HTMLCanvasElement; buf: HTMLCanvasElement } | null {
     if (typeof document === "undefined") return null;
-    if (!this.sceneCacheCanvas) this.sceneCacheCanvas = document.createElement("canvas");
-    if (!this.sceneCacheBuf) this.sceneCacheBuf = document.createElement("canvas");
+    // The first getContext call fixes a canvas's attributes for good, so the
+    // opaque ones are requested right where the canvases are made.
+    const make = (): HTMLCanvasElement => {
+      const c = document.createElement("canvas");
+      if (this.opaqueCanvas) c.getContext("2d", { alpha: false });
+      return c;
+    };
+    if (!this.sceneCacheCanvas) this.sceneCacheCanvas = make();
+    if (!this.sceneCacheBuf) this.sceneCacheBuf = make();
     if (this.sceneCacheCanvas.width !== w || this.sceneCacheCanvas.height !== h) {
       this.sceneCacheCanvas.width = w;
       this.sceneCacheCanvas.height = h;
@@ -756,7 +774,7 @@ export class Renderer {
           const ctx = this.ctx;
           const baseTheme = THEMES[state.themeName];
           const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
-          const transparentVignette = flags.vignette && !state.opaque && !state.background && !state.grid;
+          const transparentVignette = !this.opaqueCanvas && flags.vignette && !state.opaque && !state.background && !state.grid;
           ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
           ctx.clearRect(0, 0, state.viewW, state.viewH);
           if (!transparentVignette) {
@@ -983,7 +1001,7 @@ export class Renderer {
       ctx.clip();
     }
     ctx.clearRect(dev.x, dev.y, dev.w, dev.h);
-    const transparentVignette = flags.vignette && !state.opaque && !state.background && !state.grid;
+    const transparentVignette = !this.opaqueCanvas && flags.vignette && !state.opaque && !state.background && !state.grid;
     if (!transparentVignette) {
       ctx.fillStyle = theme.background;
       ctx.fillRect(dev.x, dev.y, dev.w, dev.h);

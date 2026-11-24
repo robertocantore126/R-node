@@ -397,6 +397,7 @@ export function CanvasView(): JSX.Element {
         schedule();
       },
       overlayCanvas: overlayCanvasRef.current,
+      opaque: true,
     });
     rendererRef.current = renderer;
     const unsubFlags = subscribeVisualFlags(() => {
@@ -2032,7 +2033,9 @@ export function CanvasView(): JSX.Element {
     }
   }
 
-  const useVignette = getVisualFlags().vignette && !state.background && !state.grid;
+  // The canvas is opaque now (subpixel text, see Renderer.opaqueCanvas), so a
+  // CSS vignette behind it would never show.
+  const useVignette = false;
 
   return (
     <div
