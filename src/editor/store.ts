@@ -291,6 +291,12 @@ function isNarrowScreen(): boolean {
   return typeof window !== "undefined" && !!window.matchMedia?.("(max-width: 700px)").matches;
 }
 
+/** Diagram tree layout: gap between levels and between siblings. */
+const DIAGRAM_LEVEL = 60;
+const DIAGRAM_SIBLING = 30;
+/** One draw.io page (A4 at 96 dpi), as the renderer's DIAGRAM_PAGE. */
+const DIAGRAM_PAGE_SIZE = { w: 827, h: 1169 };
+
 export class EditorStore {
   private state: EditorState;
   private snap: EditorState;
@@ -810,6 +816,16 @@ export class EditorStore {
       trace.error("execOps", `batch rolled back: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
+    // Diagram: whatever a command created as the CHILD of a shape (a code
+    // topic, a chart, an AI expansion, "New subtopic"...) becomes a shape of
+    // the page beside its parent, joined by a Tab arrow; anything put on the
+    // page without a place gets the middle of the view. Same history entry.
+    this.adoptIntoDiagramPage((op) => {
+      inverses.push(applyWithInverse(this.sheet, op));
+      ops.push(op);
+      const id = "id" in op ? op.id : null;
+      if (id) collect(id);
+    });
     // Inner canvases grow before their enclosing canvas is measured.
     const depth = (id: string): number => {
       let n = this.model.node(id), count = 0;
@@ -828,6 +844,9 @@ export class EditorStore {
     for (const id of [...canvases].sort((a, b) => depth(b) - depth(a))) {
       const node = this.model.node(id);
       if (!node?.style.freeform) continue;
+      // A diagram's page has no title band and is sized in whole pages by
+      // fitDiagramPage below, not grown here.
+      if (isDiagramPage(this.sheet, id)) continue;
       // Content past the left edge or above the title band: the canvas grows on
       // that side. Its items shift right/down by the same amount and the canvas
       // itself moves left/up, so nothing moves in the world.
@@ -863,6 +882,10 @@ export class EditorStore {
       if (width === grown.style.width && height === grown.style.height) continue;
       apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...grown.style, width, height }, prev: grown.style }));
     }
+    // Diagram: the page is exactly the whole pages its shapes cover, on the
+    // grid of the first page, which always stays (draw.io: an emptied page
+    // goes away).
+    if (this.diagramPageId()) this.fitDiagramPage(apply);
     if (follow.length) {
       applyLayout(this.sheet, false, this.measurer);
       const f = follow[0];
@@ -2519,6 +2542,30 @@ export class EditorStore {
   createSibling(): void {
     const node = this.selectionNode;
     if (!node) return;
+    // Diagram: Enter adds a sibling in the diagram's tree (another Tab child
+    // of the shape's tree parent); a shape with no tree parent gets a copy of
+    // itself just below. Either way the new shape opens for typing.
+    const page = this.diagramPageId();
+    if (page && node.parentId === page) {
+      const treeParent = this.sheet.relationships.find((r) => r.tree && r.toId === node.id)?.fromId;
+      let id: string | null = null;
+      if (treeParent && this.model.node(treeParent)?.parentId === page) id = this.diagramTab(treeParent);
+      else {
+        const at = node.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+        const h = measureNode(node, this.measurer).h;
+        id = uid("n");
+        const pageNode = this.model.requireNode(page);
+        this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+          id, nodeType: "subtopic", parentId: page, index: pageNode.childrenIds.length,
+          title: "", titleRuns: [{ text: "" }],
+          style: { ...this.diagramChildStyle(node), freeformPosition: { x: at.x, y: at.y + h + DIAGRAM_SIBLING } },
+          position: { x: pageNode.position.x + at.x, y: pageNode.position.y + at.y + h + DIAGRAM_SIBLING, manual: false },
+        })]);
+        this.settleLayoutNow();
+      }
+      if (id) this.startEdit(id);
+      return;
+    }
     if (node.type === "central") return this.createChild();
     if (!node.parentId) {
       this.toast("Floating topics have no siblings");
@@ -2568,6 +2615,177 @@ export class EditorStore {
   }
 
   /**
+   * Diagram: where the tree under `rootId` goes (page-local positions, for
+   * every non-pinned shape that has to move). The tree is the `tree` arrows;
+   * each level is one column centred on its parent, DIAGRAM_LEVEL apart, the
+   * siblings DIAGRAM_SIBLING apart. `extra` adds a shape not created yet (Tab).
+   */
+  private diagramTreePositions(
+    rootId: string,
+    extra?: { id: string; size: { w: number; h: number }; kids: (id: string) => string[] },
+  ): Map<string, { x: number; y: number }> {
+    const page = this.diagramPageId();
+    const resolve = imageResolver(this.sheet);
+    const sizeOf = (nid: string): { w: number; h: number } =>
+      extra && nid === extra.id ? extra.size : measureNode(this.model.requireNode(nid), this.measurer, resolve);
+    const kidsOf = extra?.kids ?? ((nid: string): string[] =>
+      this.sheet.relationships
+        .filter((r) => r.tree && r.fromId === nid && this.sheet.nodes[r.toId]?.parentId === page)
+        .map((r) => r.toId));
+    const posOf = new Map<string, { x: number; y: number }>();
+    const local = (nid: string): { x: number; y: number } =>
+      posOf.get(nid) ?? this.model.node(nid)?.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+    const heights = new Map<string, number>();
+    const subtreeH = (nid: string, trail: Set<string>): number => {
+      const hit = heights.get(nid);
+      if (hit !== undefined) return hit;
+      if (trail.has(nid)) return 0;
+      const next = new Set(trail).add(nid);
+      const kids = kidsOf(nid).filter((k) => !next.has(k));
+      const col = kids.reduce((a, k) => a + subtreeH(k, next), 0) + DIAGRAM_SIBLING * Math.max(0, kids.length - 1);
+      const h = Math.max(sizeOf(nid).h, col);
+      heights.set(nid, h);
+      return h;
+    };
+    const placed = new Set<string>();
+    const place = (nid: string): void => {
+      if (placed.has(nid)) return;
+      placed.add(nid);
+      const at = local(nid), sz = sizeOf(nid);
+      const kids = kidsOf(nid).filter((k) => !placed.has(k));
+      if (kids.length === 0) return;
+      const trail = new Set<string>([nid]);
+      const total = kids.reduce((a, k) => a + subtreeH(k, trail), 0) + DIAGRAM_SIBLING * (kids.length - 1);
+      let y = at.y + sz.h / 2 - total / 2;
+      for (const k of kids) {
+        const kh = subtreeH(k, trail), ks = sizeOf(k);
+        const pinned = k !== extra?.id && !!this.model.node(k)?.style.diagramPinned;
+        if (!pinned) posOf.set(k, { x: Math.round(at.x + sz.w + DIAGRAM_LEVEL), y: Math.round(y + kh / 2 - ks.h / 2) });
+        place(k);
+        y += kh + DIAGRAM_SIBLING;
+      }
+    };
+    place(rootId);
+    return posOf;
+  }
+
+  /**
+   * Diagram: see execOps. Children of page shapes become page shapes with a
+   * Tab arrow from their old parent (in the parent's child order, at any
+   * depth: a pasted outline becomes a tree of shapes); the touched trees are
+   * laid out again; page shapes with no position get the view's centre.
+   */
+  private adoptIntoDiagramPage(apply: (op: Op) => void): void {
+    const page = this.diagramPageId();
+    if (!page) return;
+    const touched: string[] = [];
+    for (let guard = 0; guard < 10000; guard++) {
+      const pageNode = this.model.requireNode(page);
+      let parent: MindNode | undefined;
+      for (const cid of pageNode.childrenIds) {
+        const c = this.model.node(cid);
+        if (c && !c.style.freeform && c.childrenIds.length > 0) { parent = c; break; }
+      }
+      if (!parent) break;
+      const childId = parent.childrenIds[0];
+      const child = this.model.requireNode(childId);
+      const pAt = parent.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+      apply(makeOp<Op & { type: "moveNode" }>("moveNode", {
+        id: childId, fromParentId: parent.id, fromIndex: 0, toParentId: page, toIndex: pageNode.childrenIds.length,
+      }));
+      const moved = this.model.requireNode(childId);
+      apply(makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: childId,
+        style: { ...moved.style, freeformPosition: { x: pAt.x + measureNode(parent, this.measurer).w + DIAGRAM_LEVEL, y: pAt.y } },
+        prev: moved.style,
+      }));
+      apply(makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+        relationship: {
+          id: uid("rel"), fromId: parent.id, toId: child.id, tree: true,
+          connector: "elbow", lineStyle: "solid", endArrow: "triangle",
+          fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 },
+        },
+      }));
+      if (!touched.includes(parent.id)) touched.push(parent.id);
+    }
+    // Lay out each touched tree from its top (a parent that is itself a child
+    // of another touched one is covered by that one's pass).
+    const isUnder = (id: string, root: string): boolean => {
+      const seen = new Set<string>();
+      let cur: string | undefined = id;
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        if (cur === root) return true;
+        cur = this.sheet.relationships.find((r) => r.tree && r.toId === cur)?.fromId;
+      }
+      return false;
+    };
+    const tops = touched.filter((t) => !touched.some((o) => o !== t && isUnder(t, o)));
+    for (const top of tops) {
+      for (const [nid, at] of this.diagramTreePositions(top)) {
+        const n = this.model.requireNode(nid);
+        const cur = n.style.freeformPosition;
+        if (cur && cur.x === at.x && cur.y === at.y) continue;
+        apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: nid, style: { ...n.style, freeformPosition: at }, prev: n.style }));
+      }
+    }
+    // Shapes on the page with no place of their own: the middle of the view.
+    const pageNode = this.model.requireNode(page);
+    for (const cid of pageNode.childrenIds) {
+      const c = this.model.node(cid);
+      if (!c || c.style.freeformPosition) continue;
+      const sz = measureNode(c, this.measurer);
+      const cam = this.state.camera;
+      apply(makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: cid,
+        style: { ...c.style, freeformPosition: { x: Math.round(cam.x - pageNode.position.x - sz.w / 2), y: Math.round(cam.y - pageNode.position.y - sz.h / 2) } },
+        prev: c.style,
+      }));
+    }
+  }
+
+  /**
+   * Diagram: size the page to the whole pages (DIAGRAM_PAGE, on the grid of
+   * the first page at the world origin) that its content covers, the first
+   * page always included. Grows past any edge and shrinks back when the
+   * shapes leave a page (draw.io). The items keep their place in the world.
+   */
+  private fitDiagramPage(apply: (op: Op) => void): void {
+    const page = this.diagramPageId();
+    if (!page) return;
+    const node = this.model.requireNode(page);
+    const resolve = imageResolver(this.sheet);
+    const tight = freeformContentBounds(this.sheet, page, (n) => measureNode(n, this.measurer, resolve), true);
+    const ox = node.position.x, oy = node.position.y;
+    const W = DIAGRAM_PAGE_SIZE.w, H = DIAGRAM_PAGE_SIZE.h;
+    let c0 = 0, c1 = 0, r0 = 0, r1 = 0;
+    if (Number.isFinite(tight.minX)) {
+      // A page is added as soon as a shape crosses into it, like draw.io.
+      c0 = Math.min(0, Math.floor((ox + tight.minX) / W));
+      c1 = Math.max(0, Math.floor((ox + tight.maxX - 0.01) / W));
+      r0 = Math.min(0, Math.floor((oy + tight.minY) / H));
+      r1 = Math.max(0, Math.floor((oy + tight.maxY - 0.01) / H));
+    }
+    const nx = c0 * W, ny = r0 * H, nw = (c1 - c0 + 1) * W, nh = (r1 - r0 + 1) * H;
+    const dx = ox - nx, dy = oy - ny;
+    if (dx === 0 && dy === 0 && node.style.width === nw && node.style.height === nh) return;
+    if (dx || dy) {
+      node.childrenIds.forEach((cid, index) => {
+        const c = this.model.node(cid);
+        if (!c) return;
+        const at = freeformOffset(c, index);
+        apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: cid, style: { ...c.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: c.style }));
+      });
+      apply(makeOp<Op & { type: "setPosition" }>("setPosition", { id: page, x: nx, y: ny, manual: true, prev: { ...node.position } }));
+    }
+    const cur = this.model.requireNode(page);
+    const style: Style = { ...cur.style, width: nw, height: nh };
+    if ((dx || dy) && cur.style.ink?.length) style.ink = cur.style.ink.map((st) => ({ ...st, path: st.path.map((v, i) => v + (i % 2 ? dy : dx)) }));
+    apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: page, style, prev: cur.style }));
+    trace.applied("diagram:fit-page", { cols: c1 - c0 + 1, rows: r1 - r0 + 1, dx, dy });
+  }
+
+  /**
    * Diagram: Tab on a shape. A child of the same shape is created on the
    * page, joined to its parent by a draw.io arrow (a real, editable arrow
    * flagged `tree`), and the parent's whole tree is laid out again beside it:
@@ -2597,44 +2815,11 @@ export class EditorStore {
         .map((r) => r.toId);
       return nid === parentId ? [...kids, id] : kids;
     };
-    const posOf = new Map<string, { x: number; y: number }>();
-    const local = (nid: string): { x: number; y: number } =>
-      posOf.get(nid) ?? this.model.node(nid)?.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
-    const LEVEL = 60, SIBLING = 30;
-    const heights = new Map<string, number>();
-    const subtreeH = (nid: string, trail: Set<string>): number => {
-      const hit = heights.get(nid);
-      if (hit !== undefined) return hit;
-      if (trail.has(nid)) return 0;
-      const next = new Set(trail).add(nid);
-      const kids = kidsOf(nid).filter((k) => !next.has(k));
-      const col = kids.reduce((a, k) => a + subtreeH(k, next), 0) + SIBLING * Math.max(0, kids.length - 1);
-      const h = Math.max(sizeOf(nid).h, col);
-      heights.set(nid, h);
-      return h;
-    };
-    const placed = new Set<string>();
-    const place = (nid: string): void => {
-      if (placed.has(nid)) return;
-      placed.add(nid);
-      const at = local(nid), sz = sizeOf(nid);
-      const kids = kidsOf(nid).filter((k) => !placed.has(k));
-      if (kids.length === 0) return;
-      const trail = new Set<string>([nid]);
-      const total = kids.reduce((a, k) => a + subtreeH(k, trail), 0) + SIBLING * (kids.length - 1);
-      let y = at.y + sz.h / 2 - total / 2;
-      for (const k of kids) {
-        const kh = subtreeH(k, trail), ks = sizeOf(k);
-        const pinned = k !== id && !!this.model.node(k)?.style.diagramPinned;
-        if (!pinned) posOf.set(k, { x: Math.round(at.x + sz.w + LEVEL), y: Math.round(y + kh / 2 - ks.h / 2) });
-        place(k);
-        y += kh + SIBLING;
-      }
-    };
-    place(parentId);
+    const posOf = this.diagramTreePositions(parentId, { id, size: sizeOf(id), kids: kidsOf });
 
     const ops: Op[] = [];
-    const newAt = posOf.get(id) ?? { x: local(parentId).x + sizeOf(parentId).w + LEVEL, y: local(parentId).y };
+    const pAt = parent.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+    const newAt = posOf.get(id) ?? { x: pAt.x + sizeOf(parentId).w + DIAGRAM_LEVEL, y: pAt.y };
     ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
       id, nodeType: "subtopic", parentId: page, index: pageNode.childrenIds.length,
       title: "", titleRuns: [{ text: "" }],
@@ -2693,6 +2878,14 @@ export class EditorStore {
   createChildOf(parentId: string): string | null {
     const parent = this.model.node(parentId);
     if (!parent) return null;
+    // Diagram: "New subtopic" on a shape is Tab's child (same shape, arrow,
+    // tree layout), opened for typing.
+    const page = this.diagramPageId();
+    if (page && parent.parentId === page) {
+      const id = this.diagramTab(parentId);
+      if (id) this.startEdit(id);
+      return id;
+    }
     const type: NodeType = parent.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(parent);

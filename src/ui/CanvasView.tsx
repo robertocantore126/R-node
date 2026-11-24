@@ -1804,6 +1804,9 @@ export function CanvasView(): JSX.Element {
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
     if (!hit) return;
+    // A diagram's page is the paper, not a topic: empty paper has no menu,
+    // as empty map has none.
+    if (isDiagramPage(store.sheet, hit)) return trace.ignored("contextmenu", "diagram page");
     const rect = canvasRef.current!.parentElement!.getBoundingClientRect();
     // A chart answers with its BOX menu when a box is selected: right-clicking
     // a box selects it first, and a box selected earlier stays the target.
