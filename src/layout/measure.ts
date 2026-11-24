@@ -48,6 +48,21 @@ export const HEURISTIC_MEASURER: TextMeasurer = {
 };
 
 let sharedCanvasMeasurer: TextMeasurer | null = null;
+let sharedMeasureCaches: { widths: Map<string, number>; metrics: Map<string, { ascent: number; descent: number }> } | null = null;
+
+/**
+ * Forget every measured width and topic size. Called once the app font has
+ * loaded: anything measured before then was measured with the fallback face
+ * but cached under the real font's name.
+ */
+export function resetTextMeasureCaches(): void {
+  sharedMeasureCaches?.widths.clear();
+  sharedMeasureCaches?.metrics.clear();
+  if (sharedCanvasMeasurer) {
+    extentCaches.delete(sharedCanvasMeasurer);
+    nodeExtents.delete(sharedCanvasMeasurer);
+  }
+}
 
 /** Canvas-backed measurer (real text metrics). Falls back to heuristic in Node. */
 export function createCanvasTextMeasurer(): TextMeasurer {
@@ -58,6 +73,7 @@ export function createCanvasTextMeasurer(): TextMeasurer {
   if (!ctx) return HEURISTIC_MEASURER;
   const cache = new Map<string, number>();
   const metricsCache = new Map<string, { ascent: number; descent: number }>();
+  sharedMeasureCaches = { widths: cache, metrics: metricsCache };
   const fontOf = (s: TextMetricsInput): string =>
     `${s.italic ? "italic " : ""}${s.fontWeight ?? 400} ${s.fontSize}px ${s.fontFamily ?? FONT_STACK}`;
   sharedCanvasMeasurer = {
@@ -102,7 +118,7 @@ export const LINE_HEIGHT_FACTOR = 1.25;
  * those resolve differently the editor and the node used different faces —
  * different metrics, different wrap, for no visible reason.
  */
-export const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+export const FONT_STACK = '"Xmind", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 /**
  * Monospace stack for code topics (T22). A code topic is never edited, so
  * there is no CSS counterpart to keep in sync — the measure and the renderer

@@ -13,6 +13,13 @@
 
 export const SCHEMA_VERSION = "0.1.0";
 
+/** Main topics and subtopics: Xmind face at 16 px, weight 500. */
+export const TOPIC_FONT_SIZE = 16;
+export const TOPIC_FONT_WEIGHT = 500;
+/** Bumped when the defaults above change; documents older than this are
+ *  migrated on open (EditorStore.validateImportedDoc). */
+export const FONT_DEFAULTS_VERSION = 2;
+
 // ---------------------------------------------------------------------------
 // Core enums
 // ---------------------------------------------------------------------------
@@ -743,6 +750,9 @@ export interface RnodeDocument {
     grid?: "lines" | "dots" | "graph" | "fine" | "none";
     showOutliner: boolean;
     showInspector: boolean;
+    /** Which topic font defaults the document was written with (see
+     *  FONT_DEFAULTS_VERSION). Absent = the original 14/600 main, 12/400 sub. */
+    fontDefaults?: number;
   };
   themeId: string;
   sheets: Sheet[];

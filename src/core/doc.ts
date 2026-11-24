@@ -6,7 +6,10 @@
  */
 import {
   DEFAULT_STRUCTURE,
+  FONT_DEFAULTS_VERSION,
   SCHEMA_VERSION,
+  TOPIC_FONT_SIZE,
+  TOPIC_FONT_WEIGHT,
   type MindNode,
   type NodeType,
   type RnodeDocument,
@@ -157,7 +160,7 @@ export class DocumentModel {
       updatedAt: nowIso(),
       archived: false,
       pinned: false,
-      settings: { theme: "matte", showOutliner: false, showInspector: true },
+      settings: { theme: "matte", showOutliner: false, showInspector: true, fontDefaults: FONT_DEFAULTS_VERSION },
       themeId: "r-node-matte",
       sheets: [sheet],
     };
@@ -216,9 +219,9 @@ export class DocumentModel {
     const typeStyle: Style = type === "central"
       ? { fontSize: 22, fontWeight: 700, padding: 4, shape: "none" }
       : type === "main"
-        ? { fontSize: 14, fontWeight: 600, padding: 9, cornerRadius: 8, shape: "rounded" }
+        ? { fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT, padding: 9, cornerRadius: 8, shape: "rounded" }
         : type === "subtopic"
-          ? { fontSize: 12, fontWeight: 400, padding: 7, cornerRadius: 8, shape: "rounded", align: "left" }
+          ? { fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT, padding: 7, cornerRadius: 8, shape: "rounded", align: "left" }
           : { fontSize: 14, fontWeight: 400, padding: 9, cornerRadius: 8, shape: "rounded" };
     return {
       id: uid("n"),

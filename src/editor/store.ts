@@ -31,7 +31,7 @@ import { INK_DEFAULT_WIDTH, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
 import { Machine, registerInspectable } from "./machine";
 import { LongOps, SAVE_FLOW_TABLE, saveRerunAllowed, selectionFields, selectionTargetOf, type LongOpKind, type LongOpView, type SaveFlow, type SaveOutcome, type SelectionTarget } from "./editorMachines";
-import { SCHEMA_VERSION, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type RelAnchor, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { FONT_DEFAULTS_VERSION, SCHEMA_VERSION, TOPIC_FONT_SIZE, TOPIC_FONT_WEIGHT, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type RelAnchor, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { parseQuiz, quizTopicOutline, type QuizSeed } from "../core/quiz";
 import { parseFlashcards, type FlashcardSeed } from "../core/flashcards";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
@@ -1928,6 +1928,21 @@ export class EditorStore {
       return null;
     }
 
+    // Font defaults v2: main topics and subtopics still on the OLD defaults
+    // (14/600 and 12/400, or no size at all) move to 16/500. A size or weight
+    // someone chose by hand differs from those and is left alone. Runs once
+    // per document: the marker below is saved with it.
+    const fontDefaults = typeof d.settings?.fontDefaults === "number" ? d.settings.fontDefaults : 1;
+    if (fontDefaults < FONT_DEFAULTS_VERSION) {
+      for (const n of Object.values(nodes)) {
+        const size = n.style.fontSize;
+        const weight = n.style.fontWeight;
+        const oldMain = n.type === "main" && (size === undefined || size === 14) && (weight === undefined || weight === 600);
+        const oldSub = n.type === "subtopic" && (size === undefined || size === 12) && (weight === undefined || weight === 400);
+        if (oldMain || oldSub) n.style = { ...n.style, fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT };
+      }
+    }
+
     return {
       schemaVersion: typeof d.schemaVersion === "string" ? d.schemaVersion : SCHEMA_VERSION,
       documentId: d.documentId,
@@ -1942,6 +1957,7 @@ export class EditorStore {
         grid: asGridPattern(d.settings?.grid),
         showOutliner: !!d.settings?.showOutliner,
         showInspector: d.settings?.showInspector ?? true,
+        fontDefaults: FONT_DEFAULTS_VERSION,
       },
       themeId: typeof d.themeId === "string" ? d.themeId : `r-node-${asThemeName(d.settings?.theme)}`,
       sheets: [sheet],

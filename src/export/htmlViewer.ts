@@ -22,6 +22,7 @@ import { nodeImageIds } from "../core/ops";
 import type { Sheet } from "../core/types";
 import type { ThemeName } from "../render/theme";
 import { buildReport, publishReport, type ExportReport } from "./report";
+import { inlineAppFontCss } from "../render/fonts";
 
 export interface HtmlViewerOptions {
   title: string;
@@ -110,11 +111,15 @@ export async function sheetToHtmlViewer(sheet: Sheet, opts: HtmlViewerOptions): 
       ? `{__gz:"${packed}"}`
       : plain;
   const compressed = payload !== plain;
+  // The app font travels inside the file: the viewer has no server to load
+  // it from, and without it every topic would wrap for a different face.
+  const fontCss = (await inlineAppFontCss()) ?? "";
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(opts.title)}</title>
 <style>
+  ${fontCss}
   html,body{margin:0;height:100%;overflow:hidden;background:${esc(opts.background)}}
   #app{position:fixed;inset:0}
   .hud{position:fixed;left:12px;bottom:12px;font:12px/1.4 system-ui,sans-serif;
