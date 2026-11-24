@@ -659,8 +659,6 @@ export interface Summary {
 export interface StructureConfig {
   structureType: StructureType;
   orientation: Orientation;
-  spacing: number; // gap between levels
-  branchSpacing: number; // gap between siblings
   padding: number;
   compactMode: boolean;
   autoBalance: boolean;
@@ -673,8 +671,6 @@ export interface StructureConfig {
 export const DEFAULT_STRUCTURE: StructureConfig = {
   structureType: "mindmap",
   orientation: "horizontal",
-  spacing: 180,
-  branchSpacing: 14,
   padding: 18,
   compactMode: false,
   autoBalance: true,

@@ -96,8 +96,6 @@ function makeSheet(): Sheet {
     structure: {
       structureType: "mindmap",
       orientation: "horizontal",
-      spacing: 180,
-      branchSpacing: 14,
       padding: 18,
       compactMode: false,
       autoBalance: true,

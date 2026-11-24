@@ -156,8 +156,8 @@ describe("image decode size", () => {
   });
 });
 
-describe("text above 100% zoom", () => {
-  it("is drawn as vectors, never from a cached bitmap; at 100% the cache stays", () => {
+describe("text from 50% zoom", () => {
+  it("is drawn as vectors, never from a cached bitmap; below 50% the cache stays", () => {
     const ctx = make2dCtx();
     let created = 0;
     vi.stubGlobal("document", {
@@ -180,8 +180,13 @@ describe("text above 100% zoom", () => {
     expect(r.textCache.size).toBe(0);
     expect(created).toBe(0);
 
-    r.curScale = 1;
-    draw("fit");
+    r.curScale = 0.5;
+    draw("half");
+    expect(r.textCache.size).toBe(0);
+    expect(created).toBe(0);
+
+    r.curScale = 0.49;
+    draw("far");
     expect(r.textCache.size).toBe(1);
   });
 });
@@ -207,7 +212,9 @@ describe("text cache (T21-D)", () => {
       ) => void;
       textCache: Map<string, { bytes: number }>;
       textBytes: number;
+      curScale: number;
     };
+    r.curScale = 0.25; // the bitmap cache only serves zooms below 50%
     const draw = (id: string): void =>
       r.drawText(undefined, { node: makeNode(id), x: 0, y: 0, w: 120, h: 40, visible: true }, "#000");
 
@@ -265,7 +272,7 @@ describe("placement cache", () => {
     const sheet = {
       sheetId: "s",
       title: "t",
-      structure: { structureType: "mindmap", orientation: "horizontal", spacing: 180, branchSpacing: 14, padding: 18, compactMode: false, autoBalance: true, freePositioningBranches: false, allowManualPositioning: true, connectorStyle: "curved" },
+      structure: { structureType: "mindmap", orientation: "horizontal", padding: 18, compactMode: false, autoBalance: true, freePositioningBranches: false, allowManualPositioning: true, connectorStyle: "curved" },
       rootNodeId: "root",
       nodes: { root, a },
       relationships: [], boundaries: [], summaries: [], callouts: [], labels: [], zones: [], attachments: [], comments: [], presentation: {},
@@ -400,7 +407,7 @@ describe("the rings drawn around a topic", () => {
     const a = makeNode("a");
     const sheet = {
       sheetId: "s", title: "t",
-      structure: { structureType: "mindmap", orientation: "horizontal", spacing: 180, branchSpacing: 14, padding: 18, compactMode: false, autoBalance: true, freePositioningBranches: false, allowManualPositioning: true, connectorStyle: "curved" },
+      structure: { structureType: "mindmap", orientation: "horizontal", padding: 18, compactMode: false, autoBalance: true, freePositioningBranches: false, allowManualPositioning: true, connectorStyle: "curved" },
       rootNodeId: "root", nodes: { root, a },
       relationships: [], boundaries: [], summaries: [], callouts: [], labels: [], zones: [], attachments: [], comments: [], presentation: {},
     } as never;

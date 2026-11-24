@@ -31,6 +31,16 @@ import { chartSlotNote, freeformNote } from "../core/chartNotes";
 export { imageResolver, measureNode } from "./measure";
 export type { Extent, TextMeasurer } from "./measure";
 
+/**
+ * Fixed spacing, XMind-like (measured on XMind 2026-10-24: ~50 px from the
+ * root to its main topics and ~30 px deeper; ~40 px between main branches and
+ * ~10 px between subtopics). Not user-adjustable.
+ */
+export const LEVEL_GAP_ROOT = 50;
+export const LEVEL_GAP = 30;
+export const SIBLING_GAP_ROOT = 40;
+export const SIBLING_GAP = 10;
+
 export interface LayoutResult {
   positions: Map<string, { x: number; y: number }>;
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
@@ -66,7 +76,10 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     }
     return e;
   };
-  const gap = Math.max(6, st.branchSpacing);
+  /** Distance from a topic to its children's column (or row). */
+  const levelGap = (parentId: string): number => (parentId === sheet.rootNodeId ? LEVEL_GAP_ROOT : LEVEL_GAP);
+  /** Distance between sibling branches under `parentId`. */
+  const siblingGap = (parentId: string): number => (parentId === sheet.rootNodeId ? SIBLING_GAP_ROOT : SIBLING_GAP);
 
   const isAuto = (id: string): boolean => {
     const n = sheet.nodes[id];
@@ -104,17 +117,18 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   /**
    * Vertical placement of `kids` around a parent box of height `parentH`.
    * Children are split into an above group and a below group (balanced by
-   * total height) separated from the parent by `gap`. Returns each child's
-   * center Y relative to the parent center, plus the total block height.
+   * total height) separated from the parent by the sibling gap. Returns each
+   * child's center Y relative to the parent center, plus the total block height.
    */
-  const stacked = (kids: MindNode[], parentH: number): { centers: Map<string, number>; blockH: number } => {
+  const stacked = (parentId: string, kids: MindNode[], parentH: number): { centers: Map<string, number>; blockH: number } => {
+    const gap = siblingGap(parentId);
     const k = kids.length;
     const blocks = kids.map((kid) => slotH(kid.id));
     const groupTotal = (from: number, to: number): number => {
       if (from >= to) return 0;
       let t = 0;
       for (let i = from; i < to; i++) t += blocks[i];
-      return t + st.branchSpacing * (to - from - 1);
+      return t + gap * (to - from - 1);
     };
     // choose the above-count that balances the two groups (first minimal diff
     // → children lean below the parent, Xmind-style)
@@ -135,12 +149,12 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     let y = -parentH / 2 - gap - aboveTotal; // top of the above group
     for (let i = 0; i < best; i++) {
       centers.set(kids[i].id, y + before(kids[i].id) + subtreeHeight(kids[i].id) / 2);
-      y += blocks[i] + st.branchSpacing;
+      y += blocks[i] + gap;
     }
     y = parentH / 2 + gap; // top of the below group
     for (let i = best; i < k; i++) {
       centers.set(kids[i].id, y + before(kids[i].id) + subtreeHeight(kids[i].id) / 2);
-      y += blocks[i] + st.branchSpacing;
+      y += blocks[i] + gap;
     }
     return { centers, blockH };
   };
@@ -161,8 +175,8 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     // child column, not surrounded by the root-style straddle gaps. Using
     // `stacked()` here overestimates every branch and makes the placement
     // code's actual geometry disagree with the block height used for balance.
-    const childColumnH = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + st.branchSpacing * Math.max(0, kids.length - 1);
-    const blockH = st.structureType === "mindmap" ? Math.max(h, childColumnH) : stacked(kids, h).blockH;
+    const childColumnH = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + siblingGap(id) * Math.max(0, kids.length - 1);
+    const blockH = st.structureType === "mindmap" ? Math.max(h, childColumnH) : stacked(id, kids, h).blockH;
     cacheH.set(id, blockH);
     return blockH;
   };
@@ -179,7 +193,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     }
     const kids = n.childrenIds.map((c) => sheet.nodes[c]).filter((c): c is MindNode => !!c);
     const childWidths = kids.map((kid) => slotW(kid.id));
-    const blockW = Math.max(w, childWidths.reduce((acc, v) => acc + v, 0) + st.branchSpacing * Math.max(0, kids.length - 1));
+    const blockW = Math.max(w, childWidths.reduce((acc, v) => acc + v, 0) + siblingGap(id) * Math.max(0, kids.length - 1));
     cacheW.set(id, blockW);
     return blockW;
   };
@@ -351,9 +365,9 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       for (const group of [rightGroup, leftGroup]) {
         if (group.length === 0) continue;
         const sideSign: -1 | 1 = group === rightGroup ? 1 : -1;
-        const { centers } = stacked(group, h);
+        const { centers } = stacked(id, group, h);
         for (const kid of group) {
-          placeMindmap(kid.id, cx + sideSign * (w / 2 + st.spacing + size(kid).w / 2), cy + centers.get(kid.id)!, sideSign);
+          placeMindmap(kid.id, cx + sideSign * (w / 2 + levelGap(id) + size(kid).w / 2), cy + centers.get(kid.id)!, sideSign);
         }
       }
     } else {
@@ -366,13 +380,13 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
       const currentCx = !isAuto(id) && parentNode ? parentNode.position.x + parentSize.w / 2 : cx;
       const currentCy = !isAuto(id) && parentNode ? parentNode.position.y + parentSize.h / 2 : cy;
 
-      const totalKidsH = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + st.branchSpacing * Math.max(0, kids.length - 1);
+      const totalKidsH = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + siblingGap(id) * Math.max(0, kids.length - 1);
       let yCursor = currentCy - totalKidsH / 2;
       for (const kid of kids) {
         const ke = size(kid);
         const kidCy = yCursor + before(kid.id) + subtreeHeight(kid.id) / 2;
-        placeMindmap(kid.id, currentCx + side * (w / 2 + st.spacing + ke.w / 2), kidCy, side);
-        yCursor += slotH(kid.id) + st.branchSpacing;
+        placeMindmap(kid.id, currentCx + side * (w / 2 + levelGap(id) + ke.w / 2), kidCy, side);
+        yCursor += slotH(kid.id) + siblingGap(id);
       }
     }
   }
@@ -394,19 +408,19 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     const kids = n.childrenIds.map((c) => sheet.nodes[c]).filter((c): c is MindNode => !!c);
 
     if (dir === "right") {
-      const { centers } = stacked(kids, h);
+      const { centers } = stacked(id, kids, h);
       for (const kid of kids) {
-        placeHierarchical(kid.id, cx + w / 2 + st.spacing + size(kid).w / 2, cy + centers.get(kid.id)!, dir);
+        placeHierarchical(kid.id, cx + w / 2 + levelGap(id) + size(kid).w / 2, cy + centers.get(kid.id)!, dir);
       }
     } else {
       const widths = kids.map((kid) => slotW(kid.id));
-      const totalW = widths.reduce((acc, v) => acc + v, 0) + st.branchSpacing * Math.max(0, kids.length - 1);
+      const totalW = widths.reduce((acc, v) => acc + v, 0) + siblingGap(id) * Math.max(0, kids.length - 1);
       let cursor = cx - totalW / 2;
       for (let i = 0; i < kids.length; i++) {
         const kid = kids[i];
         const sw = widths[i];
-        placeHierarchical(kid.id, cursor + before(kid.id) + subtreeWidth(kid.id) / 2, cy + h / 2 + st.spacing + size(kid).h / 2, dir);
-        cursor += sw + st.branchSpacing;
+        placeHierarchical(kid.id, cursor + before(kid.id) + subtreeWidth(kid.id) / 2, cy + h / 2 + levelGap(id) + size(kid).h / 2, dir);
+        cursor += sw + siblingGap(id);
       }
     }
   }
@@ -464,6 +478,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
           ]
         : [children];
 
+      const gap = siblingGap(parentId);
       for (const group of groups) {
         for (let pass = 0; pass < group.length * 3; pass++) {
           // branchBounds walks a whole branch. It used to run inside the sort

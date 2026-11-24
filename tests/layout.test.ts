@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DocumentModel, uid } from "../src/core/doc";
 import { applyOp, makeOp, type Op } from "../src/core/ops";
-import { applyLayout, layoutSheet, measureNode } from "../src/layout/mindmap";
+import { applyLayout, layoutSheet, measureNode, SIBLING_GAP_ROOT } from "../src/layout/mindmap";
 
 function makeMap(): DocumentModel {
   const model = new DocumentModel(DocumentModel.blank("Layout test"));
@@ -112,7 +112,7 @@ describe("mindmap layout", () => {
     const a = res.positions.get(anchored)!;
     const b = res.positions.get(automatic)!;
     const ah = measureNode(model.node(anchored)!).h;
-    expect(a.y + ah + model.sheet.structure.branchSpacing).toBeLessThanOrEqual(b.y + 0.001);
+    expect(a.y + ah + SIBLING_GAP_ROOT).toBeLessThanOrEqual(b.y + 0.001);
   });
 
   it("preserves major side assignment for manual root children when an auto subtopic is added", () => {
@@ -224,7 +224,7 @@ describe("mindmap layout", () => {
     const b = addChild(model, root.id, "B");
     const c = addChild(model, root.id, "C");
     const res = layoutSheet(sheet);
-    const gap = Math.max(6, sheet.structure.branchSpacing);
+    const gap = SIBLING_GAP_ROOT;
     const centerY = (id: string) => {
       const p = res.positions.get(id)!;
       return p.y + measureNode(model.node(id)!).h / 2;

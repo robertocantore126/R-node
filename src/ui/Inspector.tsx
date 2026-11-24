@@ -506,16 +506,6 @@ function SheetControls(): JSX.Element {
           <option value="vertical">Vertical</option>
         </select>
       </div>
-      <div className="field">
-        <span data-help="Level spacing" data-help-more="Horizontal distance between a topic and its children (80–400).">Level spacing</span>
-        <input type="range" min={80} max={400} step={10} value={sheet.structure.spacing} onChange={(e) => store.setStructure({ spacing: Number(e.target.value) })} />
-        <span className="muted">{sheet.structure.spacing}</span>
-      </div>
-      <div className="field">
-        <span data-help="Branch spacing" data-help-more="Vertical distance between sibling branches (4–80).">Branch spacing</span>
-        <input type="range" min={4} max={80} step={2} value={sheet.structure.branchSpacing} onChange={(e) => store.setStructure({ branchSpacing: Number(e.target.value) })} />
-        <span className="muted">{sheet.structure.branchSpacing}</span>
-      </div>
       <div className="muted count" data-help="Visible topics" data-help-more="How many topics the map contains (hidden/collapsed subtrees excluded).">Visible topics: {store.doc.visibleNodeCount}</div>
     </div>
   );

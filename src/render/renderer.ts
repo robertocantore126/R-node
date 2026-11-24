@@ -29,6 +29,10 @@ import { getVisualFlags, LOD_BARE, type VisualFlags } from "./visualFlags";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
+/** From this zoom up (50%) titles and code are drawn as vectors every frame;
+ *  below it they come from the per-node bitmap cache, rescaled. */
+export const VECTOR_TEXT_MIN_SCALE = 0.5;
+
 export interface DropIndicator {
   mode: "child" | "before" | "after" | "floating" | "none";
   nodeId: string;
@@ -3035,12 +3039,11 @@ export class Renderer {
     const topBlock = slots.insets.top;
     const botBlock = slots.insets.bottom;
     const startX = p.x + pad + slots.insets.left;
-    // Above 100% the text is drawn as vectors, every frame: a cached bitmap
-    // is a picture of the text, rescaled between its resolution steps and
-    // capped at 4×, so zoomed in it read soft. Zoomed in few topics are on
-    // screen, so the direct path costs little; at 100% and below — where a
-    // whole map can be visible — the bitmap cache stays.
-    if (vector || this.curScale > 1) {
+    // From 50% up the text is drawn as vectors, every frame: a cached bitmap
+    // is a picture of the text, rescaled between its resolution steps, so it
+    // read soft (at DPR 1 everything below 100% was a 1× bitmap shrunk). Below
+    // 50% — where a whole map can be visible — the bitmap cache stays.
+    if (vector || this.curScale >= VECTOR_TEXT_MIN_SCALE) {
       const size = n.style.fontSize ?? 14;
       const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, this.measurer, n.style);
       let totalH = 0;
@@ -3729,8 +3732,8 @@ export class Renderer {
   private drawCodeBlock(theme: RenderTheme, p: Placed): void {
     const n = p.node;
     const lang = asCodeLang(n.style.code?.lang);
-    // Above 100%, vectors (see drawText): no rescaled bitmap when zoomed in.
-    if (this.curScale > 1) {
+    // From 50% up, vectors (see drawText): no rescaled bitmap.
+    if (this.curScale >= VECTOR_TEXT_MIN_SCALE) {
       this.ctx.save();
       this.ctx.translate(p.x, p.y);
       this.paintCodeBlock(this.ctx, theme, p, lang);
