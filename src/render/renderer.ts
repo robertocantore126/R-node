@@ -2235,6 +2235,8 @@ export class Renderer {
   ): void {
     const n = p.node;
     const selected = state.selection.has(n.id);
+    // The diagram page is the paper: no hover or selection ring round it.
+    if (isDiagramPage(state.sheet, n.id)) return;
     if (n.style.freeform) {
       if (selected || state.hoverId === n.id) {
         ctx.save();

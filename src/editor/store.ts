@@ -2955,6 +2955,16 @@ export class EditorStore {
       });
     };
     capture(node, offset);
+    // Diagram: the shapes Tab grew from it move with it, by the same amount.
+    const from = node.style.freeformPosition;
+    if (internal && from && isDiagramPage(this.sheet, parentId)) {
+      const dx = offset.x - from.x, dy = offset.y - from.y;
+      for (const fid of this.diagramFollowers(id)) {
+        const f = this.model.requireNode(fid), at = f.style.freeformPosition;
+        if (!at || (dx === 0 && dy === 0)) continue;
+        ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: fid, style: { ...f.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: f.style }));
+      }
+    }
     this.execOps(ops);
     this.settleLayoutNow();
     this.select(id);
@@ -3554,13 +3564,45 @@ export class EditorStore {
    * emits ONE setPosition op whose `prev` is the PRE-drag position, so a
    * single undo restores the exact pre-drag state.
    */
-  private nodeDragState: { nodeId: string; origPos: Position; origStyle: Style } | null = null;
+  private nodeDragState: { nodeId: string; origPos: Position; origStyle: Style; followers: { id: string; style: Style }[] } | null = null;
+
+  /**
+   * Diagram: the shapes Tab grew from `id`, at any depth (following the
+   * `tree` arrows), on the same page. They ride along when `id` is moved.
+   */
+  private diagramFollowers(id: string): string[] {
+    const page = this.diagramPageId();
+    if (!page || this.model.node(id)?.parentId !== page) return [];
+    const out: string[] = [];
+    const seen = new Set<string>([id]);
+    const queue = [id];
+    while (queue.length > 0) {
+      const from = queue.shift()!;
+      for (const r of this.sheet.relationships) {
+        if (!r.tree || r.fromId !== from || seen.has(r.toId)) continue;
+        if (this.sheet.nodes[r.toId]?.parentId !== page) continue;
+        seen.add(r.toId);
+        out.push(r.toId);
+        queue.push(r.toId);
+      }
+    }
+    return out;
+  }
+
+  /** Put the riding shapes back where they were before the drag. */
+  private restoreFollowers(d: { followers: { id: string; style: Style }[] }): void {
+    for (const f of d.followers) {
+      const n = this.model.node(f.id);
+      if (n) n.style = { ...f.style };
+    }
+  }
 
   /** A node drag started: capture the pre-drag position for the final op. */
   beginNodeDrag(nodeId: string): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    this.nodeDragState = { nodeId, origPos: { ...node.position }, origStyle: { ...node.style } };
+    const followers = this.diagramFollowers(nodeId).map((id) => ({ id, style: { ...this.model.requireNode(id).style } }));
+    this.nodeDragState = { nodeId, origPos: { ...node.position }, origStyle: { ...node.style }, followers };
   }
 
   /**
@@ -3575,6 +3617,15 @@ export class EditorStore {
     if (freeformOwner(this.sheet, nodeId) && node.parentId) {
       const parent = this.model.requireNode(node.parentId);
       node.style = { ...node.style, freeformPosition: { x: worldX - parent.position.x, y: worldY - parent.position.y } };
+      const d = this.nodeDragState;
+      const from = d?.nodeId === nodeId ? d.origStyle.freeformPosition : undefined;
+      if (d && from) {
+        const dx = worldX - parent.position.x - from.x, dy = worldY - parent.position.y - from.y;
+        for (const f of d.followers) {
+          const n = this.model.node(f.id), at = f.style.freeformPosition;
+          if (n && at) n.style = { ...n.style, freeformPosition: { x: at.x + dx, y: at.y + dy } };
+        }
+      }
     }
     node.position = { ...node.position, x: worldX, y: worldY, manual: true };
     applyLayout(this.sheet, false, this.measurer);
@@ -3589,6 +3640,7 @@ export class EditorStore {
     if (!node) return;
     node.position = { ...d.origPos };
     node.style = { ...d.origStyle };
+    this.restoreFollowers(d);
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
@@ -3610,6 +3662,7 @@ export class EditorStore {
     if (d) {
       const node = this.model.node(d.nodeId);
       if (node) { node.position = { ...d.origPos }; node.style = { ...d.origStyle }; }
+      this.restoreFollowers(d);
     }
     this.dropAt(draggedId, targetId, mode, worldX, worldY);
     if (this.layoutTimer) {
@@ -3638,6 +3691,7 @@ export class EditorStore {
     if (untouched) return;
     node.position = { ...d.origPos };
     node.style = { ...d.origStyle };
+    this.restoreFollowers(d);
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
