@@ -40,6 +40,9 @@ export const LEVEL_GAP_ROOT = 50;
 export const LEVEL_GAP = 30;
 export const SIBLING_GAP_ROOT = 40;
 export const SIBLING_GAP = 10;
+/** Diagram mode (draw.io-like): room for the arrows between shapes. */
+export const DIAGRAM_LEVEL_GAP = 60;
+export const DIAGRAM_SIBLING_GAP = 30;
 
 export interface LayoutResult {
   positions: Map<string, { x: number; y: number }>;
@@ -77,9 +80,10 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     return e;
   };
   /** Distance from a topic to its children's column (or row). */
-  const levelGap = (parentId: string): number => (parentId === sheet.rootNodeId ? LEVEL_GAP_ROOT : LEVEL_GAP);
+  const diagram = st.structureType === "diagram";
+  const levelGap = (parentId: string): number => (diagram ? DIAGRAM_LEVEL_GAP : parentId === sheet.rootNodeId ? LEVEL_GAP_ROOT : LEVEL_GAP);
   /** Distance between sibling branches under `parentId`. */
-  const siblingGap = (parentId: string): number => (parentId === sheet.rootNodeId ? SIBLING_GAP_ROOT : SIBLING_GAP);
+  const siblingGap = (parentId: string): number => (diagram ? DIAGRAM_SIBLING_GAP : parentId === sheet.rootNodeId ? SIBLING_GAP_ROOT : SIBLING_GAP);
 
   const isAuto = (id: string): boolean => {
     const n = sheet.nodes[id];
@@ -176,7 +180,8 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     // `stacked()` here overestimates every branch and makes the placement
     // code's actual geometry disagree with the block height used for balance.
     const childColumnH = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + siblingGap(id) * Math.max(0, kids.length - 1);
-    const blockH = st.structureType === "mindmap" ? Math.max(h, childColumnH) : stacked(id, kids, h).blockH;
+    // Diagram trees use the same contiguous column, centred on the parent.
+    const blockH = st.structureType === "mindmap" || diagram ? Math.max(h, childColumnH) : stacked(id, kids, h).blockH;
     cacheH.set(id, blockH);
     return blockH;
   };
@@ -208,7 +213,20 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     return { positions, bounds };
   }
 
-  if (st.structureType === "mindmap") {
+  if (diagram) {
+    // draw.io-like: every top-level shape (the root and each floating topic)
+    // stays exactly where it was put, and the shapes Tab grew from it form a
+    // tree beside it. A dragged shape is manual: it keeps its spot and its
+    // own subtree follows it (placeHierarchical anchors on manual nodes).
+    const dir = st.orientation === "vertical" ? "down" : "right";
+    for (const n of Object.values(sheet.nodes)) {
+      if (n.parentId !== null && n.id !== root.id) continue;
+      if (freeformOwner(sheet, n.id)) continue;
+      const { w, h } = size(n);
+      placeHierarchical(n.id, n.position.x + w / 2, n.position.y + h / 2, dir);
+      positions.set(n.id, { x: n.position.x, y: n.position.y });
+    }
+  } else if (st.structureType === "mindmap") {
     const rootPos = isAuto(root.id)
       ? { x: 0, y: 0 }
       : { x: root.position.x + size(root).w / 2, y: root.position.y + size(root).h / 2 };
@@ -407,7 +425,16 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
     if (n.style.freeform || n.collapsed || n.childrenIds.length === 0) return;
     const kids = n.childrenIds.map((c) => sheet.nodes[c]).filter((c): c is MindNode => !!c);
 
-    if (dir === "right") {
+    if (dir === "right" && diagram) {
+      // One column beside the parent, centred on it (draw.io tree layout):
+      // no gap around the parent's own height as the straddle leaves.
+      const total = kids.reduce((acc, kid) => acc + slotH(kid.id), 0) + siblingGap(id) * Math.max(0, kids.length - 1);
+      let y = cy - total / 2;
+      for (const kid of kids) {
+        placeHierarchical(kid.id, cx + w / 2 + levelGap(id) + size(kid).w / 2, y + before(kid.id) + subtreeHeight(kid.id) / 2, dir);
+        y += slotH(kid.id) + siblingGap(id);
+      }
+    } else if (dir === "right") {
       const { centers } = stacked(id, kids, h);
       for (const kid of kids) {
         placeHierarchical(kid.id, cx + w / 2 + levelGap(id) + size(kid).w / 2, cy + centers.get(kid.id)!, dir);

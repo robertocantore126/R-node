@@ -21,6 +21,7 @@ import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
 import { SHAPE_DRAG_TYPE } from "./ShapeLibrary";
 import { FreeformInsertMenu, type FreeformInsertAt } from "./FreeformInsertMenu";
+import { DiagramPalette } from "./DiagramPalette";
 import { WEB_ITEM_DRAG_TYPE, type WebItem } from "../editor/webSearch";
 import { listShapes } from "../editor/shapeLibrary";
 import type { ImageSlot, MindNode, Relationship, Sheet } from "../core/types";
@@ -1530,6 +1531,14 @@ export function CanvasView(): JSX.Element {
     // the node could only ever be dropped above one.
     const dragging = gs.nodeId; // a closure cannot re-narrow the state
     const movesWithCursor = (id: string): boolean => id === dragging || isDescendantOf(store.doc, dragging, id);
+    // Diagram mode (draw.io): a shape is only ever moved, never dropped onto
+    // another one to become its child. It follows the pointer, its subtree
+    // with it, and stays wherever it is released.
+    if (store.sheet.structure.structureType === "diagram" && !freeformOwner(store.sheet, dragging)) {
+      store.setDrop({ mode: "floating", nodeId: dragging });
+      store.setNodeDragDraft(dragging, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY);
+      return;
+    }
     const hit = renderer.hitTest(rs, world.x, world.y, movesWithCursor);
 
     let dropMode: "child" | "before" | "after" | "floating" | "none" = "none";
@@ -2037,6 +2046,20 @@ export function CanvasView(): JSX.Element {
   // CSS vignette behind it would never show.
   const useVignette = false;
 
+  // Diagram mode's shape bar: page point → world, and the view's centre.
+  const paletteToWorld = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const r = canvas.getBoundingClientRect();
+    if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return null;
+    const cam = store.getSnapshot().camera;
+    return screenToWorld(cam, sizeRef.current.w, sizeRef.current.h, clientX - r.left, clientY - r.top);
+  }, [store]);
+  const paletteViewCenter = useCallback((): { x: number; y: number } => {
+    const cam = store.getSnapshot().camera;
+    return { x: cam.x, y: cam.y };
+  }, [store]);
+
   return (
     <div
       className="canvas-wrap"
@@ -2342,6 +2365,9 @@ export function CanvasView(): JSX.Element {
         />
       )}
       {ffInsert && <FreeformInsertMenu at={ffInsert} bounds={sizeRef.current} onClose={closeFfInsert} />}
+      {store.sheet.structure.structureType === "diagram" && (
+        <DiagramPalette toWorld={paletteToWorld} viewCenter={paletteViewCenter} />
+      )}
       {ctxMenu && <NodeContextMenu key={`${ctxMenu.nodeId}:${ctxMenu.cell ?? ""}`} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
       {captionField}
     </div>

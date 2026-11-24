@@ -41,7 +41,8 @@ export type StructureType =
   | "fishbone" // Ishikawa
   | "matrix" // rows x columns
   | "treetable" // hierarchical rows + columns
-  | "freeform"; // grid/free canvas
+  | "freeform" // grid/free canvas
+  | "diagram"; // draw.io-like: free shapes, Tab grows a tree of shapes with arrows
 
 export type Orientation = "horizontal" | "vertical";
 

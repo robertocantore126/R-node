@@ -22,7 +22,7 @@ export interface FreeformInsertAt {
   screen: { x: number; y: number };
 }
 
-function ShapeIcon({ shape }: { shape: FreeformShape | "text" }): JSX.Element {
+export function ShapeIcon({ shape }: { shape: FreeformShape | "text" }): JSX.Element {
   const common = { fill: "none", stroke: "currentColor", strokeWidth: 1.6 };
   let body: JSX.Element;
   switch (shape) {

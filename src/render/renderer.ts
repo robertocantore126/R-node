@@ -306,6 +306,8 @@ export class Renderer {
    * background is filled flat).
    */
   private readonly opaqueCanvas: boolean;
+  /** The sheet being painted is in diagram mode (set per paint pass). */
+  private curDiagram = false;
   /** E2: Offscreen scene cache for pan/zoom. */
   private sceneCacheCanvas: HTMLCanvasElement | null = null;
   private sceneCacheBuf: HTMLCanvasElement | null = null;
@@ -664,8 +666,11 @@ export class Renderer {
       if (isChartNote(n) && n.id !== openNote) { closedNotes++; continue; }
       add(n);
       // An open note brings its subtopics along (the layout put them in a
-      // column beside it); a closed one hides them with it.
-      if (isChartNote(n) && (state.showHidden === true || !n.collapsed)) {
+      // column beside it); a closed one hides them with it. In diagram mode
+      // every top-level shape brings the tree Tab grew from it (the layout
+      // placed it too).
+      const bringsTree = isChartNote(n) || sheet.structure.structureType === "diagram";
+      if (bringsTree && (state.showHidden === true || !n.collapsed)) {
         const stack = [...n.childrenIds];
         while (stack.length > 0) {
           const k = sheet.nodes[stack.shift()!];
@@ -1011,6 +1016,7 @@ export class Renderer {
 
     const s = state.camera.scale;
     this.curScale = s;
+    this.curDiagram = state.sheet.structure.structureType === "diagram";
     this.curCamX = state.camera.x;
     this.curCamY = state.camera.y;
     this.curViewW = state.viewW;
@@ -1149,6 +1155,8 @@ export class Renderer {
               : 0;
     const junctionDots: Array<{ x: number; y: number; color: string }> = [];
     const seenJunctions = showJunctions ? new Set<string>() : null;
+    // Diagram mode draws parent → child as draw.io arrows, after the loops.
+    const diagramEdges: [Placed, Placed][] = [];
 
     const tweenActive = !!(state.tween && state.tween.size > 0);
     if (flags.batchedPaths && !tweenActive && typeof Path2D !== "undefined") {
@@ -1166,6 +1174,10 @@ export class Renderer {
         links++;
         if (!linkVisible(parent, p)) continue;
         linksDrawn++;
+        if (structure === "diagram") {
+          diagramEdges.push([parent, p]);
+          continue;
+        }
         if (chartNoteRoot(state.sheet, parent.node.id)) {
           noteLinks.push([parent, p]);
           continue;
@@ -1261,6 +1273,10 @@ export class Renderer {
         links++;
         if (!linkVisible(parent, p)) continue;
         linksDrawn++;
+        if (structure === "diagram") {
+          diagramEdges.push([parent, p]);
+          continue;
+        }
         if (chartNoteRoot(state.sheet, parent.node.id)) {
           noteLinks.push([parent, p]);
           continue;
@@ -1311,6 +1327,8 @@ export class Renderer {
         }
       }
     }
+
+    for (const [parent, kid] of diagramEdges) this.drawDiagramEdge(theme, parent, kid, s);
 
     // 3) nodes
     for (const p of visiblePlaced) {
@@ -1601,6 +1619,60 @@ export class Renderer {
     path.closePath();
   }
 
+  /**
+   * Diagram mode: parent → child as a draw.io orthogonal arrow. It leaves the
+   * parent on the side facing the child and enters the child on the opposite
+   * side — right/left when the child is beside the parent, bottom/top when it
+   * is above or below — with one bend pair at the midpoint and a filled head.
+   */
+  private drawDiagramEdge(theme: RenderTheme, parent: Placed, child: Placed, scale: number): void {
+    const ctx = this.ctx;
+    const pcx = parent.x + parent.w / 2, pcy = parent.y + parent.h / 2;
+    const ccx = child.x + child.w / 2, ccy = child.y + child.h / 2;
+    const beside = child.x >= parent.x + parent.w || child.x + child.w <= parent.x;
+    const pts: { x: number; y: number }[] = [];
+    let dir: { x: number; y: number };
+    if (beside) {
+      const right = ccx > pcx;
+      const sx = right ? parent.x + parent.w : parent.x;
+      const ex = right ? child.x : child.x + child.w;
+      const mx = (sx + ex) / 2;
+      pts.push({ x: sx, y: pcy }, { x: mx, y: pcy }, { x: mx, y: ccy }, { x: ex, y: ccy });
+      dir = { x: right ? 1 : -1, y: 0 };
+    } else {
+      const down = ccy > pcy;
+      const sy = down ? parent.y + parent.h : parent.y;
+      const ey = down ? child.y : child.y + child.h;
+      const my = (sy + ey) / 2;
+      pts.push({ x: pcx, y: sy }, { x: pcx, y: my }, { x: ccx, y: my }, { x: ccx, y: ey });
+      dir = { x: 0, y: down ? 1 : -1 };
+    }
+    const width = Math.max(1.25, 1 / scale);
+    const head = 8;
+    const end = pts[pts.length - 1];
+    // The line stops where the head begins, so the head's tip is sharp.
+    const lineEnd = { x: end.x - dir.x * head * 0.8, y: end.y - dir.y * head * 0.8 };
+    ctx.save();
+    ctx.strokeStyle = theme.text;
+    ctx.fillStyle = theme.text;
+    ctx.lineWidth = width;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length - 1; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.lineTo(lineEnd.x, lineEnd.y);
+    ctx.stroke();
+    const nx = -dir.y, ny = dir.x;
+    ctx.beginPath();
+    ctx.moveTo(end.x, end.y);
+    ctx.lineTo(end.x - dir.x * head + nx * head * 0.45, end.y - dir.y * head + ny * head * 0.45);
+    ctx.lineTo(end.x - dir.x * head * 0.7, end.y - dir.y * head * 0.7);
+    ctx.lineTo(end.x - dir.x * head - nx * head * 0.45, end.y - dir.y * head - ny * head * 0.45);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
   private drawConnector(
     parent: Placed,
     child: Placed,
@@ -1653,6 +1725,7 @@ export class Renderer {
     const accent =
       flags.accentStrip &&
       !theme.tintedTopics &&
+      state.sheet.structure.structureType !== "diagram" &&
       depth >= 2 &&
       !n.style.fill &&
       !n.style.code &&
@@ -1691,6 +1764,8 @@ export class Renderer {
   private resolveFill(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     if (n.style.fill) return n.style.fill;
     if (!n.style.freeform && freeformOwner(sheet, n.id)) return "transparent";
+    // Diagram mode: plain draw.io shapes on the paper, whatever their depth.
+    if (sheet.structure.structureType === "diagram") return theme.deepFill;
     const depth = this.depthOf(n, sheet);
     if (depth === 0) return theme.rootFill;
     if (depth === 1) {
@@ -1773,6 +1848,12 @@ export class Renderer {
   private resolveBorder(theme: RenderTheme, n: MindNode, sheet: Sheet): ResolvedBorder | null {
     const { stroke, borderWidth, borderStyle } = n.style;
     if (borderStyle === "none" || stroke === "transparent") return null;
+    // Diagram mode: draw.io's dark outline, not the branch colour.
+    if (sheet.structure.structureType === "diagram" && (stroke === undefined || stroke === BRANCH_STROKE)
+      && n.style.shape !== "none" && !freeformOwner(sheet, n.id) && !n.style.freeform && !isBarePicture(n)) {
+      const width = Math.max(borderStyle === "double" ? 3 : 0.5, borderWidth ?? 1.5);
+      return { color: theme.text, width, ...borderDash(borderStyle, width), double: borderStyle === "double" };
+    }
     if (stroke === undefined && borderWidth === undefined && borderStyle === undefined) {
       // A text-only topic (or an image item inside a freeform canvas with no explicit shape) has no box for the hairline to trace.
       const freeformImageOnly = !n.style.shape && !n.style.fill && !n.style.code && !!(n.style.image || n.style.imageBottom || n.style.imageLeft || n.style.imageRight) && !!freeformOwner(sheet, n.id);
@@ -2301,6 +2382,7 @@ export class Renderer {
     const accentStripActive =
       flags.accentStrip &&
       !theme.tintedTopics &&
+      state.sheet.structure.structureType !== "diagram" &&
       depth >= 2 &&
       !n.style.fill &&
       !isCode &&
@@ -3072,7 +3154,8 @@ export class Renderer {
     // Pictures are content too: an empty title on a topic that owns an image
     // must not grow a hint on top of it.
     if (n.title.trim() === "") {
-      if (!this.hasPictures(n)) this.drawPlaceholder(p, color);
+      // A draw.io shape is allowed to be empty: no hint inside it.
+      if (!this.hasPictures(n) && !(this.curDiagram && n.style.shape && n.style.shape !== "none")) this.drawPlaceholder(p, color);
       return;
     }
     const pad = n.style.padding ?? 10;

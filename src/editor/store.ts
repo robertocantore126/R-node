@@ -2536,12 +2536,57 @@ export class EditorStore {
     this.startEdit(id);
   }
 
+  /**
+   * Diagram mode: a shape grown with Tab is the same kind of shape as its
+   * parent — outline, size and border — and starts empty, like a draw.io
+   * clone. Outside diagram mode (or under a non-shape), nothing is copied.
+   */
+  private diagramChildStyle(parent: MindNode): Style | undefined {
+    if (this.sheet.structure.structureType !== "diagram" || freeformOwner(this.sheet, parent.id)) return undefined;
+    const s = parent.style;
+    if (!s.shape || s.shape === "none") return undefined;
+    const keep: (keyof Style)[] = ["shape", "width", "height", "borderWidth", "borderStyle", "stroke", "fill", "cornerRadius", "fontSize", "fontWeight", "titleAt"];
+    const out: Style = {};
+    for (const k of keep) if (s[k] !== undefined) (out as Record<string, unknown>)[k] = s[k];
+    return out;
+  }
+
+  /**
+   * Diagram mode: a new top-level shape from the shape bar, centred on the
+   * world point. It is a floating topic pinned where it was put; Tab grows
+   * its tree. Empty, selected, not in edit (draw.io drops a blank shape).
+   */
+  createDiagramShape(shape: FreeformShape, x: number, y: number): string {
+    const size = FREEFORM_SHAPE_SIZES[shape];
+    const id = uid("n");
+    this.execOps([
+      makeOp<Op & { type: "createNode" }>("createNode", {
+        id,
+        nodeType: "floating",
+        parentId: null,
+        index: 0,
+        title: "",
+        titleRuns: [{ text: "" }],
+        style: { shape, width: size.w, height: size.h, borderWidth: 1.5, ...(shape === "actor" ? { titleAt: "bottom" as const } : {}) },
+        position: { x: Math.round(x - size.w / 2), y: Math.round(y - size.h / 2), manual: true },
+      }),
+    ]);
+    this.settleLayoutNow();
+    this.select(id);
+    return id;
+  }
+
   createChild(): void {
     const node = this.selectionNode ?? this.model.rootNode;
     const type: NodeType = node.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(node);
-    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(), position })]);
+    const diagramStyle = this.diagramChildStyle(node);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: type, parentId: node.id, index: node.childrenIds.length,
+      ...(diagramStyle ? { title: "", titleRuns: [{ text: "" }], style: diagramStyle } : { title: this.defaultTopicTitle() }),
+      position,
+    })]);
     // Tab spawns the child without entering edit mode: the selection stays on
     // the source node, so repeated Tab keeps adding siblings under the same
     // parent instead of nesting (or stealing the selection).
@@ -3340,12 +3385,20 @@ export class EditorStore {
       // on empty canvas does nothing.
       const isRootChild = node.parentId === this.sheet.rootNodeId;
       const isFloatingTopic = !node.parentId;
-      if (!isRootChild && !isFloatingTopic) {
+      if (this.sheet.structure.structureType === "diagram") {
+        // draw.io: any shape goes exactly where it is dropped and keeps its
+        // parent (and its arrow); its own subtree follows it.
+        this.execOps([
+          makeOp<Op & { type: "setPosition" }>("setPosition", { id: draggedId, x: worldX, y: worldY, manual: true, prev: node.position }),
+        ]);
+      } else if (!isRootChild && !isFloatingTopic) {
         this.setDrop(null);
         return;
       }
       // If dragging a direct child of root, allow swapping sides by reordering
-      if (isRootChild) {
+      if (this.sheet.structure.structureType === "diagram") {
+        /* placed above */
+      } else if (isRootChild) {
         const parent = this.model.requireNode(this.sheet.rootNodeId);
         const layout = layoutSheet(this.sheet, false, this.measurer);
         const rootCx = layout.positions.get(this.sheet.rootNodeId)?.x ?? parent.position.x;

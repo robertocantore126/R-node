@@ -29,7 +29,7 @@ const CELL_SHAPES: [string, number][] = [
   ["tall 2:3", 2 / 3],
 ];
 
-const STRUCTURES = ["mindmap", "logic", "tree", "org", "timeline", "fishbone", "matrix", "treetable", "freeform"] as const;
+const STRUCTURES = ["mindmap", "logic", "tree", "org", "timeline", "fishbone", "matrix", "treetable", "freeform", "diagram"] as const;
 
 /** Outline thicknesses offered for a topic, in world units. */
 const NODE_BORDER_WIDTHS = [1, 2, 3, 4, 6];

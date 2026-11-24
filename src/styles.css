@@ -3162,3 +3162,63 @@ input[type="range"] {
   gap: 4px;
   margin-bottom: 6px;
 }
+
+/* ---------- Diagram mode: draw.io-style shape bar, left of the map ---------- */
+
+.diagram-palette {
+  position: absolute;
+  top: 104px;
+  left: 12px;
+  z-index: 6;
+  width: 132px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  user-select: none;
+}
+
+.diagram-palette-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 2px 6px;
+}
+
+.diagram-palette-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.diagram-palette-item {
+  display: grid;
+  place-items: center;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: grab;
+}
+
+.diagram-palette-item:hover {
+  background: var(--surface-2);
+}
+
+.diagram-palette-hint {
+  margin: 6px 2px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.diagram-palette-ghost {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(2);
+  color: var(--accent);
+  opacity: 0.85;
+}
