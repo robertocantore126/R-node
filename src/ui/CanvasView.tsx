@@ -6,7 +6,8 @@ import { useStore } from "../editor/context";
 import { viewSize } from "../editor/view";
 import { setExportPngHandler, setExportSvgHandler, setExportPdfHandler, setExportHtmlHandler, setExportNodeImageHandler } from "../editor/exportBridge";
 import { Renderer, type RenderState } from "../render/renderer";
-import { THEMES } from "../render/theme";
+import { getVisualFlags, subscribeVisualFlags } from "../render/visualFlags";
+import { THEMES, vignetteFor } from "../render/theme";
 import { sheetToSvg } from "../export/svg";
 import { sheetToHtmlViewer } from "../export/htmlViewer";
 import { editorMapToPdf } from "../export/editorPdf";
@@ -133,6 +134,22 @@ export function CanvasView(): JSX.Element {
   const store = useStore();
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const lastSceneKeyRef = useRef<string>("");
+  const wheelZoomRef = useRef<boolean>(false);
+  const wheelZoomTimerRef = useRef<number | null>(null);
+  const collapseSnapRef = useRef<{
+    id: string;
+    rev: number;
+    oldSnap: Map<string, { x: number; y: number; w: number; h: number }>;
+  } | null>(null);
+  const tweenRef = useRef<{
+    rev: number;
+    start: number;
+    toggledId: string;
+    oldSnap: Map<string, { x: number; y: number; w: number; h: number }>;
+    newSnap: Map<string, { x: number; y: number; w: number; h: number }>;
+  } | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sizeRef = useRef({ w: viewSize.w, h: viewSize.h, left: 0, top: 0 });
   const dragRef = useRef<PressTrack>({ startX: 0, startY: 0, lastX: 0, lastY: 0, moved: false });
@@ -198,6 +215,7 @@ export function CanvasView(): JSX.Element {
   /** Cursor over a relationship handle or a chart slider (null = none). */
   const [handleCursor, setHandleCursor] = useState<string | null>(null);
   const [extGhostSrc, setExtGhostSrc] = useState<string | null>(null);
+  const [, setVisualTick] = useState(0);
 
   const paint = useCallback(() => {
     const renderer = rendererRef.current;
@@ -235,7 +253,86 @@ export function CanvasView(): JSX.Element {
       searchMatches: s.searchOpen && s.search ? new Set(s.searchResults) : null,
       searchCurrent: s.searchOpen && s.searchResults.length > 0 ? s.searchResults[s.searchIndex] : null,
     };
-    renderer.render(rs);
+    const flags = getVisualFlags();
+    const rev = store.revision;
+    if (collapseSnapRef.current && rev !== collapseSnapRef.current.rev) {
+      const snap = collapseSnapRef.current;
+      collapseSnapRef.current = null;
+      if (flags.animateCollapse) {
+        tweenRef.current = {
+          rev,
+          start: performance.now(),
+          toggledId: snap.id,
+          oldSnap: snap.oldSnap,
+          newSnap: renderer.snapshotPlacements(rs),
+        };
+      }
+    }
+    if (tweenRef.current && tweenRef.current.rev !== rev) {
+      tweenRef.current = null;
+    }
+    let tweenActive = false;
+    if (tweenRef.current) {
+      const tw = tweenRef.current;
+      const elapsed = performance.now() - tw.start;
+      const t = Math.min(1, elapsed / 160);
+      if (t >= 1) {
+        tweenRef.current = null;
+      } else {
+        tweenActive = true;
+        const ease = 1 - Math.pow(1 - t, 3);
+        const origin = tw.oldSnap.get(tw.toggledId) ?? tw.newSnap.get(tw.toggledId);
+        const tweenMap = new Map<string, { x: number; y: number; alpha: number; w?: number; h?: number }>();
+        for (const [id, nw] of tw.newSnap) {
+          const old = tw.oldSnap.get(id);
+          if (old) {
+            tweenMap.set(id, {
+              x: old.x + (nw.x - old.x) * ease,
+              y: old.y + (nw.y - old.y) * ease,
+              alpha: 1,
+            });
+          } else if (origin) {
+            tweenMap.set(id, {
+              x: origin.x + (nw.x - origin.x) * ease,
+              y: origin.y + (nw.y - origin.y) * ease,
+              alpha: ease,
+            });
+          }
+        }
+        if (origin) {
+          for (const [id, old] of tw.oldSnap) {
+            if (tw.newSnap.has(id)) continue;
+            tweenMap.set(id, {
+              x: old.x + (origin.x - old.x) * ease,
+              y: old.y + (origin.y - old.y) * ease,
+              alpha: 1 - ease,
+              w: old.w,
+              h: old.h,
+            });
+          }
+        }
+        rs.tween = tweenMap;
+      }
+    }
+
+    const inkLen = inkDraftRef.current?.stroke.path.length ?? 0;
+    const erasedLen = inkErasedRef.current?.size ?? 0;
+    const moving = gesture.state.kind === "pan" || wheelZoomRef.current || tweenActive;
+    const flagsKey = `${flags.taper ? 1 : 0}${flags.mutedDeep ? 1 : 0}${flags.flatShadow ? 1 : 0}${flags.accentStrip ? 1 : 0}${flags.rootPolish ? 1 : 0}${flags.junctions ? 1 : 0}${flags.softSelect ? 1 : 0}${flags.lod ? 1 : 0}${flags.vignette ? 1 : 0}${flags.overlayLayer ? 1 : 0}${flags.sceneCache ? 1 : 0}${flags.batchedPaths ? 1 : 0}${flags.motionQuality ? 1 : 0}`;
+    const sceneContentKey = `${rev}|${w}|${h}|${s.theme}|${s.background ?? ""}|${s.grid ?? ""}|0|${s.editingId ?? ""}|${tweenActive ? performance.now() : 0}|${inkLen}|${erasedLen}|${flagsKey}`;
+    const sceneKey = `${s.camera.x}|${s.camera.y}|${s.camera.scale}|${moving ? 1 : 0}|${wheelZoomRef.current ? 1 : 0}|${sceneContentKey}`;
+    rs.moving = moving;
+    rs.zooming = wheelZoomRef.current;
+    rs.sceneContentKey = sceneContentKey;
+    if (flags.overlayLayer && lastSceneKeyRef.current === sceneKey) {
+      renderer.renderOverlayOnly(rs);
+    } else {
+      lastSceneKeyRef.current = sceneKey;
+      renderer.render(rs);
+    }
+    if (tweenActive) {
+      schedulePaint(paint);
+    }
   }, [store]);
 
   const schedule = useCallback(() => {
@@ -294,8 +391,43 @@ export function CanvasView(): JSX.Element {
     if (!canvas) return;
     // Image decodes finish asynchronously; the repaint callback brings them
     // on screen without waiting for the next user gesture.
-    const renderer = new Renderer(canvas, { onRepaint: schedule });
+    const renderer = new Renderer(canvas, {
+      onRepaint: () => {
+        lastSceneKeyRef.current = "";
+        schedule();
+      },
+      overlayCanvas: overlayCanvasRef.current,
+    });
     rendererRef.current = renderer;
+    const unsubFlags = subscribeVisualFlags(() => {
+      lastSceneKeyRef.current = "";
+      setVisualTick((t) => t + 1);
+      schedule();
+    });
+    store.onBeforeCollapse = (id) => {
+      if (!getVisualFlags().animateCollapse) return;
+      const { w, h } = sizeRef.current;
+      const s = store.getSnapshot();
+      const rev = store.revision;
+      collapseSnapRef.current = {
+        id,
+        rev,
+        oldSnap: renderer.snapshotPlacements({
+          sheet: store.sheet,
+          camera: s.camera,
+          selection: new Set(s.selection),
+          editingId: s.editingId,
+          hoverId: s.hoverId,
+          drop: s.drop,
+          themeName: s.theme,
+          background: s.background,
+          grid: s.grid,
+          viewW: w,
+          viewH: h,
+          rev,
+        }),
+      };
+    };
 
     let firstResize = true;
     const ro = new ResizeObserver(() => {
@@ -556,6 +688,14 @@ export function CanvasView(): JSX.Element {
         // Wheel-up zooms in (deltaY < 0). Flipped alongside pan so ctrl+scroll
         // stays coherent for users with inverted/natural-scroll deltas.
         trace.applied("wheel:zoom", { deltaY: Math.round(e.deltaY) });
+        wheelZoomRef.current = true;
+        if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current);
+        wheelZoomTimerRef.current = window.setTimeout(() => {
+          wheelZoomTimerRef.current = null;
+          wheelZoomRef.current = false;
+          lastSceneKeyRef.current = "";
+          schedule();
+        }, 120);
         store.zoomAt(sx, sy, e.deltaY < 0 ? 1.12 : 1 / 1.12, w, h);
       } else {
         // Scroll down → map content moves up (document-style pan). The sign is
@@ -570,8 +710,11 @@ export function CanvasView(): JSX.Element {
 
     return () => {
       clearTimeout(fitTimer);
+      if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current);
       ro.disconnect();
       unsub();
+      unsubFlags();
+      store.onBeforeCollapse = null;
       wheelTarget.removeEventListener("wheel", onWheel as EventListener);
       uninstallTrace();
       setExportPngHandler(null);
@@ -1889,9 +2032,12 @@ export function CanvasView(): JSX.Element {
     }
   }
 
+  const useVignette = getVisualFlags().vignette && !state.background && !state.grid;
+
   return (
     <div
       className="canvas-wrap"
+      style={useVignette ? { background: vignetteFor(THEMES[state.theme].background) } : undefined}
       onPointerDownCapture={onWrapPointerDown}
       onPointerMoveCapture={onWrapPointerMove}
       onPointerUpCapture={onWrapPointerUp}
@@ -2169,6 +2315,11 @@ export function CanvasView(): JSX.Element {
           const res = await store.attachImageFile(target, file, side);
           if (!res.ok) store.toast(res.reason ?? "Could not import image");
         }}
+      />
+      <canvas
+        ref={overlayCanvasRef}
+        className="canvas"
+        style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
       />
       {state.relFrom && <div className="rel-pending">Click a target topic to link — Esc cancels</div>}
       {extGhostSrc && <img ref={extGhostElRef} className="ext-drop-ghost" src={extGhostSrc} alt="" draggable={false} />}

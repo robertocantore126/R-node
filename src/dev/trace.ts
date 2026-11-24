@@ -255,6 +255,10 @@ interface RenderSample {
   imgCached: number;
   imgBytes: number;
   imgInflight: number;
+  overlayOnly?: boolean;
+  sceneBlit?: "none" | "pan" | "zoom";
+  pathBatches?: number;
+  greeked?: number;
 }
 
 let pending: RenderSample | null = null;
