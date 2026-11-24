@@ -1440,7 +1440,9 @@ export class Renderer {
     // 5) drop indicator
     if (state.drop && state.drop.mode !== "none") {
       const target = byId.get(state.drop.nodeId);
-      if (target) this.drawDropIndicator(theme, target, state.drop.mode);
+      // Moving shapes about a diagram's page is not "dropping into" anything:
+      // no frame round the whole paper.
+      if (target && !isDiagramPage(state.sheet, target.node.id)) this.drawDropIndicator(theme, target, state.drop.mode);
     }
 
     // 6) ghost preview of an image being dragged (internal reassignment) —
@@ -1532,10 +1534,31 @@ export class Renderer {
     // is that canvas rounded UP to whole pages from its top-left corner.
     const pageNode = isDiagramPage(state.sheet, state.sheet.rootNodeId) ? state.sheet.rootNodeId : null;
     const pageRect = pageNode ? this.placedById(state).get(pageNode) : undefined;
-    const pages = pageRect
-      ? { col0: 0, row0: 0, cols: Math.max(1, Math.ceil((pageRect.w - 0.5) / PW)), rows: Math.max(1, Math.ceil((pageRect.h - 0.5) / PH)) }
-      : diagramPages(this.placedNodes(state));
-    const px = pageRect ? pageRect.x : pages.col0 * PW, py = pageRect ? pageRect.y : pages.row0 * PH;
+    // While a shape is dragged on the paper the canvas has not grown yet (it
+    // grows on release): the pages it is being taken to are shown already,
+    // from the live positions of the page's items.
+    const dragging = !!state.drop && state.drop.mode !== "none" && !!pageNode && state.drop.nodeId === pageNode;
+    let pages: { col0: number; row0: number; cols: number; rows: number };
+    let px: number, py: number;
+    if (pageRect) {
+      let x0 = pageRect.x, y0 = pageRect.y, x1 = pageRect.x + pageRect.w, y1 = pageRect.y + pageRect.h;
+      if (dragging) {
+        for (const q of this.placedNodes(state)) {
+          if (q.node.parentId !== pageNode) continue;
+          x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y);
+          x1 = Math.max(x1, q.x + q.w); y1 = Math.max(y1, q.y + q.h);
+        }
+      }
+      const c0 = Math.floor((x0 - pageRect.x) / PW), r0 = Math.floor((y0 - pageRect.y) / PH);
+      const c1 = Math.max(c0, Math.ceil((x1 - pageRect.x - 0.5) / PW) - 1), r1 = Math.max(r0, Math.ceil((y1 - pageRect.y - 0.5) / PH) - 1);
+      pages = { col0: c0, row0: r0, cols: c1 - c0 + 1, rows: r1 - r0 + 1 };
+      px = pageRect.x + c0 * PW;
+      py = pageRect.y + r0 * PH;
+    } else {
+      pages = diagramPages(this.placedNodes(state));
+      px = pages.col0 * PW;
+      py = pages.row0 * PH;
+    }
     const pw = pages.cols * PW, ph = pages.rows * PH;
 
     const base = state.background ?? theme.background;
@@ -1561,7 +1584,9 @@ export class Renderer {
     ctx.rect(px, py, pw, ph);
     ctx.clip();
     this.drawGrid({ ...theme, background: paper }, { ...state, background: paper });
-    if (pages.cols > 1 || pages.rows > 1) {
+    // Page joins only while a shape is being dragged on the paper, so you
+    // see where a page ends as you place it; they go away on release.
+    if (dragging && (pages.cols > 1 || pages.rows > 1)) {
       ctx.strokeStyle = gridInk(paper, 0.22);
       ctx.lineWidth = 1 / s;
       ctx.setLineDash([6 / s, 6 / s]);
