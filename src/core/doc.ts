@@ -166,6 +166,26 @@ export class DocumentModel {
     };
   }
 
+  /**
+   * An empty draw.io-style diagram: diagram mode, light paper with a grid,
+   * and one empty rounded shape near the top of the first page (the root —
+   * every map has one; here it is simply the first shape, and Tab grows its
+   * tree). Pages are DIAGRAM_PAGE wide and tall, starting at the origin.
+   */
+  static blankDiagram(title = "Untitled diagram"): RnodeDocument {
+    const doc = DocumentModel.blank(title);
+    const sheet = doc.sheets[0];
+    sheet.title = "Page 1";
+    sheet.structure = { ...sheet.structure, structureType: "diagram", orientation: "horizontal" };
+    const root = sheet.nodes[sheet.rootNodeId];
+    root.title = "";
+    root.titleRuns = [{ text: "" }];
+    root.style = { ...root.style, shape: "rounded", width: 120, height: 60, borderWidth: 1.5, fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT, padding: 9 };
+    root.position = { x: 120, y: 120, manual: true };
+    doc.settings = { ...doc.settings, theme: "light", grid: "lines" };
+    return doc;
+  }
+
   /** Demo document so the first launch is not a blank canvas. */
   static sample(): RnodeDocument {
     const doc = DocumentModel.blank("R-node — Roadmap");

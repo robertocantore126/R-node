@@ -7144,15 +7144,26 @@ export class EditorStore {
     return raw ? this.validateImportedDoc(raw) : null;
   }
 
-  newDocument(): void {
+  /**
+   * A fresh unsaved document. The kind is chosen here, once, at creation:
+   * a mind map, or a draw.io-style diagram (its own document type, on pages;
+   * it is not one of a mind map's structures).
+   */
+  newDocument(kind: "map" | "diagram" = "map"): void {
     void this.parkActive();
-    const doc = DocumentModel.blank("Untitled map");
-    doc.settings.theme = "light";
+    const doc = kind === "diagram" ? DocumentModel.blankDiagram("Untitled diagram") : DocumentModel.blank("Untitled map");
+    if (kind !== "diagram") doc.settings.theme = "light";
     this.activate(doc);
+    if (kind === "diagram") {
+      // Centre the view on the first shape, near the top of the page.
+      const root = doc.sheets[0].nodes[doc.sheets[0].rootNodeId];
+      const w = root.style.width ?? 120, h = root.style.height ?? 60;
+      this.state.camera = { scale: 1, x: root.position.x + w / 2, y: root.position.y + h / 2 + 120 };
+    }
     this.markDirty(doc.documentId); // new doc not persisted until the user saves
     this.upsertEntry(this.activeEntry());
     this.notify();
-    this.toast("New document created");
+    this.toast(kind === "diagram" ? "New diagram created" : "New document created");
   }
 
   /** Create a doc from the roadmap template in the library; returns its id. */

@@ -33,6 +33,24 @@ import type { Camera } from "./viewport";
  *  below it they come from the per-node bitmap cache, rescaled. */
 export const VECTOR_TEXT_MIN_SCALE = 0.5;
 
+/** A draw.io page (A4 portrait at 96 dpi, draw.io's default), in world units. */
+export const DIAGRAM_PAGE = { w: 827, h: 1169 };
+
+/**
+ * The block of pages a diagram occupies: every page any shape touches, and
+ * always the first one (at the origin), as whole-page columns and rows.
+ */
+export function diagramPages(placed: readonly { x: number; y: number; w: number; h: number }[]): { col0: number; row0: number; cols: number; rows: number } {
+  let c0 = 0, c1 = 0, r0 = 0, r1 = 0;
+  for (const p of placed) {
+    c0 = Math.min(c0, Math.floor(p.x / DIAGRAM_PAGE.w));
+    c1 = Math.max(c1, Math.floor((p.x + p.w - 0.01) / DIAGRAM_PAGE.w));
+    r0 = Math.min(r0, Math.floor(p.y / DIAGRAM_PAGE.h));
+    r1 = Math.max(r1, Math.floor((p.y + p.h - 0.01) / DIAGRAM_PAGE.h));
+  }
+  return { col0: c0, row0: r0, cols: c1 - c0 + 1, rows: r1 - r0 + 1 };
+}
+
 export interface DropIndicator {
   mode: "child" | "before" | "after" | "floating" | "none";
   nodeId: string;
@@ -1028,7 +1046,8 @@ export class Renderer {
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
-    this.drawGrid(theme, state);
+    if (state.sheet.structure.structureType === "diagram") this.drawDiagramPages(theme, state);
+    else this.drawGrid(theme, state);
 
     this.textHits = 0;
     this.textMisses = 0;
@@ -1495,6 +1514,60 @@ export class Renderer {
    * - fine:  draw.io's grid: 10-unit squares, a stronger line every 4, kept
    *          down to 4 px apart before it coarsens (by 4, the same handover).
    */
+  /**
+   * Diagram mode: draw.io's paper. Pages of DIAGRAM_PAGE size tile the world
+   * from the origin; as many are shown as the drawing covers (at least the
+   * first), so the sheet grows by whole pages in any direction the shapes go.
+   * The desk around them is a shade darker, the grid is drawn on the pages
+   * only, and the joins between pages are faint dashed lines.
+   */
+  private drawDiagramPages(theme: RenderTheme, state: RenderState): void {
+    const ctx = this.ctx;
+    const s = state.camera.scale;
+    const vx0 = state.camera.x - state.viewW / 2 / s;
+    const vy0 = state.camera.y - state.viewH / 2 / s;
+    const vw = state.viewW / s, vh = state.viewH / s;
+    const pages = diagramPages(this.placedNodes(state));
+    const { w: PW, h: PH } = DIAGRAM_PAGE;
+    const px = pages.col0 * PW, py = pages.row0 * PH;
+    const pw = pages.cols * PW, ph = pages.rows * PH;
+
+    const base = state.background ?? theme.background;
+    const m = /^#([0-9a-f]{6})$/i.exec(base.trim());
+    const n = m ? parseInt(m[1], 16) : 0xf3f4f6;
+    const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+    const light = lum >= 0.4;
+    const paper = light && !state.background ? "#ffffff" : base;
+    const desk = light ? darken(paper === "#ffffff" ? "#f1f2f5" : base, 0.06) : darken(base, 0.35);
+
+    ctx.save();
+    ctx.fillStyle = desk;
+    ctx.fillRect(vx0, vy0, vw, vh);
+    // A soft drop shadow under the paper, then the paper.
+    ctx.fillStyle = light ? "rgba(0,0,0,0.10)" : "rgba(0,0,0,0.35)";
+    ctx.fillRect(px + 2 / s, py + 3 / s, pw, ph);
+    ctx.fillStyle = paper;
+    ctx.fillRect(px, py, pw, ph);
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, pw, ph);
+    ctx.clip();
+    this.drawGrid({ ...theme, background: paper }, { ...state, background: paper });
+    if (pages.cols > 1 || pages.rows > 1) {
+      ctx.strokeStyle = gridInk(paper, 0.22);
+      ctx.lineWidth = 1 / s;
+      ctx.setLineDash([6 / s, 6 / s]);
+      ctx.beginPath();
+      for (let c = 1; c < pages.cols; c++) { ctx.moveTo(px + c * PW, py); ctx.lineTo(px + c * PW, py + ph); }
+      for (let r = 1; r < pages.rows; r++) { ctx.moveTo(px, py + r * PH); ctx.lineTo(px + pw, py + r * PH); }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
   private drawGrid(theme: RenderTheme, state: RenderState): void {
     const pattern = state.grid ?? defaultGridPattern(theme);
     if (pattern === "none") return;

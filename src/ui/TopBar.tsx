@@ -22,6 +22,8 @@ export function TopBar(): JSX.Element {
   const [title, setTitle] = useState(state.docTitle);
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
+  const [newOpen, setNewOpen] = useState(false);
+  const newRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setTitle(state.docTitle);
@@ -30,6 +32,7 @@ export function TopBar(): JSX.Element {
   useEffect(() => {
     const close = (e: MouseEvent): void => {
       if (exportRef.current && !exportRef.current.contains(e.target as Node)) setExportOpen(false);
+      if (newRef.current && !newRef.current.contains(e.target as Node)) setNewOpen(false);
     };
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
@@ -70,9 +73,17 @@ export function TopBar(): JSX.Element {
         <button className="btn primary" data-help="Save" data-help-more="Persists the document to storage (Ctrl+S). Changes reach disk only when you press this." title="Save (Ctrl+S)" onClick={() => void store.saveNow()}>
           Save
         </button>
-        <button className="btn small" data-help="New document" data-help-more="Creates a fresh empty map. Nothing is saved until you press Save." onClick={() => store.newDocument()}>
-          + New
-        </button>
+        <div className="menu-wrap" ref={newRef}>
+          <button className="btn small" data-help="New document" data-help-more="Creates a fresh document: a mind map, or a draw.io-style diagram. Nothing is saved until you press Save." onClick={() => setNewOpen((o) => !o)}>
+            + New
+          </button>
+          {newOpen && (
+            <div className="menu">
+              <button data-help="New mind map" data-help-more="A map that grows from a central topic." onClick={() => { store.newDocument("map"); setNewOpen(false); }}>Mind map</button>
+              <button data-help="New diagram" data-help-more="draw.io-style shapes on pages that grow with the drawing; Tab adds a child shape." onClick={() => { store.newDocument("diagram"); setNewOpen(false); }}>Diagram (draw.io style)</button>
+            </div>
+          )}
+        </div>
         <button className="btn" data-help="Open" data-help-more="Opens a .rnode document from disk (Ctrl+O)." title="Open a .rnode file (Ctrl+O)" onClick={() => void store.loadFile()}>
           Open
         </button>
