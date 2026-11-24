@@ -6,6 +6,7 @@
  * schedules a fallback but leaves its default event enabled. While a topic is being edited
  * inline, the editor overlay owns the keyboard and shortcuts are skipped.
  */
+import { ZOOM_STEP } from "../render/viewport";
 import type { EditorStore } from "./store";
 import { trace } from "../dev/trace";
 
@@ -239,10 +240,10 @@ export function handleShortcut(store: EditorStore, e: KeyboardEvent, vw: number,
       return true;
     }
     case "zoom-in":
-      store.zoomStep(1.2, vw, vh);
+      store.zoomStep(ZOOM_STEP, vw, vh);
       return true;
     case "zoom-out":
-      store.zoomStep(1 / 1.2, vw, vh);
+      store.zoomStep(1 / ZOOM_STEP, vw, vh);
       return true;
     case "zoom-reset":
       store.fitView(vw, vh);

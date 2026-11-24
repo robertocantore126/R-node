@@ -1,3 +1,4 @@
+import { ZOOM_STEP } from "../render/viewport";
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
@@ -103,13 +104,13 @@ export function TopBar(): JSX.Element {
       </div>
 
       <div className="topbar-group zoom-group">
-        <button className="btn icon" data-help="Zoom out" data-help-more="Shrinks the view around the cursor (Ctrl+-)." title="Zoom out (Ctrl+-)" onClick={() => store.zoomStep(1 / 1.2, viewSize.w, viewSize.h)}>
+        <button className="btn icon" data-help="Zoom out" data-help-more="Shrinks the view around the cursor (Ctrl+-)." title="Zoom out (Ctrl+-)" onClick={() => store.zoomStep(1 / ZOOM_STEP, viewSize.w, viewSize.h)}>
           −
         </button>
         <button className="btn zoom-pct" data-help="Current zoom" data-help-more="Click to fit the whole map into view (Ctrl+1)." title="Fit view (Ctrl+1)" onClick={() => store.fitView(viewSize.w, viewSize.h)}>
           {Math.round(state.camera.scale * 100)}%
         </button>
-        <button className="btn icon" data-help="Zoom in" data-help-more="Enlarges the view around the cursor (Ctrl+=)." title="Zoom in (Ctrl+=)" onClick={() => store.zoomStep(1.2, viewSize.w, viewSize.h)}>
+        <button className="btn icon" data-help="Zoom in" data-help-more="Enlarges the view around the cursor (Ctrl+=)." title="Zoom in (Ctrl+=)" onClick={() => store.zoomStep(ZOOM_STEP, viewSize.w, viewSize.h)}>
           +
         </button>
       </div>

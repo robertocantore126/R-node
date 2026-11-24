@@ -12,7 +12,7 @@ import { sheetToSvg } from "../export/svg";
 import { sheetToHtmlViewer } from "../export/htmlViewer";
 import { editorMapToPdf } from "../export/editorPdf";
 import { getAssetStore } from "../persist/assets";
-import { screenToWorld, worldToScreen } from "../render/viewport";
+import { screenToWorld, wheelZoomFactor, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
 import { anchorAt, borderAnchor, dragElbowSegment, innerPoints, worldWaypoints } from "../layout/relationship";
 import { createCanvasTextMeasurer, chartGrowDelta, chartGrowPitch, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
@@ -697,7 +697,7 @@ export function CanvasView(): JSX.Element {
           lastSceneKeyRef.current = "";
           schedule();
         }, 120);
-        store.zoomAt(sx, sy, e.deltaY < 0 ? 1.12 : 1 / 1.12, w, h);
+        store.zoomAt(sx, sy, wheelZoomFactor(e.deltaY, e.deltaMode), w, h);
       } else {
         // Scroll down → map content moves up (document-style pan). The sign is
         // flipped from the raw delta so the direction matches the OS-scroll

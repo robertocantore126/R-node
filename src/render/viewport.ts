@@ -13,6 +13,23 @@ export interface Camera {
 export const MIN_SCALE = 0.1;
 export const MAX_SCALE = 4.0;
 
+/** One press of the zoom buttons or Ctrl+= / Ctrl+-: 9 presses span 10%–400%. */
+export const ZOOM_STEP = 1.5;
+/** One notch of Ctrl+wheel (deltaY ≈ 100 px): ~16 notches span 10%–400%. */
+export const WHEEL_ZOOM_PER_NOTCH = 1.25;
+
+/**
+ * Zoom factor for one wheel event. Proportional to the scroll distance, so a
+ * mouse notch gives WHEEL_ZOOM_PER_NOTCH while a touchpad's many small deltas
+ * add up to the same thing smoothly instead of each counting as a full step.
+ * `deltaMode` 1 (lines, Firefox) is converted at ~33 px per line.
+ */
+export function wheelZoomFactor(deltaY: number, deltaMode = 0): number {
+  const px = deltaMode === 1 ? deltaY * 33 : deltaMode === 2 ? deltaY * 800 : deltaY;
+  const exponent = Math.max(-2, Math.min(2, -px / 100));
+  return Math.pow(WHEEL_ZOOM_PER_NOTCH, exponent);
+}
+
 export const HOME_CAMERA: Camera = { x: 0, y: 0, scale: 1 };
 
 export function worldToScreen(c: Camera, vw: number, vh: number, wx: number, wy: number): { x: number; y: number } {
