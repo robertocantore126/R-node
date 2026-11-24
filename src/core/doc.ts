@@ -167,10 +167,13 @@ export class DocumentModel {
   }
 
   /**
-   * An empty draw.io-style diagram: diagram mode, light paper with a grid,
-   * and one empty rounded shape near the top of the first page (the root —
-   * every map has one; here it is simply the first shape, and Tab grows its
-   * tree). Pages are DIAGRAM_PAGE wide and tall, starting at the origin.
+   * An empty draw.io-style diagram: light paper with a grid. Its root is the
+   * PAGE — a freeform canvas one A4 page big (827 x 1169) that the renderer
+   * draws as draw.io's paper and that grows as shapes go past its edges.
+   * Every shape, text and arrow of the diagram is an item of it, so it has
+   * everything a canvas has: the double-click picker, arrows from the shape
+   * handles, corner resize, snapping, marquee. One empty rounded shape
+   * starts it off, ready for Tab.
    */
   static blankDiagram(title = "Untitled diagram"): RnodeDocument {
     const doc = DocumentModel.blank(title);
@@ -180,8 +183,17 @@ export class DocumentModel {
     const root = sheet.nodes[sheet.rootNodeId];
     root.title = "";
     root.titleRuns = [{ text: "" }];
-    root.style = { ...root.style, shape: "rounded", width: 120, height: 60, borderWidth: 1.5, fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT, padding: 9 };
-    root.position = { x: 120, y: 120, manual: true };
+    root.style = { freeform: true, width: 827, height: 1169, shape: "rect", fill: "transparent", stroke: "transparent", fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT };
+    root.position = { x: 0, y: 0, manual: true };
+    const first = DocumentModel.makeNode("subtopic", root.id, "", {
+      shape: "rounded", width: 120, height: 60, borderWidth: 1.5, align: "center",
+      fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT,
+      freeformPosition: { x: 120, y: 120 },
+    });
+    first.titleRuns = [{ text: "" }];
+    first.position = { x: 120, y: 120, manual: false };
+    sheet.nodes[first.id] = first;
+    root.childrenIds = [first.id];
     doc.settings = { ...doc.settings, theme: "light", grid: "lines" };
     return doc;
   }

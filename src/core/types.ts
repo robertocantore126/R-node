@@ -276,6 +276,9 @@ export interface Style {
   canvasNote?: string;
   /** Position relative to the parent inside a freeform topic. */
   freeformPosition?: { x: number; y: number };
+  /** A diagram item moved by hand: Tab's tree layout leaves it where it is
+   *  (its own children still follow it). */
+  diagramPinned?: boolean;
   /** When true on a freeform item, corner-resizing scales text size proportionally instead of only resizing the box. */
   freeTransform?: boolean;
   /** Non-uniform horizontal/vertical text stretch factor (1 = normal). */
@@ -559,6 +562,12 @@ export interface Relationship {
   waypoints?: RelAnchor[];
   /** Where the label sits, as an offset from the route's midpoint. Absent = on it. */
   labelOffset?: RelAnchor;
+  /**
+   * Drawn by Tab in a diagram: the target is a CHILD of the source in the
+   * diagram's tree, and is laid out beside it (store.diagramTab). The arrow is
+   * otherwise an ordinary, editable arrow.
+   */
+  tree?: boolean;
 }
 
 /** A point on a box border, as fractions of the box's width and height. */

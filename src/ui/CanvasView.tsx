@@ -1,5 +1,5 @@
 import { topicClipboardFromHtml } from "../editor/topicClipboard";
-import { FREEFORM_HEADER, freeformOwner, isFreeTransform } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner, isDiagramPage, isFreeTransform } from "../core/freeform";
 import { appendInkSample, inkStrokeHit, inkStrokes } from "../core/ink";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
@@ -815,6 +815,7 @@ export function CanvasView(): JSX.Element {
     // Canvas corners, and the handles of selected items inside a canvas.
     for (const id of s.selection) {
       const n = store.doc.node(id);
+      if (isDiagramPage(store.sheet, id)) continue; // the paper has no handles
       const item = !!n && !n.style.freeform && !!freeformOwner(store.sheet, id) && !n.style.chartNote;
       const r = n?.style.freeform || item ? renderer.nodeWorldRect(rs, id) : null;
       if (!r) continue;
@@ -1191,9 +1192,15 @@ export function CanvasView(): JSX.Element {
       // over its items (draw.io); the title band still moves the canvas. A
       // click without a drag selects the canvas, as before.
       const rect = renderer.nodeWorldRect(rs, hit);
-      if (rect && world.y >= rect.y + FREEFORM_HEADER) {
+      // A diagram's page is all body: no title band, and it is never the
+      // selection itself (a click on empty paper clears the selection).
+      const page = isDiagramPage(store.sheet, hit);
+      if (rect && (page || world.y >= rect.y + FREEFORM_HEADER)) {
         const keepsSelection = e.shiftKey || e.ctrlKey || e.metaKey;
-        if (!keepsSelection) store.select(hit, { additive: false });
+        if (!keepsSelection) {
+          if (page) store.clearSelection();
+          else store.select(hit, { additive: false });
+        }
         trace.applied("pointerdown:freeform-marquee", { id: hit, keepsSelection, wasEditing });
         gesture.to({ kind: "marquee", anchorX: x, anchorY: y, active: false, scope: hit }, "pointerdown");
         return;

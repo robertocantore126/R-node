@@ -68,6 +68,14 @@ export function isFreeTransform(sheet: Sheet, node: MindNode): boolean {
   return !s.frame && (!s.image || isBarePicture(node));
 }
 
+/**
+ * The page of a diagram document: its root, a canvas drawn as draw.io's
+ * paper. Everything in the diagram is an item of it.
+ */
+export function isDiagramPage(sheet: Sheet, id: string): boolean {
+  return sheet.structure.structureType === "diagram" && id === sheet.rootNodeId && !!sheet.nodes[id]?.style.freeform;
+}
+
 /** Nearest enclosing canvas, excluding the topic itself. */
 export function freeformOwner(sheet: Sheet, id: string): string | null {
   let parentId = sheet.nodes[id]?.parentId;

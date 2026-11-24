@@ -1,4 +1,4 @@
-import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, isBarePicture, isFreeTransform, FREE_TRANSFORM_MIN_FONT, type FreeformShape } from "../core/freeform";
+import { freeformOwner, isDiagramPage, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, isBarePicture, isFreeTransform, FREE_TRANSFORM_MIN_FONT, type FreeformShape } from "../core/freeform";
 import { looksLikeDrawio, parseDrawio, type DrawioDiagram } from "../core/drawio";
 import { diagramPrompt } from "../core/diagramPrompt";
 import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
@@ -2537,54 +2537,144 @@ export class EditorStore {
   }
 
   /**
-   * Diagram mode: a shape grown with Tab is the same kind of shape as its
-   * parent — outline, size and border — and starts empty, like a draw.io
-   * clone. Outside diagram mode (or under a non-shape), nothing is copied.
+   * Diagram: the style a Tab child copies from its parent shape — outline,
+   * size, border, colours, text size — so it is the same kind of shape, and
+   * starts empty, like a draw.io clone. Position and pin are not copied.
    */
-  private diagramChildStyle(parent: MindNode): Style | undefined {
-    if (this.sheet.structure.structureType !== "diagram" || freeformOwner(this.sheet, parent.id)) return undefined;
+  private diagramChildStyle(parent: MindNode): Style {
     const s = parent.style;
-    if (!s.shape || s.shape === "none") return undefined;
-    const keep: (keyof Style)[] = ["shape", "width", "height", "borderWidth", "borderStyle", "stroke", "fill", "cornerRadius", "fontSize", "fontWeight", "titleAt"];
+    const keep: (keyof Style)[] = ["shape", "width", "height", "borderWidth", "borderStyle", "stroke", "fill", "textColor", "cornerRadius", "fontSize", "fontWeight", "fontFamily", "align", "titleAt", "freeTransform"];
     const out: Style = {};
     for (const k of keep) if (s[k] !== undefined) (out as Record<string, unknown>)[k] = s[k];
     return out;
   }
 
+  /** The page of the open diagram (its root canvas), or null in a mind map. */
+  private diagramPageId(): string | null {
+    const id = this.sheet.rootNodeId;
+    return isDiagramPage(this.sheet, id) ? id : null;
+  }
+
   /**
-   * Diagram mode: a new top-level shape from the shape bar, centred on the
-   * world point. It is a floating topic pinned where it was put; Tab grows
-   * its tree. Empty, selected, not in edit (draw.io drops a blank shape).
+   * Diagram: a new shape from the shape bar, centred on the world point, on
+   * the page. Selected, not in edit (draw.io drops a blank shape).
    */
-  createDiagramShape(shape: FreeformShape, x: number, y: number): string {
-    const size = FREEFORM_SHAPE_SIZES[shape];
+  createDiagramShape(shape: FreeformShape, x: number, y: number): string | null {
+    const page = this.diagramPageId();
+    if (!page) return null;
+    const id = this.createFreeformItem(page, x, y, "", undefined, shape);
+    if (id) this.select(id);
+    return id;
+  }
+
+  /**
+   * Diagram: Tab on a shape. A child of the same shape is created on the
+   * page, joined to its parent by a draw.io arrow (a real, editable arrow
+   * flagged `tree`), and the parent's whole tree is laid out again beside it:
+   * one column per level, centred on its parent, 60 px between levels and
+   * 30 px between siblings. Shapes moved by hand (diagramPinned) stay put,
+   * their own children still follow them. One history entry for all of it.
+   */
+  diagramTab(parentId: string): string | null {
+    const page = this.diagramPageId();
+    const parent = this.model.node(parentId);
+    if (!page || !parent || parent.parentId !== page) return null;
+    const pageNode = this.model.requireNode(page);
     const id = uid("n");
-    this.execOps([
-      makeOp<Op & { type: "createNode" }>("createNode", {
-        id,
-        nodeType: "floating",
-        parentId: null,
-        index: 0,
-        title: "",
-        titleRuns: [{ text: "" }],
-        style: { shape, width: size.w, height: size.h, borderWidth: 1.5, ...(shape === "actor" ? { titleAt: "bottom" as const } : {}) },
-        position: { x: Math.round(x - size.w / 2), y: Math.round(y - size.h / 2), manual: true },
-      }),
-    ]);
+    const style = this.diagramChildStyle(parent);
+    const resolve = imageResolver(this.sheet);
+    const sizeOf = (nid: string): { w: number; h: number } => {
+      if (nid === id) {
+        const probe = { ...parent, id, title: "", titleRuns: [{ text: "" }], style, childrenIds: [] } as MindNode;
+        return measureNode(probe, this.measurer, resolve);
+      }
+      return measureNode(this.model.requireNode(nid), this.measurer, resolve);
+    };
+    // The tree: Tab arrows from each shape, in creation order, plus the new one.
+    const kidsOf = (nid: string): string[] => {
+      const kids = this.sheet.relationships
+        .filter((r) => r.tree && r.fromId === nid && this.sheet.nodes[r.toId]?.parentId === page)
+        .map((r) => r.toId);
+      return nid === parentId ? [...kids, id] : kids;
+    };
+    const posOf = new Map<string, { x: number; y: number }>();
+    const local = (nid: string): { x: number; y: number } =>
+      posOf.get(nid) ?? this.model.node(nid)?.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+    const LEVEL = 60, SIBLING = 30;
+    const heights = new Map<string, number>();
+    const subtreeH = (nid: string, trail: Set<string>): number => {
+      const hit = heights.get(nid);
+      if (hit !== undefined) return hit;
+      if (trail.has(nid)) return 0;
+      const next = new Set(trail).add(nid);
+      const kids = kidsOf(nid).filter((k) => !next.has(k));
+      const col = kids.reduce((a, k) => a + subtreeH(k, next), 0) + SIBLING * Math.max(0, kids.length - 1);
+      const h = Math.max(sizeOf(nid).h, col);
+      heights.set(nid, h);
+      return h;
+    };
+    const placed = new Set<string>();
+    const place = (nid: string): void => {
+      if (placed.has(nid)) return;
+      placed.add(nid);
+      const at = local(nid), sz = sizeOf(nid);
+      const kids = kidsOf(nid).filter((k) => !placed.has(k));
+      if (kids.length === 0) return;
+      const trail = new Set<string>([nid]);
+      const total = kids.reduce((a, k) => a + subtreeH(k, trail), 0) + SIBLING * (kids.length - 1);
+      let y = at.y + sz.h / 2 - total / 2;
+      for (const k of kids) {
+        const kh = subtreeH(k, trail), ks = sizeOf(k);
+        const pinned = k !== id && !!this.model.node(k)?.style.diagramPinned;
+        if (!pinned) posOf.set(k, { x: Math.round(at.x + sz.w + LEVEL), y: Math.round(y + kh / 2 - ks.h / 2) });
+        place(k);
+        y += kh + SIBLING;
+      }
+    };
+    place(parentId);
+
+    const ops: Op[] = [];
+    const newAt = posOf.get(id) ?? { x: local(parentId).x + sizeOf(parentId).w + LEVEL, y: local(parentId).y };
+    ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: "subtopic", parentId: page, index: pageNode.childrenIds.length,
+      title: "", titleRuns: [{ text: "" }],
+      style: { ...style, freeformPosition: newAt },
+      position: { x: pageNode.position.x + newAt.x, y: pageNode.position.y + newAt.y, manual: false },
+    }));
+    ops.push(makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+      relationship: {
+        id: uid("rel"), fromId: parentId, toId: id, tree: true,
+        connector: "elbow", lineStyle: "solid", endArrow: "triangle",
+        fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 },
+      },
+    }));
+    for (const [nid, at] of posOf) {
+      if (nid === id) continue;
+      const n = this.model.requireNode(nid);
+      const cur = n.style.freeformPosition;
+      if (cur && cur.x === at.x && cur.y === at.y) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: nid, style: { ...n.style, freeformPosition: at }, prev: n.style }));
+    }
+    this.execOps(ops);
     this.settleLayoutNow();
-    this.select(id);
+    trace.applied("diagram:tab", { parent: parentId, child: id, moved: posOf.size - 1 });
     return id;
   }
 
   createChild(): void {
     const node = this.selectionNode ?? this.model.rootNode;
+    // Diagram: Tab on a shape of the page grows the diagram's tree; the
+    // selection stays on the parent, so repeated Tab adds siblings.
+    const page = this.diagramPageId();
+    if (page && node.parentId === page) {
+      this.diagramTab(node.id);
+      return;
+    }
     const type: NodeType = node.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(node);
-    const diagramStyle = this.diagramChildStyle(node);
     this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
-      id, nodeType: type, parentId: node.id, index: node.childrenIds.length,
-      ...(diagramStyle ? { title: "", titleRuns: [{ text: "" }], style: diagramStyle } : { title: this.defaultTopicTitle() }),
+      id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(),
       position,
     })]);
     // Tab spawns the child without entering edit mode: the selection stays on
@@ -2853,7 +2943,10 @@ export class EditorStore {
       toParentId: parentId, toIndex: parent.childrenIds.length,
     }));
     const capture = (n: MindNode, offset: { x: number; y: number }): void => {
-      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: n.id, style: { ...n.style, freeformPosition: offset }, prev: n.style }));
+      // A shape moved by hand on a diagram page is pinned: Tab's tree layout
+      // will not pull it back into its column.
+      const pin = n.id === id && isDiagramPage(this.sheet, parentId) ? { diagramPinned: true } : {};
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: n.id, style: { ...n.style, freeformPosition: offset, ...pin }, prev: n.style }));
       if (internal || n.style.freeform) return;
       n.childrenIds.forEach((childId, index) => {
         const child = this.model.requireNode(childId);
@@ -7156,9 +7249,11 @@ export class EditorStore {
     this.activate(doc);
     if (kind === "diagram") {
       // Centre the view on the first shape, near the top of the page.
-      const root = doc.sheets[0].nodes[doc.sheets[0].rootNodeId];
-      const w = root.style.width ?? 120, h = root.style.height ?? 60;
-      this.state.camera = { scale: 1, x: root.position.x + w / 2, y: root.position.y + h / 2 + 120 };
+      const sheet0 = doc.sheets[0];
+      const page = sheet0.nodes[sheet0.rootNodeId];
+      const first = sheet0.nodes[page.childrenIds[0]];
+      const at = first?.style.freeformPosition ?? { x: 120, y: 120 };
+      this.state.camera = { scale: 1, x: page.position.x + at.x + 60, y: page.position.y + at.y + 30 + 120 };
     }
     this.markDirty(doc.documentId); // new doc not persisted until the user saves
     this.upsertEntry(this.activeEntry());

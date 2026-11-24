@@ -1,4 +1,4 @@
-import { freeformOwner, FREEFORM_HEADER, isBarePicture, isFreeTransform } from "../core/freeform";
+import { freeformOwner, FREEFORM_HEADER, isBarePicture, isDiagramPage, isFreeTransform } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, tracePath } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
@@ -1527,9 +1527,15 @@ export class Renderer {
     const vx0 = state.camera.x - state.viewW / 2 / s;
     const vy0 = state.camera.y - state.viewH / 2 / s;
     const vw = state.viewW / s, vh = state.viewH / s;
-    const pages = diagramPages(this.placedNodes(state));
     const { w: PW, h: PH } = DIAGRAM_PAGE;
-    const px = pages.col0 * PW, py = pages.row0 * PH;
+    // The page canvas (the diagram's root) grows with its content; the paper
+    // is that canvas rounded UP to whole pages from its top-left corner.
+    const pageNode = isDiagramPage(state.sheet, state.sheet.rootNodeId) ? state.sheet.rootNodeId : null;
+    const pageRect = pageNode ? this.placedById(state).get(pageNode) : undefined;
+    const pages = pageRect
+      ? { col0: 0, row0: 0, cols: Math.max(1, Math.ceil((pageRect.w - 0.5) / PW)), rows: Math.max(1, Math.ceil((pageRect.h - 0.5) / PH)) }
+      : diagramPages(this.placedNodes(state));
+    const px = pageRect ? pageRect.x : pages.col0 * PW, py = pageRect ? pageRect.y : pages.row0 * PH;
     const pw = pages.cols * PW, ph = pages.rows * PH;
 
     const base = state.background ?? theme.background;
@@ -1836,9 +1842,13 @@ export class Renderer {
    */
   private resolveFill(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     if (n.style.fill) return n.style.fill;
+    // Diagram: draw.io shapes are white boxes on the paper; plain text stays
+    // transparent, and so do containers.
+    if (sheet.structure.structureType === "diagram") {
+      if (n.style.freeform) return "transparent";
+      return n.style.shape && n.style.shape !== "none" ? theme.deepFill : "transparent";
+    }
     if (!n.style.freeform && freeformOwner(sheet, n.id)) return "transparent";
-    // Diagram mode: plain draw.io shapes on the paper, whatever their depth.
-    if (sheet.structure.structureType === "diagram") return theme.deepFill;
     const depth = this.depthOf(n, sheet);
     if (depth === 0) return theme.rootFill;
     if (depth === 1) {
@@ -1923,7 +1933,7 @@ export class Renderer {
     if (borderStyle === "none" || stroke === "transparent") return null;
     // Diagram mode: draw.io's dark outline, not the branch colour.
     if (sheet.structure.structureType === "diagram" && (stroke === undefined || stroke === BRANCH_STROKE)
-      && n.style.shape !== "none" && !freeformOwner(sheet, n.id) && !n.style.freeform && !isBarePicture(n)) {
+      && !!n.style.shape && n.style.shape !== "none" && !n.style.freeform && !isBarePicture(n)) {
       const width = Math.max(borderStyle === "double" ? 3 : 0.5, borderWidth ?? 1.5);
       return { color: theme.text, width, ...borderDash(borderStyle, width), double: borderStyle === "double" };
     }
@@ -2083,6 +2093,9 @@ export class Renderer {
   }
 
   private drawFreeform(theme: RenderTheme, p: Placed, state?: RenderState): void {
+    // A diagram's page is painted as draw.io paper under everything
+    // (drawDiagramPages), not as a canvas box with a title band.
+    if (state && isDiagramPage(state.sheet, p.node.id)) return;
     const ctx = this.ctx;
     ctx.save();
     ctx.fillStyle = p.node.style.fill ?? theme.freeformFill ?? theme.background;
@@ -2426,6 +2439,8 @@ export class Renderer {
     const editing = state.editingId === n.id;
     const selected = state.selection.has(n.id);
     if (n.style.freeform) {
+      // The diagram page has no frame, ring or handles: it is the paper.
+      if (isDiagramPage(state.sheet, n.id)) return;
       if (paintBackground) this.drawFreeform(theme, p);
       if (drawOverlays && (selected || state.hoverId === n.id)) {
         ctx.save(); ctx.strokeStyle = theme.selection;
@@ -2996,7 +3011,7 @@ export class Renderer {
       ctx.shadowBlur = Math.min(24, 8 * k);
       ctx.shadowOffsetY = CONNECTOR_SHADOW_DY * k;
     }
-    this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
+    this.drawRelationship(theme, a, b, rel, rel.color ?? (rel.tree || state.sheet.structure.structureType === "diagram" ? theme.text : theme.selection), state.relSel === rel.id, this.relEnv(state, rel));
     if (shadow) {
       ctx.shadowColor = "transparent";
       ctx.shadowBlur = 0;
@@ -5236,7 +5251,7 @@ export class Renderer {
         if (inCanvas(rel) !== over) continue;
         const a = byId.get(rel.fromId);
         const b = byId.get(rel.toId);
-        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false, this.relEnv(state, rel));
+        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? (rel.tree || state.sheet.structure.structureType === "diagram" ? theme.text : theme.selection), false, this.relEnv(state, rel));
       }
     };
     paintRels(false);
