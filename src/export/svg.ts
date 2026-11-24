@@ -1,6 +1,9 @@
 import { FREEFORM_HEADER, freeformOwner, isBarePicture } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, svgPathData } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
+import { connectorRibbon } from "../layout/connectorRibbon";
+import { getVisualFlags } from "../render/visualFlags";
+import { nodeImageIds } from "../core/ops";
 /**
  * SVG export — the whole map as one vector document.
  *
@@ -169,20 +172,30 @@ function shapeEl(p: { x: number; y: number; w: number; h: number }, shape: strin
   }
 }
 
+function nodeDepth(id: string, sheet: Sheet): number {
+  let depth = 0;
+  let cur: string | null = id;
+  while (cur && cur !== sheet.rootNodeId && depth < 64) {
+    cur = sheet.nodes[cur]?.parentId ?? null;
+    depth++;
+  }
+  return cur === sheet.rootNodeId ? depth : 3;
+}
+
 /**
  * The connector, with the renderer's exact control points — a curve that
  * merely looks similar would show up as every line meeting its box at a
  * slightly wrong angle.
  */
-function connector(parent: Placed, child: Placed, sheet: Sheet, color: string): string {
+function connector(parent: Placed, child: Placed, sheet: Sheet, color: string, taper: boolean): { svg: string; sx: number; sy: number; vertical: boolean; childLeft: boolean } {
   const st = sheet.structure;
   const childLeft = child.x + child.w / 2 < parent.x + parent.w / 2;
-  let sx: number, sy: number, ex: number, ey: number;
-  if (
+  const vertical =
     child.y > parent.y + parent.h - 1 &&
     st.structureType !== "mindmap" &&
-    !(st.structureType === "logic" && st.orientation !== "vertical")
-  ) {
+    !(st.structureType === "logic" && st.orientation !== "vertical");
+  let sx: number, sy: number, ex: number, ey: number;
+  if (vertical) {
     sx = parent.x + parent.w / 2;
     sy = parent.y + parent.h;
     ex = child.x + child.w / 2;
@@ -196,7 +209,19 @@ function connector(parent: Placed, child: Placed, sheet: Sheet, color: string): 
   const dx = Math.abs(ex - sx);
   const cp1x = sx + (childLeft ? -dx * 0.45 : dx * 0.45);
   const cp2x = ex + (childLeft ? dx * 0.45 : -dx * 0.45);
-  return `<path d="M${n3(sx)},${n3(sy)}C${n3(cp1x)},${n3(sy)} ${n3(cp2x)},${n3(ey)} ${n3(ex)},${n3(ey)}" fill="none" stroke="${esc(color)}" stroke-width="1.7"/>`;
+  if (taper) {
+    const depth = nodeDepth(child.node.id, sheet);
+    const { forward: f, backward: b } = connectorRibbon(sx, sy, cp1x, sy, cp2x, ey, ex, ey, depth, vertical);
+    const d = `M${n3(f.x0)},${n3(f.y0)}C${n3(f.cp1x)},${n3(f.cp1y)} ${n3(f.cp2x)},${n3(f.cp2y)} ${n3(f.x1)},${n3(f.y1)}L${n3(b.x0)},${n3(b.y0)}C${n3(b.cp1x)},${n3(b.cp1y)} ${n3(b.cp2x)},${n3(b.cp2y)} ${n3(b.x1)},${n3(b.y1)}Z`;
+    return { svg: `<path d="${d}" fill="${esc(color)}"/>`, sx, sy, vertical, childLeft };
+  }
+  return {
+    svg: `<path d="M${n3(sx)},${n3(sy)}C${n3(cp1x)},${n3(sy)} ${n3(cp2x)},${n3(ey)} ${n3(ex)},${n3(ey)}" fill="none" stroke="${esc(color)}" stroke-width="1.7"/>`,
+    sx,
+    sy,
+    vertical,
+    childLeft,
+  };
 }
 
 /** One head — the shape the canvas paints (layout/relationship.ts, I9). */
@@ -503,12 +528,28 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   }
   // Connectors first, then relationships, so every box paints over the line
   // that reaches it — the arrowheads sit at the borders and stay visible.
+  const vflags = getVisualFlags();
   parts.push("<g>");
+  const seenJunctions = vflags.junctions ? new Set<string>() : null;
+  const junctionDots: string[] = [];
   for (const p of placed) {
     if (!p.node.parentId) continue;
     const parent = byId.get(p.node.parentId);
-    if (parent && !parent.node.style.freeform) parts.push(connector(parent, p, sheet, opts.linkColorOf(p.node.id)));
+    if (parent && !parent.node.style.freeform) {
+      const color = opts.linkColorOf(p.node.id);
+      const res = connector(parent, p, sheet, color, vflags.taper);
+      parts.push(res.svg);
+      if (seenJunctions && nodeDepth(p.node.id, sheet) >= 2) {
+        const side = res.vertical ? "v" : res.childLeft ? "l" : "r";
+        const jKey = `${parent.node.id}|${side}`;
+        if (!seenJunctions.has(jKey)) {
+          seenJunctions.add(jKey);
+          junctionDots.push(`<circle cx="${n3(res.sx)}" cy="${n3(res.sy)}" r="3" fill="${esc(color)}"/>`);
+        }
+      }
+    }
   }
+  for (const dot of junctionDots) parts.push(dot);
   parts.push("</g>");
 
   let relationships = 0;
@@ -547,6 +588,16 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
     parts.push(alpha < 1 ? `<g opacity="${n3(alpha)}"${turn}>` : `<g${turn}>`);
     const shape = isBarePicture(n) ? null : shapeOf(p, fill, opts.borderOf ? opts.borderOf(n.id) : null); // a bare picture has no box
     if (shape) parts.push(shape);
+    const boxShape = n.style.shape ?? "rounded";
+    // The canvas's accent strip: an inset pill inside the padding, never on
+    // pictures or galleries; the text keeps its original place.
+    if (vflags.accentStrip && !n.style.code && !isBarePicture(n) && !n.style.gallery && nodeImageIds(n).length === 0 && !n.style.fill && !freeformOwner(sheet, n.id) && (boxShape === "rounded" || boxShape === "rect") && nodeDepth(n.id, sheet) >= 2) {
+      const parent = n.parentId ? byId.get(n.parentId) : undefined;
+      const onRight = parent ? p.x + p.w / 2 >= parent.x + parent.w / 2 : p.x + p.w / 2 >= 0;
+      const inset = 2, barW = 3, vPad = Math.min(6, p.h * 0.25);
+      const sx = onRight ? p.x + inset : p.x + p.w - inset - barW;
+      parts.push(`<rect x="${n3(sx)}" y="${n3(p.y + vPad)}" width="${barW}" height="${n3(p.h - vPad * 2)}" rx="${n3(barW / 2)}" fill="${esc(opts.linkColorOf(n.id))}"/>`);
+    }
 
     const pos = positionedImageSlots(p, n, resolveImage);
     for (const it of pos.items) {

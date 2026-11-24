@@ -8,6 +8,7 @@ import { installCloseGuard } from "./editor/closeGuard";
 import { TauriStorageAdapter } from "./persist/storage";
 import { BrowserLibraryAdapter } from "./persist/library";
 import { generateStressMap, type StressOptions } from "./dev/stress";
+import { getVisualFlags, resetVisualFlags, setVisualFlags, type VisualFlags } from "./render/visualFlags";
 import "./styles.css";
 
 // Same runtime switch as the asset factory (T19): the Tauri webview carries
@@ -30,6 +31,11 @@ const store = new EditorStore(adapter);
       ...opts,
       onProgress: (f, label) => console.info(`[stress] ${Math.round(f * 100)}% — ${label}`),
     }),
+  visual: {
+    get: (): VisualFlags => ({ ...getVisualFlags() }),
+    set: (partial: Partial<VisualFlags>): VisualFlags => setVisualFlags(partial),
+    reset: (): VisualFlags => resetVisualFlags(),
+  },
 };
 
 void store.boot().then(() => {

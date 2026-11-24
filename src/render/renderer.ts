@@ -23,7 +23,9 @@ import { resolvePaint } from "../core/shapeArt";
 import { asCodeLang, tokenize, type CodeLang } from "../core/codeHighlight";
 import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET, CODE_FONT_STACK, CODE_TITLEBAR_H, captionLines, createCanvasTextMeasurer, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, GALLERY_GAP, CHART_NOTE_MARK, CHART_SLOT_ALPHA, chartGrowHandles, chartGrowPitch, CHART_COLS, imageResolver, LINE_HEIGHT_FACTOR, MAX_IMAGE_W, measureNode, positionedImageSlots, TEXT_INSET, wrapRunLines, type TextMeasurer } from "../layout/measure";
 import { fetchAssetBlobs, getAssetStore, type AssetLevel, type AssetStore } from "../persist/assets";
-import { THEMES, defaultGridPattern, gridInk, lighten, readableOn, type GridPattern, type RenderTheme, type ThemeName } from "./theme";
+import { THEMES, darken, defaultGridPattern, gridInk, lighten, readableOn, type GridPattern, type RenderTheme, type ThemeName } from "./theme";
+import { connectorRibbon, taperWidthsForDepth } from "../layout/connectorRibbon";
+import { getVisualFlags, LOD_BARE, type VisualFlags } from "./visualFlags";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
@@ -111,6 +113,16 @@ export interface RenderState {
    * hand (tests, exports): a wrong cache hit is a wrong picture.
    */
   rev?: number;
+  /** E5: True during pan/zoom gesture or collapse tween for reduced motion quality. */
+  moving?: boolean;
+  /** E2: Scene cache invalidation key (everything except camera). */
+  sceneContentKey?: string;
+  /** E2: True while a wheel/pinch zoom gesture is in progress. */
+  zooming?: boolean;
+  /** V9: Optional per-node position & alpha override during collapse/expand tween. */
+  tween?: Map<string, { x: number; y: number; alpha: number; w?: number; h?: number }> | null;
+  /** V10: Force flat opaque background (used by PNG/PDF exports). */
+  opaque?: boolean;
 }
 
 interface Placed {
@@ -172,6 +184,15 @@ function buildPlacedGrid(placed: Placed[]): PlacedGrid | null {
  * why they must not differ. The weights below are the only thing that may.
  */
 const RING_PAD = 3;
+/** V3 topic shadow, in world units: blur (canvas shadowBlur semantics,
+ *  sigma = blur / 2), how far it reaches past the box (~3 sigma) and how far
+ *  it drops. They scale with the zoom like the boxes do. */
+const SHADOW_BLUR = 10;
+const SHADOW_PAD = 15;
+const SHADOW_DY = 3;
+const CONNECTOR_SHADOW_DY = 2.5;
+/** E2 wheel-zoom shortcut (stretched cached scene). Off: it blurred text and images. */
+const ZOOM_BLIT = false;
 const RING_W_SELECTED = 2.5;
 const RING_W_HOVER = 1.5;
 
@@ -244,6 +265,37 @@ export class Renderer {
   private frameOriginalImages = new Set<string>();
   /** Memoised positionedImageSlots per Placed object. */
   private slotsCache = new WeakMap<Placed, { style: MindNode["style"]; w: number; h: number; slots: ReturnType<typeof positionedImageSlots> }>();
+  /** E3: Memoised branch colour per placement key + theme. */
+  private branchColorCache: { key: string; map: Map<string, string> } | null = null;
+  private curBranchCacheKey: string | null = null;
+  /** E3: Cached Path2D per Placed for traceShape (reused for shadow, fill, border, selection, hover). */
+  private nodeShapePaths = new WeakMap<Placed, { key: string; path: Path2D }>();
+  /** E3: Cached per-colour connector Path2D batches for the current visible set. */
+  private connectorBatchCache: {
+    key: string;
+    visibleRef: Placed[];
+    batches: Array<{ color: string; stroke?: Path2D; fill?: Path2D }>;
+  } | null = null;
+  /** E4: Cheap canvas state tracking (reset per frame and after ctx.restore()). */
+  private curFont = "";
+  private curTextAlign: CanvasTextAlign | "" = "";
+  private curTextBaseline: CanvasTextBaseline | "" = "";
+  private curLineDashSet = false;
+  /** V5: Cached root gradient keyed on theme.name|y|h. */
+  private rootGradCache: { key: string; grad: CanvasGradient } | null = null;
+  /** V7: Memoised hover fill tint per theme|fill. */
+  private hoverFillCache = new Map<string, string>();
+  /** V3: pre-blurred rounded-square shadows, by colour|radius|resolution.
+   *  A handful exist at once (one per corner radius in use). */
+  private shadowSprites = new Map<string, HTMLCanvasElement>();
+  /** E6: Count of topics drawn as greeking bars this frame. */
+  private greekedCount = 0;
+  /** E2: Offscreen scene cache for pan/zoom. */
+  private sceneCacheCanvas: HTMLCanvasElement | null = null;
+  private sceneCacheBuf: HTMLCanvasElement | null = null;
+  private sceneCacheKey: string | null = null;
+  private sceneCacheCam: { x: number; y: number; scale: number } | null = null;
+  private sceneCacheQuality: "full" | "moving" = "full";
   /** Decode failures by key, with when they happened: retried after IMAGE_RETRY_MS
    *  instead of never (a transient read error used to break a picture until restart). */
   private imageFailed = new Map<string, number>();
@@ -316,20 +368,31 @@ export class Renderer {
   }
   private assetStore: AssetStore;
   private onRepaint: (() => void) | null = null;
+  private overlayCanvas: HTMLCanvasElement | null = null;
+  private overlayCtx: CanvasRenderingContext2D | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
-    opts: { assetStore?: AssetStore; onRepaint?: () => void } = {}
+    opts: { assetStore?: AssetStore; onRepaint?: () => void; overlayCanvas?: HTMLCanvasElement | null } = {}
   ) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2d context unavailable");
     this.ctx = ctx;
+    if (opts.overlayCanvas) {
+      this.overlayCanvas = opts.overlayCanvas;
+      this.overlayCtx = opts.overlayCanvas.getContext("2d");
+    }
     // Resolved at construction, not at module scope: getAssetStore() is a
     // singleton that sticks on first call, and module init may run before
     // Tauri injects window.__TAURI__ — the backend must be picked when the
     // renderer is actually created, in the running environment.
     this.assetStore = opts.assetStore ?? getAssetStore();
     this.onRepaint = opts.onRepaint ?? null;
+  }
+
+  setOverlayCanvas(canvas: HTMLCanvasElement | null): void {
+    this.overlayCanvas = canvas;
+    this.overlayCtx = canvas ? canvas.getContext("2d") : null;
   }
 
   resize(canvas: HTMLCanvasElement, cssW: number, cssH: number): void {
@@ -345,10 +408,20 @@ export class Renderer {
     // the map and left it blank until the next animation frame repainted it:
     // one empty frame, on every selection, with nothing in any counter to show
     // for it.
-    if (canvas.width === w && canvas.height === h && this.dpr === dpr) return;
+    if (canvas.width === w && canvas.height === h && this.dpr === dpr) {
+      if (this.overlayCanvas && (this.overlayCanvas.width !== w || this.overlayCanvas.height !== h)) {
+        this.overlayCanvas.width = w;
+        this.overlayCanvas.height = h;
+      }
+      return;
+    }
     this.dpr = dpr;
     canvas.width = w;
     canvas.height = h;
+    if (this.overlayCanvas) {
+      this.overlayCanvas.width = w;
+      this.overlayCanvas.height = h;
+    }
     // Assigning width/height (re)allocates the backing store — a GPU surface
     // (tracer 2.0 render:gpu-alloc).
     trace.mark("render", "render:gpu-alloc", { w, h });
@@ -595,13 +668,305 @@ export class Renderer {
   // -------------------------------------------------------------------------
 
   render(state: RenderState): void {
+    const flags = getVisualFlags();
+    const useOverlay = flags.overlayLayer && this.overlayCtx !== null;
+    if (!useOverlay && this.overlayCtx && this.overlayCanvas) {
+      this.overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+      this.overlayCtx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+    }
+    this.renderScene(state, flags, useOverlay);
+    if (useOverlay) this.renderOverlay(state, flags);
+  }
+
+  renderOverlayOnly(state: RenderState): void {
+    const flags = getVisualFlags();
+    if (!flags.overlayLayer || !this.overlayCtx) {
+      this.render(state);
+      return;
+    }
+    const tStart = typeof performance !== "undefined" ? performance.now() : 0;
+    this.curScale = state.camera.scale;
+    this.curCamX = state.camera.x;
+    this.curCamY = state.camera.y;
+    this.curViewW = state.viewW;
+    this.curViewH = state.viewH;
+    this.renderOverlay(state, flags);
+    trace.render(
+      {
+        scale: state.camera.scale,
+        nodes: 0,
+        visible: 0,
+        rels: 0,
+        relsDrawn: 0,
+        links: 0,
+        linksDrawn: 0,
+        textHits: 0,
+        textMisses: 0,
+        imgVisible: 0,
+        imgCached: this.imageCache.size,
+        imgBytes: this.imageBytes,
+        imgInflight: this.inflightCount,
+        overlayOnly: true,
+        sceneBlit: "none",
+      },
+      (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+    );
+  }
+
+  private ensureSceneCache(w: number, h: number): { main: HTMLCanvasElement; buf: HTMLCanvasElement } | null {
+    if (typeof document === "undefined") return null;
+    if (!this.sceneCacheCanvas) this.sceneCacheCanvas = document.createElement("canvas");
+    if (!this.sceneCacheBuf) this.sceneCacheBuf = document.createElement("canvas");
+    if (this.sceneCacheCanvas.width !== w || this.sceneCacheCanvas.height !== h) {
+      this.sceneCacheCanvas.width = w;
+      this.sceneCacheCanvas.height = h;
+      this.sceneCacheKey = null;
+      this.sceneCacheCam = null;
+    }
+    if (this.sceneCacheBuf.width !== w || this.sceneCacheBuf.height !== h) {
+      this.sceneCacheBuf.width = w;
+      this.sceneCacheBuf.height = h;
+    }
+    return { main: this.sceneCacheCanvas, buf: this.sceneCacheBuf };
+  }
+
+  renderScene(state: RenderState, flags: VisualFlags = getVisualFlags(), skipOverlays = false): void {
+    const tStart = typeof performance !== "undefined" ? performance.now() : 0;
+    const devW = Math.max(1, Math.round(state.viewW * this.dpr));
+    const devH = Math.max(1, Math.round(state.viewH * this.dpr));
+    const canCache = flags.sceneCache && state.sceneContentKey !== undefined && typeof document !== "undefined";
+
+    if (canCache) {
+      const cache = this.ensureSceneCache(devW, devH);
+      if (cache && this.sceneCacheKey === state.sceneContentKey && this.sceneCacheCam) {
+        const s = state.camera.scale;
+        const c0 = this.sceneCacheCam;
+        const wantFull = !(flags.motionQuality && state.moving);
+        // Wheel zoom used to blit the cached scene stretched, which blurred
+        // every text and picture until the gesture ended. Text and images must
+        // look exactly as before E2, so each zoom frame is painted for real;
+        // the stretched blit stays off. Only pan reuses the cache (pixel copy).
+        if (state.zooming && ZOOM_BLIT) {
+          const ctx = this.ctx;
+          const baseTheme = THEMES[state.themeName];
+          const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
+          const transparentVignette = flags.vignette && !state.opaque && !state.background && !state.grid;
+          ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+          ctx.clearRect(0, 0, state.viewW, state.viewH);
+          if (!transparentVignette) {
+            ctx.fillStyle = theme.background;
+            ctx.fillRect(0, 0, state.viewW, state.viewH);
+          }
+          const dx = state.viewW / 2 + (c0.x - state.viewW / (2 * c0.scale) - state.camera.x) * s;
+          const dy = state.viewH / 2 + (c0.y - state.viewH / (2 * c0.scale) - state.camera.y) * s;
+          const dw = state.viewW * (s / c0.scale);
+          const dh = state.viewH * (s / c0.scale);
+          ctx.drawImage(cache.main, dx, dy, dw, dh);
+          trace.render(
+            {
+              scale: s,
+              nodes: 0,
+              visible: 0,
+              rels: 0,
+              relsDrawn: 0,
+              links: 0,
+              linksDrawn: 0,
+              textHits: 0,
+              textMisses: 0,
+              imgVisible: 0,
+              imgCached: this.imageCache.size,
+              imgBytes: this.imageBytes,
+              imgInflight: this.inflightCount,
+              overlayOnly: false,
+              sceneBlit: "zoom",
+              pathBatches: 0,
+              greeked: 0,
+            },
+            (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+          );
+          return;
+        }
+        if (c0.scale === s && !(wantFull && this.sceneCacheQuality === "moving")) {
+          const shiftDx = Math.round((c0.x - state.camera.x) * s * this.dpr);
+          const shiftDy = Math.round((c0.y - state.camera.y) * s * this.dpr);
+          if (shiftDx === 0 && shiftDy === 0) {
+            const ctx = this.ctx;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, devW, devH);
+            ctx.drawImage(cache.main, 0, 0);
+            ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+            trace.render(
+              {
+                scale: s,
+                nodes: 0,
+                visible: 0,
+                rels: 0,
+                relsDrawn: 0,
+                links: 0,
+                linksDrawn: 0,
+                textHits: 0,
+                textMisses: 0,
+                imgVisible: 0,
+                imgCached: this.imageCache.size,
+                imgBytes: this.imageBytes,
+                imgInflight: this.inflightCount,
+                overlayOnly: false,
+                sceneBlit: "pan",
+                pathBatches: 0,
+                greeked: 0,
+              },
+              (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+            );
+            return;
+          }
+          const shiftX = shiftDx / this.dpr;
+          const shiftY = shiftDy / this.dpr;
+          if (Math.abs(shiftX) <= state.viewW * 0.5 && Math.abs(shiftY) <= state.viewH * 0.5) {
+            const cacheCtx = cache.main.getContext("2d");
+            const bufCtx = cache.buf.getContext("2d");
+            if (cacheCtx && bufCtx) {
+              bufCtx.setTransform(1, 0, 0, 1, 0, 0);
+              bufCtx.clearRect(0, 0, devW, devH);
+              bufCtx.drawImage(cache.main, 0, 0);
+              cacheCtx.setTransform(1, 0, 0, 1, 0, 0);
+              cacheCtx.clearRect(0, 0, devW, devH);
+              cacheCtx.drawImage(cache.buf, shiftDx, shiftDy);
+
+              const strips: Array<{ x: number; y: number; w: number; h: number }> = [];
+              if (shiftX !== 0) {
+                strips.push({
+                  x: shiftX > 0 ? 0 : state.viewW + shiftX,
+                  y: 0,
+                  w: Math.abs(shiftX),
+                  h: state.viewH,
+                });
+              }
+              if (shiftY !== 0) {
+                strips.push({
+                  x: shiftX > 0 ? shiftX : 0,
+                  y: shiftY > 0 ? 0 : state.viewH + shiftY,
+                  w: state.viewW - Math.abs(shiftX),
+                  h: Math.abs(shiftY),
+                });
+              }
+              const alignedState: RenderState = {
+                ...state,
+                camera: {
+                  x: c0.x - shiftX / s,
+                  y: c0.y - shiftY / s,
+                  scale: s,
+                },
+              };
+              const liveCtx = this.ctx;
+              this.ctx = cacheCtx;
+              let stats = { nodes: 0, visible: 0, rels: 0, relsDrawn: 0, links: 0, linksDrawn: 0, pathBatches: 0, imgVisible: 0 };
+              try {
+                for (const strip of strips) {
+                  stats = this.paintScenePass(alignedState, flags, skipOverlays, strip);
+                }
+              } finally {
+                this.ctx = liveCtx;
+              }
+              this.sceneCacheCam = { ...alignedState.camera };
+              if (!wantFull) this.sceneCacheQuality = "moving";
+              liveCtx.setTransform(1, 0, 0, 1, 0, 0);
+              liveCtx.clearRect(0, 0, devW, devH);
+              liveCtx.drawImage(cache.main, 0, 0);
+              liveCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+              trace.render(
+                {
+                  scale: s,
+                  nodes: stats.nodes,
+                  visible: stats.visible,
+                  rels: stats.rels,
+                  relsDrawn: stats.relsDrawn,
+                  links: stats.links,
+                  linksDrawn: stats.linksDrawn,
+                  textHits: this.textHits,
+                  textMisses: this.textMisses,
+                  imgVisible: stats.imgVisible,
+                  imgCached: this.imageCache.size,
+                  imgBytes: this.imageBytes,
+                  imgInflight: this.inflightCount,
+                  overlayOnly: false,
+                  sceneBlit: "pan",
+                  pathBatches: stats.pathBatches,
+                  greeked: this.greekedCount,
+                },
+                (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+              );
+              return;
+            }
+          }
+        }
+      }
+    }
+
+    const stats = this.paintScenePass(state, flags, skipOverlays);
+    if (canCache && !state.zooming) {
+      const cache = this.ensureSceneCache(devW, devH);
+      const cacheCtx = cache?.main.getContext("2d");
+      if (cache && cacheCtx) {
+        cacheCtx.setTransform(1, 0, 0, 1, 0, 0);
+        cacheCtx.clearRect(0, 0, devW, devH);
+        cacheCtx.drawImage(this.ctx.canvas, 0, 0);
+        this.sceneCacheKey = state.sceneContentKey!;
+        this.sceneCacheCam = { ...state.camera };
+        this.sceneCacheQuality = flags.motionQuality && state.moving ? "moving" : "full";
+      }
+    }
+
+    trace.render(
+      {
+        scale: state.camera.scale,
+        nodes: stats.nodes,
+        visible: stats.visible,
+        rels: stats.rels,
+        relsDrawn: stats.relsDrawn,
+        links: stats.links,
+        linksDrawn: stats.linksDrawn,
+        textHits: this.textHits,
+        textMisses: this.textMisses,
+        imgVisible: stats.imgVisible,
+        imgCached: this.imageCache.size,
+        imgBytes: this.imageBytes,
+        imgInflight: this.inflightCount,
+        overlayOnly: false,
+        sceneBlit: "none",
+        pathBatches: stats.pathBatches,
+        greeked: this.greekedCount,
+      },
+      (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+    );
+  }
+
+  private paintScenePass(
+    state: RenderState,
+    flags: VisualFlags,
+    skipOverlays: boolean,
+    clipCss?: { x: number; y: number; w: number; h: number }
+  ): { nodes: number; visible: number; rels: number; relsDrawn: number; links: number; linksDrawn: number; pathBatches: number; imgVisible: number } {
     const ctx = this.ctx;
     const baseTheme = THEMES[state.themeName];
     const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
+    this.curBranchCacheKey = null;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.clearRect(0, 0, state.viewW, state.viewH);
-    ctx.fillStyle = theme.background;
-    ctx.fillRect(0, 0, state.viewW, state.viewH);
+    if (clipCss) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
+      ctx.clip();
+      ctx.clearRect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
+    } else {
+      ctx.clearRect(0, 0, state.viewW, state.viewH);
+    }
+    const transparentVignette = flags.vignette && !state.opaque && !state.background && !state.grid;
+    if (!transparentVignette) {
+      ctx.fillStyle = theme.background;
+      if (clipCss) ctx.fillRect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
+      else ctx.fillRect(0, 0, state.viewW, state.viewH);
+    }
+    this.resetCanvasState();
 
     const s = state.camera.scale;
     this.curScale = s;
@@ -618,21 +983,54 @@ export class Renderer {
 
     this.drawGrid(theme, state);
 
-    const tStart = typeof performance !== "undefined" ? performance.now() : 0;
     this.textHits = 0;
     this.textMisses = 0;
+    this.greekedCount = 0;
 
-    const placed = this.placedNodes(state);
-    const visiblePlaced = this.visiblePlacedList(state);
-    const byId = this.placedById(state);
+    const pk = this.placementKey(state);
+    this.curBranchCacheKey = flags.batchedPaths && pk !== null ? `${theme.name}|${pk}` : null;
 
-    // Viewport in world units, with the same 40px margin placedNodes uses.
+    const basePlaced = this.placedNodes(state);
+    const baseVisiblePlaced = this.visiblePlacedList(state);
+    const baseById = this.placedById(state);
+
+    let placed = basePlaced;
+    let visiblePlaced = baseVisiblePlaced;
+    let byId = baseById;
+    if (state.tween && state.tween.size > 0) {
+      const tw = state.tween;
+      const ovById = new Map<string, Placed>();
+      placed = basePlaced.map((p) => {
+        const o = tw.get(p.node.id);
+        const np = o ? { ...p, x: o.x, y: o.y } : p;
+        ovById.set(np.node.id, np);
+        return np;
+      });
+      visiblePlaced = baseVisiblePlaced.map((p) => ovById.get(p.node.id) ?? p);
+      for (const [id, o] of tw) {
+        if (ovById.has(id) || o.alpha <= 0.01) continue;
+        const node = state.sheet.nodes[id];
+        if (!node || !o.w || !o.h) continue;
+        const ghost: Placed = { node, x: o.x, y: o.y, w: o.w, h: o.h, visible: true };
+        ovById.set(id, ghost);
+        placed.push(ghost);
+        visiblePlaced.push(ghost);
+      }
+      byId = ovById;
+    }
+
+    // Viewport in world units (limited to clipCss when repainting pan strips).
     const vw = state.viewW / s;
     const vh = state.viewH / s;
-    const viewMinX = state.camera.x - vw / 2 - 40;
-    const viewMaxX = state.camera.x + vw / 2 + 40;
-    const viewMinY = state.camera.y - vh / 2 - 40;
-    const viewMaxY = state.camera.y + vh / 2 + 40;
+    const viewMinX = clipCss ? (clipCss.x - ox) / s - 40 : state.camera.x - vw / 2 - 40;
+    const viewMaxX = clipCss ? (clipCss.x + clipCss.w - ox) / s + 40 : state.camera.x + vw / 2 + 40;
+    const viewMinY = clipCss ? (clipCss.y - oy) / s - 40 : state.camera.y - vh / 2 - 40;
+    const viewMaxY = clipCss ? (clipCss.y + clipCss.h - oy) / s + 40 : state.camera.y + vh / 2 + 40;
+    if (clipCss) {
+      visiblePlaced = visiblePlaced.filter(
+        (p) => p.x + p.w >= viewMinX && p.x <= viewMaxX && p.y + p.h >= viewMinY && p.y <= viewMaxY
+      );
+    }
     /**
      * A line between two boxes is on screen whenever the box that CONTAINS
      * both of them is — not only when both endpoints are individually visible.
@@ -645,6 +1043,20 @@ export class Renderer {
         Math.min(a.x, b.x) <= viewMaxX &&
         Math.max(a.y + a.h, b.y + b.h) >= viewMinY &&
         Math.min(a.y, b.y) <= viewMaxY);
+
+    // V3: soft shadows under every topic and canvas, before anything else so
+    // connectors and arrows lie on top of them. Each one is a 9-slice of a
+    // pre-blurred sprite (see drawShadowSprite): no shadowBlur per node.
+    const shadowsOn = flags.flatShadow && !(flags.lod && s < LOD_BARE);
+    const shadowsMoving = flags.motionQuality && !!state.moving;
+    if (shadowsOn) {
+      for (const p of visiblePlaced) {
+        const sh = this.spriteShadowOf(p, state.sheet, flags);
+        if (sh === null) continue;
+        const alpha = (p.node.style.opacity ?? 1) * (state.tween?.get(p.node.id)?.alpha ?? 1);
+        if (alpha > 0.01) this.drawShadowSprite(ctx, theme.shadow, p, sh, alpha);
+      }
+    }
 
     for (const p of visiblePlaced) if (p.node.style.freeform) this.drawFreeform(theme, p, state);
 
@@ -666,35 +1078,188 @@ export class Renderer {
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
         if (freeformOwner(state.sheet, rel.fromId) && freeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
-        else this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
+        else this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn && !shadowsMoving);
       }
     }
 
-    // 2) connectors
+    // 2) connectors (+ V6 junction dots)
     let links = 0;
     let linksDrawn = 0;
+    let pathBatches = 0;
     // An open chart note's branch floats over the map (over its own chart,
     // first of all): its connectors are painted with it, in step 3, or the
     // chart box would cover the stretch next to the note.
     const noteLinks: [Placed, Placed][] = [];
-    for (const p of placed) {
-      if (!p.node.parentId) continue;
-      const parent = byId.get(p.node.parentId);
-      if (!parent || parent.node.style.freeform) continue;
-      links++;
-      if (!linkVisible(parent, p)) continue;
-      linksDrawn++;
-      if (chartNoteRoot(state.sheet, parent.node.id)) {
-        noteLinks.push([parent, p]);
-        continue;
+    const structure = state.sheet.structure.structureType;
+    const orientation = state.sheet.structure.orientation;
+    const motionReduced = flags.motionQuality && !!state.moving;
+    const lodBare = flags.lod && s < LOD_BARE;
+    const useTaper = flags.taper && !motionReduced && !lodBare;
+    const showJunctions = flags.junctions && !motionReduced && !lodBare;
+    const taperBucket = !useTaper
+      ? 0
+      : s >= 0.75 / 1.6
+        ? 4
+        : s >= 0.75 / 2
+          ? 3
+          : s >= 0.75 / 3.2
+            ? 2
+            : s >= 0.75 / 7
+              ? 1
+              : 0;
+    const junctionDots: Array<{ x: number; y: number; color: string }> = [];
+    const seenJunctions = showJunctions ? new Set<string>() : null;
+
+    const tweenActive = !!(state.tween && state.tween.size > 0);
+    if (flags.batchedPaths && !tweenActive && typeof Path2D !== "undefined") {
+      const batchKey = pk !== null ? `${pk}|${theme.name}|${structure}|${orientation}|t${taperBucket}` : null;
+      let batches: Array<{ color: string; stroke?: Path2D; fill?: Path2D }> | null =
+        batchKey !== null && this.connectorBatchCache?.key === batchKey && this.connectorBatchCache.visibleRef === visiblePlaced
+          ? this.connectorBatchCache.batches
+          : null;
+      const byColor = batches ? null : new Map<string, { color: string; stroke?: Path2D; fill?: Path2D }>();
+      for (const p of placed) {
+        if (!p.node.parentId) continue;
+        const parent = byId.get(p.node.parentId);
+        if (!parent || parent.node.style.freeform) continue;
+        links++;
+        if (!linkVisible(parent, p)) continue;
+        linksDrawn++;
+        if (chartNoteRoot(state.sheet, parent.node.id)) {
+          noteLinks.push([parent, p]);
+          continue;
+        }
+        const color = this.branchColor(theme, p.node, state.sheet);
+        const depth = flags.taper || flags.junctions ? this.depthOf(p.node, state.sheet) : 0;
+        if (seenJunctions && depth >= 2 && parent.visible) {
+          const ep = this.connectorEndpoints(parent, p, structure, orientation);
+          const side = ep.vertical ? "v" : p.x + p.w / 2 < parent.x + parent.w / 2 ? "l" : "r";
+          const jKey = `${parent.node.id}|${side}`;
+          if (!seenJunctions.has(jKey)) {
+            seenJunctions.add(jKey);
+            junctionDots.push({ x: ep.sx, y: ep.sy, color });
+          }
+        }
+        if (byColor) {
+          let entry = byColor.get(color);
+          if (!entry) {
+            entry = { color };
+            byColor.set(color, entry);
+          }
+          if (useTaper && taperWidthsForDepth(depth)[0] * s >= 0.75) {
+            if (!entry.fill) entry.fill = new Path2D();
+            this.appendConnectorRibbon(entry.fill, parent, p, structure, orientation, depth);
+          } else {
+            if (!entry.stroke) entry.stroke = new Path2D();
+            this.appendConnectorStroke(entry.stroke, parent, p, structure, orientation);
+          }
+        }
       }
-      this.drawConnector(
-        parent,
-        p,
-        state.sheet.structure.structureType,
-        state.sheet.structure.orientation,
-        this.branchColor(theme, p.node, state.sheet)
-      );
+      if (byColor) {
+        batches = Array.from(byColor.values());
+        if (batchKey !== null) {
+          this.connectorBatchCache = { key: batchKey, visibleRef: visiblePlaced, batches };
+        }
+      }
+      if (batches) {
+        // V3: connector shadows. All colours merged into one stroke path and
+        // one ribbon path, so overlapping branches near a parent do not stack
+        // into dark knots; a wide faint pass then a narrow one fake the blur.
+        if (shadowsOn && !shadowsMoving) {
+          const strokes = new Path2D();
+          const ribbons = new Path2D();
+          for (const b of batches) {
+            if (b.stroke) strokes.addPath(b.stroke);
+            if (b.fill) ribbons.addPath(b.fill);
+          }
+          ctx.save();
+          ctx.translate(0, CONNECTOR_SHADOW_DY);
+          ctx.strokeStyle = theme.shadow;
+          ctx.fillStyle = theme.shadow;
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.globalAlpha = 0.5;
+          ctx.lineWidth = 6;
+          ctx.stroke(strokes);
+          ctx.stroke(ribbons);
+          ctx.globalAlpha = 0.8;
+          ctx.lineWidth = 2.5;
+          ctx.stroke(strokes);
+          ctx.fill(ribbons);
+          ctx.restore();
+          pathBatches += 4;
+        }
+        ctx.lineWidth = lodBare ? 1 / s : 1.7;
+        for (const b of batches) {
+          if (b.fill) {
+            ctx.fillStyle = b.color;
+            ctx.fill(b.fill);
+            pathBatches++;
+          }
+          if (b.stroke) {
+            ctx.strokeStyle = b.color;
+            ctx.stroke(b.stroke);
+            pathBatches++;
+          }
+        }
+      }
+    } else {
+      for (const p of placed) {
+        if (!p.node.parentId) continue;
+        const parent = byId.get(p.node.parentId);
+        if (!parent || parent.node.style.freeform) continue;
+        links++;
+        if (!linkVisible(parent, p)) continue;
+        linksDrawn++;
+        if (chartNoteRoot(state.sheet, parent.node.id)) {
+          noteLinks.push([parent, p]);
+          continue;
+        }
+        const color = this.branchColor(theme, p.node, state.sheet);
+        const depth = flags.taper || flags.junctions ? this.depthOf(p.node, state.sheet) : 0;
+        if (seenJunctions && depth >= 2 && parent.visible) {
+          const ep = this.connectorEndpoints(parent, p, structure, orientation);
+          const side = ep.vertical ? "v" : p.x + p.w / 2 < parent.x + parent.w / 2 ? "l" : "r";
+          const jKey = `${parent.node.id}|${side}`;
+          if (!seenJunctions.has(jKey)) {
+            seenJunctions.add(jKey);
+            junctionDots.push({ x: ep.sx, y: ep.sy, color });
+          }
+        }
+        const linkAlpha = tweenActive ? (state.tween?.get(p.node.id)?.alpha ?? 1) : 1;
+        if (linkAlpha !== 1) ctx.globalAlpha = linkAlpha;
+        this.drawConnector(parent, p, structure, orientation, color, useTaper ? depth : 0, s, lodBare);
+        if (linkAlpha !== 1) ctx.globalAlpha = 1;
+        pathBatches++;
+      }
+    }
+
+    // V6: Junction dots (batched by colour when batchedPaths is on)
+    if (junctionDots.length > 0) {
+      const tweenActive = !!(state.tween && state.tween.size > 0);
+    if (flags.batchedPaths && !tweenActive && typeof Path2D !== "undefined") {
+        const jBatches = new Map<string, Path2D>();
+        for (const d of junctionDots) {
+          let path = jBatches.get(d.color);
+          if (!path) {
+            path = new Path2D();
+            jBatches.set(d.color, path);
+          }
+          path.moveTo(d.x + 3, d.y);
+          path.arc(d.x, d.y, 3, 0, Math.PI * 2);
+        }
+        for (const [color, path] of jBatches) {
+          ctx.fillStyle = color;
+          ctx.fill(path);
+        }
+      } else {
+        for (const d of junctionDots) {
+          ctx.fillStyle = d.color;
+          ctx.beginPath();
+          ctx.arc(d.x, d.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
 
     // 3) nodes
@@ -703,16 +1268,58 @@ export class Renderer {
         for (const [parent, kid] of noteLinks) {
           // Mind-map style whatever the sheet's structure: the branch runs
           // to the right of the note, which is what the layout placed.
-          this.drawConnector(parent, kid, "mindmap", "horizontal", this.branchColor(theme, kid.node, state.sheet));
+          const kd = useTaper ? this.depthOf(kid.node, state.sheet) : 0;
+          this.drawConnector(parent, kid, "mindmap", "horizontal", this.branchColor(theme, kid.node, state.sheet), kd, s, lodBare);
         }
         noteLinks.length = 0;
       }
-      this.drawNode(theme, p, state, false);
+      this.drawNode(theme, p, state, false, flags, byId, !skipOverlays);
     }
-    for (const [a, b, rel] of overRels) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
+    for (const [a, b, rel] of overRels) this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn && !shadowsMoving);
     // Handwriting goes over the items on its canvas, to annotate them.
     for (const p of visiblePlaced) if (p.node.style.freeform) this.drawInk(theme, p, state);
 
+    // 4) groups & summaries (drawn over the nodes, geometry derived from members)
+    this.drawGroupsAndSummaries(theme, state, byId);
+
+    if (!skipOverlays) {
+      this.drawOverlayElements(ctx, theme, state, visiblePlaced, byId);
+    }
+
+    this.curBranchCacheKey = null;
+    if (clipCss) {
+      ctx.restore();
+      this.resetCanvasState();
+    }
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+
+    // Evict only at the end of the frame: a closed bitmap still referenced by
+    // the current paint would throw.
+    this.evictToBudget();
+    this.flushDecodeQueue();
+
+    return {
+      nodes: placed.length,
+      visible: visiblePlaced.length,
+      rels,
+      relsDrawn,
+      links,
+      linksDrawn,
+      pathBatches,
+      imgVisible: placed.filter(
+        (p) => p.visible && nodeImageIds(p.node).some((id) => !!this.resolveImage?.(id))
+      ).length,
+    };
+  }
+
+  private drawOverlayElements(
+    ctx: CanvasRenderingContext2D,
+    theme: RenderTheme,
+    state: RenderState,
+    visiblePlaced: Placed[],
+    byId: Map<string, Placed>
+  ): void {
+    const s = state.camera.scale;
     // 3b) in-map search highlights. Drawn from the placed list, so only VISIBLE
     // matches are ringed — a match inside a collapsed branch is not on screen,
     // and the bar's count is what reports how many exist in total. The current
@@ -729,9 +1336,6 @@ export class Renderer {
         ctx.setLineDash([]);
       }
     }
-
-    // 4) groups & summaries (drawn over the nodes, geometry derived from members)
-    this.drawGroupsAndSummaries(theme, state, byId);
 
     if (!state.hideStudyMarkers) {
       let targets = this.quizMarkerCache?.sheet === state.sheet && state.rev !== undefined && this.quizMarkerCache.rev === state.rev
@@ -764,36 +1368,45 @@ export class Renderer {
       const p = byId.get(state.chartGrow.id);
       if (p) this.drawChartGrowPreview(theme, p, state.chartGrow);
     }
+  }
 
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  renderOverlay(state: RenderState, flags: VisualFlags = getVisualFlags()): void {
+    const octx = this.overlayCtx;
+    if (!octx) return;
+    const baseTheme = THEMES[state.themeName];
+    const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
+    const s = state.camera.scale;
+    octx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    octx.clearRect(0, 0, state.viewW, state.viewH);
+    const ox = state.viewW / 2 - state.camera.x * s;
+    const oy = state.viewH / 2 - state.camera.y * s;
+    octx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
-    // Evict only at the end of the frame: a closed bitmap still referenced by
-    // the current paint would throw.
-    this.evictToBudget();
-    this.flushDecodeQueue();
+    const visiblePlaced = this.visiblePlacedList(state);
+    const byId = this.placedById(state);
 
-    // Per-frame counters: they are what separates "not drawn" from "drawn but
-    // invisible" when someone reports something missing on screen.
-    trace.render(
-      {
-        scale: s,
-        nodes: placed.length,
-        visible: visiblePlaced.length,
-        rels,
-        relsDrawn,
-        links,
-        linksDrawn,
-        textHits: this.textHits,
-        textMisses: this.textMisses,
-        imgVisible: placed.filter(
-          (p) => p.visible && nodeImageIds(p.node).some((id) => !!this.resolveImage?.(id))
-        ).length,
-        imgCached: this.imageCache.size,
-        imgBytes: this.imageBytes,
-        imgInflight: this.inflightCount,
-      },
-      (typeof performance !== "undefined" ? performance.now() : 0) - tStart
-    );
+    const liveCtx = this.ctx;
+    this.ctx = octx;
+    this.resetCanvasState();
+    try {
+      for (const p of visiblePlaced) {
+        const id = p.node.id;
+        const needsOverlay =
+          state.selection.has(id) ||
+          state.hoverId === id ||
+          !!state.marqueeSel?.has(id) ||
+          state.imageSel === id ||
+          state.gallerySel?.nodeId === id;
+        if (needsOverlay) {
+          this.drawNodeOverlay(octx, theme, p, state, flags);
+        }
+      }
+      this.drawOverlayElements(octx, theme, state, visiblePlaced, byId);
+    } finally {
+      this.ctx = liveCtx;
+      this.resetCanvasState();
+    }
+    octx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   }
 
   // -------------------------------------------------------------------------
@@ -883,20 +1496,16 @@ export class Renderer {
     strokeLines(minor * MAJOR_EVERY, gridInk(theme.background, MAJOR_A));
   }
 
-  private drawConnector(
+  private connectorEndpoints(
     parent: Placed,
     child: Placed,
     structure: StructureType,
-    orientation: Orientation,
-    color: string
-  ): void {
-    const ctx = this.ctx;
-    void structure;
+    orientation: Orientation
+  ): { sx: number; sy: number; cp1x: number; cp1y: number; cp2x: number; cp2y: number; ex: number; ey: number; vertical: boolean } {
     const childLeft = child.x + child.w / 2 < parent.x + parent.w / 2;
+    const vertical = child.y > parent.y + parent.h - 1 && structure !== "mindmap" && !(structure === "logic" && orientation !== "vertical");
     let sx: number, sy: number, ex: number, ey: number;
-    // vertical connector when child is below parent and structure supports vertical layouts
-    if (child.y > parent.y + parent.h - 1 && structure !== "mindmap" && !(structure === "logic" && orientation !== "vertical")) {
-      // vertical tree: parent bottom -> child top
+    if (vertical) {
       sx = parent.x + parent.w / 2;
       sy = parent.y + parent.h;
       ex = child.x + child.w / 2;
@@ -910,11 +1519,67 @@ export class Renderer {
     const dx = Math.abs(ex - sx);
     const cp1x = sx + (childLeft ? -dx * 0.45 : dx * 0.45);
     const cp2x = ex + (childLeft ? dx * 0.45 : -dx * 0.45);
+    return { sx, sy, cp1x, cp1y: sy, cp2x, cp2y: ey, ex, ey, vertical };
+  }
+
+  private appendConnectorStroke(
+    path: Path2D,
+    parent: Placed,
+    child: Placed,
+    structure: StructureType,
+    orientation: Orientation
+  ): void {
+    const { sx, sy, cp1x, cp1y, cp2x, cp2y, ex, ey } = this.connectorEndpoints(parent, child, structure, orientation);
+    path.moveTo(sx, sy);
+    path.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, ex, ey);
+  }
+
+  private appendConnectorRibbon(
+    path: Path2D,
+    parent: Placed,
+    child: Placed,
+    structure: StructureType,
+    orientation: Orientation,
+    depth: number
+  ): void {
+    const { sx, sy, cp1x, cp1y, cp2x, cp2y, ex, ey, vertical } = this.connectorEndpoints(parent, child, structure, orientation);
+    const { forward: f, backward: b } = connectorRibbon(sx, sy, cp1x, cp1y, cp2x, cp2y, ex, ey, depth, vertical);
+    path.moveTo(f.x0, f.y0);
+    path.bezierCurveTo(f.cp1x, f.cp1y, f.cp2x, f.cp2y, f.x1, f.y1);
+    path.lineTo(b.x0, b.y0);
+    path.bezierCurveTo(b.cp1x, b.cp1y, b.cp2x, b.cp2y, b.x1, b.y1);
+    path.closePath();
+  }
+
+  private drawConnector(
+    parent: Placed,
+    child: Placed,
+    structure: StructureType,
+    orientation: Orientation,
+    color: string,
+    taperDepth = 0,
+    scale = 1,
+    lodBare = false
+  ): void {
+    const ctx = this.ctx;
+    const { sx, sy, cp1x, cp1y, cp2x, cp2y, ex, ey, vertical } = this.connectorEndpoints(parent, child, structure, orientation);
+    if (!lodBare && taperDepth > 0 && taperWidthsForDepth(taperDepth)[0] * scale >= 0.75) {
+      const { forward: f, backward: b } = connectorRibbon(sx, sy, cp1x, cp1y, cp2x, cp2y, ex, ey, taperDepth, vertical);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(f.x0, f.y0);
+      ctx.bezierCurveTo(f.cp1x, f.cp1y, f.cp2x, f.cp2y, f.x1, f.y1);
+      ctx.lineTo(b.x0, b.y0);
+      ctx.bezierCurveTo(b.cp1x, b.cp1y, b.cp2x, b.cp2y, b.x1, b.y1);
+      ctx.closePath();
+      ctx.fill();
+      return;
+    }
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.7;
+    ctx.lineWidth = lodBare ? 1 / scale : 1.7;
     ctx.beginPath();
     ctx.moveTo(sx, sy);
-    ctx.bezierCurveTo(cp1x, sy, cp2x, ey, ex, ey);
+    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, ex, ey);
     ctx.stroke();
   }
 
@@ -932,7 +1597,24 @@ export class Renderer {
     const n = state.sheet.nodes[id];
     if (!n) return null;
     const theme = THEMES[state.themeName];
-    return { fill: this.resolveFill(theme, n, state.sheet), text: n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text) };
+    const flags = getVisualFlags();
+    const depth = this.depthOf(n, state.sheet);
+    const boxShape = n.style.code ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded";
+    const accent =
+      flags.accentStrip &&
+      depth >= 2 &&
+      !n.style.fill &&
+      !n.style.code &&
+      !isBarePicture(n) &&
+      // Pictures and galleries are framed by their image: a bar down one
+      // side of a photo reads as a misplaced drop shadow, not as a colour cue.
+      !n.style.gallery &&
+      nodeImageIds(n).length === 0 &&
+      (boxShape === "rounded" || boxShape === "rect") &&
+      !freeformOwner(state.sheet, n.id);
+    const fill = accent ? theme.deepFill : this.resolveFill(theme, n, state.sheet);
+    const text = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
+    return { fill, text };
   }
 
   /**
@@ -1040,6 +1722,18 @@ export class Renderer {
   }
 
   private branchColor(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
+    if (this.curBranchCacheKey !== null) {
+      if (this.branchColorCache?.key !== this.curBranchCacheKey) {
+        this.branchColorCache = { key: this.curBranchCacheKey, map: new Map() };
+      }
+      const cached = this.branchColorCache.map.get(n.id);
+      if (cached !== undefined) return cached;
+      const branchRootId = this.branchRoot(n, sheet);
+      const branchRoot = sheet.nodes[branchRootId];
+      const color = branchRoot?.style.fill ?? theme.branch[this.branchIndex(n, sheet)];
+      this.branchColorCache.map.set(n.id, color);
+      return color;
+    }
     const branchRootId = this.branchRoot(n, sheet);
     const branchRoot = sheet.nodes[branchRootId];
     return branchRoot?.style.fill ?? theme.branch[this.branchIndex(n, sheet)];
@@ -1084,9 +1778,49 @@ export class Renderer {
    * it was looked for in the painting. Only the WEIGHT may distinguish these
    * states; a ring that also moves reads as the node itself twitching.
    */
+  private resetCanvasState(): void {
+    this.curFont = "";
+    this.curTextAlign = "";
+    this.curTextBaseline = "";
+    this.curLineDashSet = false;
+  }
+
+  private setFont(ctx: CanvasRenderingContext2D, font: string): void {
+    if (this.curFont !== font) {
+      ctx.font = font;
+      this.curFont = font;
+    }
+  }
+
+  private setTextAlign(ctx: CanvasRenderingContext2D, align: CanvasTextAlign): void {
+    if (this.curTextAlign !== align) {
+      ctx.textAlign = align;
+      this.curTextAlign = align;
+    }
+  }
+
+  private setTextBaseline(ctx: CanvasRenderingContext2D, baseline: CanvasTextBaseline): void {
+    if (this.curTextBaseline !== baseline) {
+      ctx.textBaseline = baseline;
+      this.curTextBaseline = baseline;
+    }
+  }
+
+  private setDash(ctx: CanvasRenderingContext2D, dash: number[]): void {
+    if (dash.length === 0) {
+      if (this.curLineDashSet) {
+        ctx.setLineDash([]);
+        this.curLineDashSet = false;
+      }
+    } else {
+      ctx.setLineDash(dash);
+      this.curLineDashSet = true;
+    }
+  }
+
   private strokeRing(ctx: CanvasRenderingContext2D, p: { x: number; y: number; w: number; h: number }, lineWidth: number): void {
     ctx.lineWidth = lineWidth;
-    ctx.setLineDash([]);
+    this.setDash(ctx, []);
     ctx.strokeRect(p.x - RING_PAD, p.y - RING_PAD, p.w + RING_PAD * 2, p.h + RING_PAD * 2);
   }
 
@@ -1187,14 +1921,294 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawNode(theme: RenderTheme, p: Placed, state: RenderState, paintBackground = true): void {
+  private hoverFill(fill: string, themeName: ThemeName): string {
+    if (fill === "transparent") return fill;
+    const key = `${themeName}|${fill}`;
+    let out = this.hoverFillCache.get(key);
+    if (out !== undefined) return out;
+    out = themeName === "dark" ? lighten(fill, 0.1) : darken(fill, 0.05);
+    this.hoverFillCache.set(key, out);
+    return out;
+  }
+
+  private strokeSoftRing(
+    ctx: CanvasRenderingContext2D,
+    p: { x: number; y: number; w: number; h: number },
+    shape: string,
+    radius: number,
+    color: string,
+    baseAlpha: number
+  ): void {
+    const ringShape = shape === "none" ? "rounded" : shape;
+    const baseRadius = shape === "none" ? 10 : radius;
+    this.setDash(ctx, []);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = baseAlpha * 0.22;
+    ctx.lineWidth = 6;
+    this.traceShape(ctx, { ...p, x: p.x - 3, y: p.y - 3, w: p.w + 6, h: p.h + 6 }, ringShape, baseRadius + 3);
+    ctx.stroke();
+    ctx.globalAlpha = baseAlpha;
+    ctx.lineWidth = 2;
+    this.traceShape(ctx, { ...p, x: p.x - 1.5, y: p.y - 1.5, w: p.w + 3, h: p.h + 3 }, ringShape, baseRadius + 1.5);
+    ctx.stroke();
+  }
+
+  /** V6: Shared geometry for the collapsed pill badge (used by both draw and hit-test). */
+  collapsedBadgeRect(
+    ctx: CanvasRenderingContext2D,
+    p: { x: number; y: number; w: number; h: number },
+    count: number
+  ): { x: number; y: number; w: number; h: number; r: number; label: string } {
+    const label = `+${count}`;
+    this.setFont(ctx, `600 11px system-ui, sans-serif`);
+    const w = Math.ceil(ctx.measureText(label).width + 12);
+    const h = 18;
+    const isLeft = p.x + p.w / 2 < 0;
+    const x = isLeft ? p.x - 6 - w : p.x + p.w + 6;
+    const y = p.y + p.h / 2 - h / 2;
+    return { x, y, w, h, r: 9, label };
+  }
+
+  private drawNodeOverlay(
+    ctx: CanvasRenderingContext2D,
+    theme: RenderTheme,
+    p: Placed,
+    state: RenderState,
+    flags: VisualFlags
+  ): void {
+    const n = p.node;
+    const selected = state.selection.has(n.id);
+    if (n.style.freeform) {
+      if (selected || state.hoverId === n.id) {
+        ctx.save();
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, p, selected ? RING_W_SELECTED : RING_W_HOVER);
+        if (selected) {
+          ctx.fillStyle = theme.selection;
+          const hs = 8 / state.camera.scale;
+          for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) {
+            ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
+          }
+        }
+        ctx.restore();
+        this.resetCanvasState();
+      }
+      return;
+    }
+
+    const isCode = !!n.style.code;
+    const isTopic = !n.style.freeform && !freeformOwner(state.sheet, n.id);
+    const boxShape = isCode ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded";
+    let boxRadius = isCode ? 8 : n.style.cornerRadius ?? 10;
+    if (flags.rootPolish && n.type === "central" && boxShape !== "none" && !isCode) boxRadius += 4;
+    const tweenAlpha = state.tween?.get(n.id)?.alpha ?? 1;
+    const opacity = (n.style.opacity ?? 1) * tweenAlpha;
+    const rotated = !!n.style.rotation;
+
+    if (rotated) {
+      ctx.save();
+      const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate((n.style.rotation! * Math.PI) / 180);
+      ctx.translate(-cx, -cy);
+    }
+    if (opacity !== 1) ctx.globalAlpha = opacity;
+
+    // E1 + V7: hover tint on the overlay instead of repainting the scene
+    if (flags.softSelect && isTopic && state.hoverId === n.id && !selected) {
+      const tint = theme.name === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.05)";
+      const cachedPath = this.getNodeShapePath(p, boxShape, boxRadius);
+      ctx.fillStyle = tint;
+      if (cachedPath) {
+        ctx.fill(cachedPath);
+      } else if (boxShape !== "none") {
+        this.traceShape(ctx, p, boxShape, boxRadius);
+        ctx.fill();
+      }
+    }
+
+    if (selected) {
+      if (flags.softSelect && isTopic) {
+        this.strokeSoftRing(ctx, p, boxShape, boxRadius, theme.selection, opacity);
+      } else {
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, p, RING_W_SELECTED);
+      }
+
+      const hs = 9;
+      const hy = p.y + p.h / 2 - hs / 2;
+      for (const hx of [p.x - hs / 2, p.x + p.w - hs / 2]) {
+        ctx.beginPath();
+        this.roundRect(ctx, hx, hy, hs, hs, 2);
+        ctx.strokeStyle = theme.background;
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+
+      if (freeformOwner(state.sheet, n.id) && !n.style.chartNote) {
+        const s = state.camera.scale;
+        const cs = 8 / s;
+        if (isFreeTransform(state.sheet, n)) {
+          const mx = p.x + p.w / 2, my = p.y + p.h / 2;
+          const rotStem = 22 / s;
+          ctx.beginPath();
+          ctx.moveTo(mx, p.y);
+          ctx.lineTo(mx, p.y - rotStem);
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 1.5 / s;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(mx, p.y - rotStem, 4.5 / s, 0, Math.PI * 2);
+          ctx.fillStyle = theme.background;
+          ctx.fill();
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 1.6 / s;
+          ctx.stroke();
+
+          const handles: [number, number][] = [
+            [p.x, p.y], [mx, p.y], [p.x + p.w, p.y],
+            [p.x, my], [p.x + p.w, my],
+            [p.x, p.y + p.h], [mx, p.y + p.h], [p.x + p.w, p.y + p.h],
+          ];
+          ctx.fillStyle = theme.background;
+          ctx.strokeStyle = theme.selection;
+          ctx.lineWidth = 1.6 / s;
+          for (const [cx, cy] of handles) {
+            ctx.fillRect(cx - cs / 2, cy - cs / 2, cs, cs);
+            ctx.strokeRect(cx - cs / 2, cy - cs / 2, cs, cs);
+          }
+        } else {
+          ctx.fillStyle = theme.selection;
+          for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) {
+            ctx.fillRect(cx - cs / 2, cy - cs / 2, cs, cs);
+          }
+        }
+      }
+
+      for (const hnd of chartGrowHandles(p, this.curScale)) {
+        const live = state.chartGrow?.id === n.id && state.chartGrow.grow === hnd.grow ? state.chartGrow : null;
+        const off = live?.offset ?? 0;
+        const x = hnd.x + (hnd.grow === "col" ? off : 0);
+        const y = hnd.y + (hnd.grow === "row" ? off : 0);
+        const thick = Math.min(hnd.w, hnd.h);
+        ctx.beginPath();
+        this.roundRect(ctx, x, y, hnd.w, hnd.h, thick / 2);
+        ctx.fillStyle = live ? theme.selection : theme.background;
+        ctx.fill();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = thick / 12;
+        ctx.stroke();
+        const fg = live ? theme.background : theme.selection;
+        const cx = x + hnd.w / 2;
+        const cy = y + hnd.h / 2;
+        const arm = thick / 4.5;
+        const ax = hnd.grow === "col" ? 1 : 0;
+        const ay = 1 - ax;
+        ctx.strokeStyle = fg;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.lineWidth = thick / 10;
+        ctx.beginPath();
+        ctx.moveTo(cx - arm, cy);
+        ctx.lineTo(cx + arm, cy);
+        ctx.moveTo(cx, cy - arm);
+        ctx.lineTo(cx, cy + arm);
+        ctx.stroke();
+        const reach = Math.max(hnd.w, hnd.h) / 2 - thick * 0.32;
+        const chev = thick * 0.16;
+        ctx.lineWidth = thick / 13;
+        ctx.beginPath();
+        for (const sgn of [-1, 1]) {
+          const tx = cx + ax * sgn * reach;
+          const ty = cy + ay * sgn * reach;
+          ctx.moveTo(tx - ax * sgn * chev + ay * chev, ty - ay * sgn * chev + ax * chev);
+          ctx.lineTo(tx, ty);
+          ctx.lineTo(tx - ax * sgn * chev - ay * chev, ty - ay * sgn * chev - ax * chev);
+        }
+        ctx.stroke();
+        ctx.lineCap = "butt";
+      }
+    }
+
+    if (selected || state.imageSel === n.id) {
+      const hs = 9;
+      const ir = this.selectedImageRect(state, p);
+      if (ir) {
+        const hx = ir.x + ir.w - hs / 2;
+        const hy = ir.y + ir.h - hs / 2;
+        ctx.beginPath();
+        this.roundRect(ctx, hx, hy, hs, hs, 2);
+        ctx.strokeStyle = theme.background;
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+        ctx.strokeStyle = theme.selection;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+    }
+
+    if (!selected && state.marqueeSel?.has(n.id)) {
+      if (flags.softSelect && isTopic) {
+        this.strokeSoftRing(ctx, p, boxShape, boxRadius, theme.selection, opacity);
+      } else {
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, p, RING_W_SELECTED);
+      }
+    }
+
+    if (state.imageSel === n.id) {
+      const ir = this.selectedImageRect(state, p);
+      if (ir) {
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, ir, RING_W_SELECTED);
+      }
+    }
+
+    if (state.gallerySel?.nodeId === n.id) {
+      const { cells, gallery } = this.imageSlots(p);
+      const c = cells[state.gallerySel.index];
+      if (c) {
+        const h = c.h + (gallery && gallery.captionH > 0 ? gallery.captionH : 0);
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, { x: c.x, y: c.y, w: c.w, h }, RING_W_SELECTED);
+      }
+    }
+
+    if (state.hoverId === n.id && !selected && !(flags.softSelect && isTopic)) {
+      ctx.strokeStyle = theme.selection;
+      ctx.globalAlpha = opacity * 0.55;
+      this.strokeRing(ctx, p, RING_W_HOVER);
+      ctx.globalAlpha = opacity;
+    }
+
+    if (rotated) {
+      ctx.restore();
+      this.resetCanvasState();
+    } else if (opacity !== 1) {
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  private drawNode(
+    theme: RenderTheme,
+    p: Placed,
+    state: RenderState,
+    paintBackground = true,
+    flags: VisualFlags = getVisualFlags(),
+    byId?: Map<string, Placed>,
+    drawOverlays = true
+  ): void {
     const ctx = this.ctx;
     const n = p.node;
     const editing = state.editingId === n.id;
     const selected = state.selection.has(n.id);
     if (n.style.freeform) {
       if (paintBackground) this.drawFreeform(theme, p);
-      if (selected || state.hoverId === n.id) {
+      if (drawOverlays && (selected || state.hoverId === n.id)) {
         ctx.save(); ctx.strokeStyle = theme.selection;
         this.strokeRing(ctx, p, selected ? RING_W_SELECTED : RING_W_HOVER);
         // A resize handle on every corner (draw.io): any edge can move.
@@ -1204,6 +2218,7 @@ export class Renderer {
           for (const [cx, cy] of [[p.x, p.y], [p.x + p.w, p.y], [p.x, p.y + p.h], [p.x + p.w, p.y + p.h]]) ctx.fillRect(cx - hs / 2, cy - hs / 2, hs, hs);
         }
         ctx.restore();
+        this.resetCanvasState();
       }
       return;
     }
@@ -1211,57 +2226,145 @@ export class Renderer {
     // unless the user picked a fill of their own, and the rich-text/image
     // path below is skipped entirely.
     const isCode = !!n.style.code;
-    const fill = isCode ? n.style.fill ?? theme.codeBg : this.nodeFill(theme, p, state);
-    const textColor = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
-    const opacity = n.style.opacity ?? 1;
+    const depth = this.depthOf(n, state.sheet);
+    const isTopic = !n.style.freeform && !freeformOwner(state.sheet, n.id);
+    const boxShape = isCode ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded";
+    let boxRadius = isCode ? 8 : n.style.cornerRadius ?? 10;
+    const rootPolishActive = flags.rootPolish && n.type === "central" && boxShape !== "none" && !isCode;
+    if (rootPolishActive) boxRadius += 4;
 
-    ctx.save();
-    ctx.globalAlpha = opacity;
+    const accentStripActive =
+      flags.accentStrip &&
+      depth >= 2 &&
+      !n.style.fill &&
+      !isCode &&
+      !isBarePicture(n) &&
+      // Pictures and galleries are framed by their image: a bar down one
+      // side of a photo reads as a misplaced drop shadow, not as a colour cue.
+      !n.style.gallery &&
+      nodeImageIds(n).length === 0 &&
+      (boxShape === "rounded" || boxShape === "rect") &&
+      !freeformOwner(state.sheet, n.id);
+
+    let fill = isCode ? n.style.fill ?? theme.codeBg : accentStripActive ? theme.deepFill : this.nodeFill(theme, p, state);
+    if (drawOverlays && flags.softSelect && isTopic && state.hoverId === n.id && !selected) {
+      fill = this.hoverFill(fill, theme.name);
+    }
+
+    const textColor = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
+    const tweenAlpha = state.tween?.get(n.id)?.alpha ?? 1;
+    const opacity = (n.style.opacity ?? 1) * tweenAlpha;
+    const rotated = !!n.style.rotation;
+
+    if (rotated) ctx.save();
+    if (opacity !== 1) ctx.globalAlpha = opacity;
     // Rotation turns the item around its own centre (draw.io's rotation).
-    if (n.style.rotation) {
+    if (rotated) {
       const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
       ctx.translate(cx, cy);
-      ctx.rotate((n.style.rotation * Math.PI) / 180);
+      ctx.rotate((n.style.rotation! * Math.PI) / 180);
       ctx.translate(-cx, -cy);
     }
 
-    // shadow
-    if (n.style.shadow) {
+    const art = !isCode && n.style.shape === "custom" ? n.style.shapeParts : undefined;
+    const lodBare = flags.lod && state.camera.scale < LOD_BARE;
+    const motionReduced = flags.motionQuality && !!state.moving;
+
+    // shadow. With V3 on, every topic casts one: rounded boxes got theirs from
+    // the sprite pass in render(); the shapes a 9-slice cannot follow
+    // (circle, diamond, artwork, rotated items) fall back to a real blur, on
+    // those few nodes only. With V3 off, only `style.shadow` topics, as before.
+    const blurShadow = !lodBare && (flags.flatShadow
+      ? !motionReduced && this.castsShadow(n, state.sheet, art && art.length > 0 ? "custom" : boxShape) &&
+        this.spriteShadowOf(p, state.sheet, flags) === null
+      : !!n.style.shadow);
+    if (blurShadow) {
       ctx.shadowColor = theme.shadow;
-      ctx.shadowBlur = 12;
-      ctx.shadowOffsetY = 4;
+      ctx.shadowBlur = Math.min(24, (flags.flatShadow ? SHADOW_BLUR : 12) * (flags.flatShadow ? state.camera.scale * this.dpr : 1));
+      ctx.shadowOffsetY = flags.flatShadow ? SHADOW_DY * state.camera.scale * this.dpr : 4;
     }
 
     // Custom artwork (T24): a list of paths painted in order, silhouette first.
     // It replaces the box entirely — there is no rectangle underneath, or every
     // shape would sit on a visible slab.
-    const art = !isCode && n.style.shape === "custom" ? n.style.shapeParts : undefined;
+    const cachedPath = art && art.length > 0 ? null : this.getNodeShapePath(p, boxShape, boxRadius);
+    let fillPaint: string | CanvasGradient = fill;
+    if (rootPolishActive && !n.style.fill && !(drawOverlays && flags.softSelect && isTopic && state.hoverId === n.id && !selected)) {
+      const gKey = `${theme.name}|${p.y}|${p.h}`;
+      if (this.rootGradCache?.key !== gKey) {
+        const grad = ctx.createLinearGradient(0, p.y, 0, p.y + p.h);
+        grad.addColorStop(0, theme.rootFill);
+        grad.addColorStop(1, darken(theme.rootFill, 0.04));
+        this.rootGradCache = { key: gKey, grad };
+      }
+      fillPaint = this.rootGradCache.grad;
+    }
+
     if (art && art.length > 0) {
       this.paintShapeArt(ctx, theme, p, art, fill);
-      ctx.shadowBlur = 0;
-      ctx.shadowOffsetY = 0;
+      if (blurShadow) {
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+      }
+    } else if (cachedPath) {
+      ctx.fillStyle = fillPaint;
+      ctx.fill(cachedPath);
+      if (blurShadow) {
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+      }
     } else {
       // A code block is always a rounded rectangle: shape styles (circle,
       // diamond…) describe presentational topics, and the chrome strip needs a
       // straight top edge to sit on.
       // A bare picture has no box under it: a transparent PNG shows the canvas.
-      this.traceShape(ctx, p, isCode ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded", isCode ? 8 : n.style.cornerRadius ?? 10);
-      ctx.fillStyle = fill;
+      this.traceShape(ctx, p, boxShape, boxRadius);
+      ctx.fillStyle = fillPaint;
       ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.shadowOffsetY = 0;
+      if (blurShadow) {
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+      }
     }
+
+    // V4: Accent strip on subtopics (no clip()!)
+    if (accentStripActive && !lodBare) {
+      const parent = n.parentId && byId ? byId.get(n.parentId) : undefined;
+      const onRight = parent ? p.x + p.w / 2 >= parent.x + parent.w / 2 : p.x + p.w / 2 >= 0;
+      // An inset pill, clear of the box edge. Flush against the edge, a 4-unit
+      // bar in a dark branch colour on the right of every left-side topic
+      // looked exactly like a hard shadow cast sideways. It sits inside the
+      // topic's padding (subtopics: 7) so the text keeps its original place.
+      const inset = 2, barW = 3, vPad = Math.min(6, p.h * 0.25);
+      const stripX = onRight ? p.x + inset : p.x + p.w - inset - barW;
+      ctx.fillStyle = this.branchColor(theme, n, state.sheet);
+      ctx.beginPath();
+      ctx.roundRect(stripX, p.y + vPad, barW, p.h - vPad * 2, barW / 2);
+      ctx.fill();
+    }
+
     // Custom artwork carries its own strokes; an outline over it would trace
     // whatever path the last part left behind.
-    const border = art && art.length > 0 ? null : this.resolveBorder(theme, n, state.sheet);
-    if (border) {
+    const border = lodBare || (art && art.length > 0) ? null : this.resolveBorder(theme, n, state.sheet);
+    if (rootPolishActive && !lodBare && !art?.length && n.style.borderStyle !== "none" && n.style.stroke !== "transparent") {
+      ctx.strokeStyle = theme.selection;
+      ctx.globalAlpha = opacity * 0.55;
+      ctx.lineWidth = 1.5;
+      this.setDash(ctx, []);
+      if (cachedPath) ctx.stroke(cachedPath);
+      else {
+        this.traceShape(ctx, p, boxShape, boxRadius);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = opacity;
+    } else if (border) {
       // A text-only topic ("none") traces no path, so an outline chosen for it
       // would vanish: it gets the default rounded box to sit on.
       const shape = isCode ? "rounded" : n.style.shape === "none" ? "rounded" : n.style.shape ?? "rounded";
-      const radius = isCode ? 8 : n.style.cornerRadius ?? 10;
+      const radius = isCode ? 8 : (n.style.cornerRadius ?? 10) + (rootPolishActive ? 4 : 0);
       ctx.strokeStyle = border.color;
       ctx.lineCap = border.cap;
-      ctx.setLineDash(border.dash);
+      this.setDash(ctx, border.dash);
       if (border.double) {
         const t = border.width / 3;
         ctx.lineWidth = t;
@@ -1269,10 +2372,18 @@ export class Renderer {
           this.traceShape(ctx, { ...p, x: p.x - d, y: p.y - d, w: p.w + d * 2, h: p.h + d * 2 }, shape, Math.max(0, radius + d));
           ctx.stroke();
         }
-      } else {
-        if (n.style.shape === "none" && !isCode) this.traceShape(ctx, p, shape, radius);
+      } else if (cachedPath && shape === boxShape && radius === boxRadius) {
         ctx.lineWidth = border.width;
-        ctx.stroke();
+        ctx.stroke(cachedPath);
+      } else {
+        const borderPath = this.getNodeShapePath(p, shape, radius);
+        ctx.lineWidth = border.width;
+        if (borderPath) {
+          ctx.stroke(borderPath);
+        } else {
+          this.traceShape(ctx, p, shape, radius);
+          ctx.stroke();
+        }
       }
       // A diagram shape's inner linework (cylinder rim, process bars, note fold).
       if (!isCode && isDiagramShape(shape)) {
@@ -1284,14 +2395,19 @@ export class Renderer {
           ctx.stroke();
         }
       }
-      ctx.setLineDash([]);
+      this.setDash(ctx, []);
       ctx.lineCap = "butt";
     }
 
-    // selection ring
-    if (selected) {
-      ctx.strokeStyle = theme.selection;
-      this.strokeRing(ctx, p, RING_W_SELECTED);
+    // selection ring & overlays (skipped in scene pass when overlayLayer is active)
+    if (drawOverlays) {
+      if (selected) {
+      if (flags.softSelect && isTopic) {
+        this.strokeSoftRing(ctx, p, boxShape, boxRadius, theme.selection, opacity);
+      } else {
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, p, RING_W_SELECTED);
+      }
 
       // Xmind-style resize handles on BOTH edges (hidden while editing — the
       // HTML overlay owns the node then). Dragging changes the width and the
@@ -1432,8 +2548,12 @@ export class Renderer {
     // committed — same ring as selection, no resize handles (it is not
     // really selected until the release).
     if (!selected && state.marqueeSel?.has(n.id)) {
-      ctx.strokeStyle = theme.selection;
-      this.strokeRing(ctx, p, RING_W_SELECTED);
+      if (flags.softSelect && isTopic) {
+        this.strokeSoftRing(ctx, p, boxShape, boxRadius, theme.selection, opacity);
+      } else {
+        ctx.strokeStyle = theme.selection;
+        this.strokeRing(ctx, p, RING_W_SELECTED);
+      }
     }
     // Image selection ring: the image is selected (not the node) — outline
     // around the SELECTED slot so Backspace/Delete knows what it will remove.
@@ -1457,11 +2577,12 @@ export class Renderer {
         this.strokeRing(ctx, { x: c.x, y: c.y, w: c.w, h }, RING_W_SELECTED);
       }
     }
-    if (state.hoverId === n.id && !selected) {
+    if (state.hoverId === n.id && !selected && !(flags.softSelect && isTopic)) {
       ctx.strokeStyle = theme.selection;
       ctx.globalAlpha = opacity * 0.55;
       this.strokeRing(ctx, p, RING_W_HOVER);
       ctx.globalAlpha = opacity;
+    }
     }
 
     // task ribbon
@@ -1503,6 +2624,7 @@ export class Renderer {
           if (n.style.titleAt) this.drawOwnLabel(unstretched, textColor);
           else this.drawText(theme, unstretched, textColor, vector);
           ctx.restore();
+          this.resetCanvasState();
         } else {
           if (n.style.titleAt) this.drawOwnLabel(p, textColor);
           else this.drawText(theme, p, textColor, vector);
@@ -1511,24 +2633,42 @@ export class Renderer {
     }
 
     // collapsed badge (mirror to the left when the branch is left-side)
-    if (n.collapsed && n.childrenIds.length > 0) {
+    if (!lodBare && n.collapsed && n.childrenIds.length > 0) {
       const count = this.hiddenCount(n, state.sheet);
-      const centerX = p.x + p.w / 2;
-      const isLeft = centerX < 0;
-      const bx = isLeft ? p.x - 10 : p.x + p.w + 10;
-      const by = p.y + p.h / 2;
-      ctx.fillStyle = theme.collapsedBadge;
-      ctx.beginPath();
-      ctx.arc(bx, by, 11, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = theme.collapsedBadgeText;
-      ctx.font = `600 11px system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(String(count), bx, by + 0.5);
+      if (flags.junctions) {
+        const badge = this.collapsedBadgeRect(ctx, p, count);
+        ctx.fillStyle = this.branchColor(theme, n, state.sheet);
+        ctx.beginPath();
+        ctx.roundRect(badge.x, badge.y, badge.w, badge.h, badge.r);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        this.setFont(ctx, `600 11px system-ui, sans-serif`);
+        this.setTextAlign(ctx, "center");
+        this.setTextBaseline(ctx, "middle");
+        ctx.fillText(badge.label, badge.x + badge.w / 2, badge.y + badge.h / 2 + 0.5);
+      } else {
+        const centerX = p.x + p.w / 2;
+        const isLeft = centerX < 0;
+        const bx = isLeft ? p.x - 10 : p.x + p.w + 10;
+        const by = p.y + p.h / 2;
+        ctx.fillStyle = theme.collapsedBadge;
+        ctx.beginPath();
+        ctx.arc(bx, by, 11, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = theme.collapsedBadgeText;
+        this.setFont(ctx, `600 11px system-ui, sans-serif`);
+        this.setTextAlign(ctx, "center");
+        this.setTextBaseline(ctx, "middle");
+        ctx.fillText(String(count), bx, by + 0.5);
+      }
     }
 
-    ctx.restore();
+    if (rotated) {
+      ctx.restore();
+      this.resetCanvasState();
+    } else if (opacity !== 1) {
+      ctx.globalAlpha = 1;
+    }
   }
 
   private hiddenCount(n: MindNode, sheet: Sheet): number {
@@ -1542,6 +2682,106 @@ export class Renderer {
       if (!c.collapsed) queue.push(...c.childrenIds);
     }
     return count;
+  }
+
+  /** V3: does this topic cast a shadow at all? Map topics and canvases do;
+   *  items inside a canvas (diagrams) and text-only shapes do not. */
+  private castsShadow(n: MindNode, sheet: Sheet, shape: string): boolean {
+    if (shape === "none" || shape === "underline") return false;
+    if (!n.style.freeform && freeformOwner(sheet, n.id)) return false;
+    return true;
+  }
+
+  /** V3: the corner radius the sprite pass should draw this topic's shadow
+   *  with, or null when the sprite cannot follow its outline (drawNode then
+   *  blurs it for real) or it casts none. */
+  private spriteShadowOf(p: Placed, sheet: Sheet, flags: VisualFlags): number | null {
+    const n = p.node;
+    if (n.style.rotation) return null;
+    const isCode = !!n.style.code;
+    if (!isCode && n.style.shape === "custom" && n.style.shapeParts?.length) return null;
+    const shape = isCode ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded";
+    if (!this.castsShadow(n, sheet, shape)) return null;
+    if (shape === "rect") return 0;
+    if (shape === "capsule") return Math.min(p.w, p.h) / 2;
+    if (shape !== "rounded") return null;
+    let r = n.style.freeform ? 12 : isCode ? 8 : n.style.cornerRadius ?? 10;
+    if (flags.rootPolish && n.type === "central" && !isCode) r += 4;
+    return Math.min(r, p.w / 2, p.h / 2);
+  }
+
+  /**
+   * V3: a soft drop shadow for a rounded box, as a 9-slice of a sprite that
+   * was blurred once: corners copied, edges and middle stretched. Nine
+   * drawImage calls instead of one shadowBlur per node, which is the most
+   * expensive thing Canvas2D does.
+   */
+  private drawShadowSprite(ctx: CanvasRenderingContext2D, color: string, p: Placed, radius: number, alpha: number): void {
+    const res = Math.max(1, Math.min(3, Math.ceil(this.curScale * this.dpr)));
+    const r = Math.round(radius);
+    const key = `${color}|${r}|${res}`;
+    let sprite = this.shadowSprites.get(key);
+    if (!sprite) {
+      if (this.shadowSprites.size >= 48) this.freeShadowSprites();
+      const core = 2 * r + 2;
+      const size = Math.round((2 * SHADOW_PAD + core) * res);
+      sprite = document.createElement("canvas");
+      sprite.width = size;
+      sprite.height = size;
+      const g = sprite.getContext("2d");
+      if (!g) return;
+      // Draw the box off-canvas and let only its shadow land: the sprite holds
+      // the shadow alone, so a translucent topic does not show a slab.
+      const off = size + 64;
+      g.shadowColor = color;
+      g.shadowBlur = SHADOW_BLUR * res;
+      g.shadowOffsetX = off;
+      g.fillStyle = "#000";
+      g.beginPath();
+      g.roundRect(SHADOW_PAD * res - off, SHADOW_PAD * res, core * res, core * res, r * res);
+      g.fill();
+      this.shadowSprites.set(key, sprite);
+    }
+    const S = sprite.width;
+    const c = Math.round((SHADOW_PAD + r) * res); // source corner, px
+    const X = p.x - SHADOW_PAD, Y = p.y + SHADOW_DY - SHADOW_PAD;
+    const W = p.w + 2 * SHADOW_PAD, H = p.h + 2 * SHADOW_PAD;
+    const k = Math.min(SHADOW_PAD + r, W / 2, H / 2); // dest corner, world
+    const sxs = [0, c, S - c], sws = [c, S - 2 * c, c];
+    const dxs = [X, X + k, X + W - k], dws = [k, W - 2 * k, k];
+    const dys = [Y, Y + k, Y + H - k], dhs = [k, H - 2 * k, k];
+    if (alpha !== 1) ctx.globalAlpha = alpha;
+    for (let j = 0; j < 3; j++) {
+      if (dhs[j] <= 0) continue;
+      for (let i = 0; i < 3; i++) {
+        if (dws[i] <= 0) continue;
+        ctx.drawImage(sprite, sxs[i], sxs[j], sws[i], sws[j], dxs[i], dys[j], dws[i], dhs[j]);
+      }
+    }
+    if (alpha !== 1) ctx.globalAlpha = 1;
+  }
+
+  private freeShadowSprites(): void {
+    for (const c of this.shadowSprites.values()) { c.width = 0; c.height = 0; }
+    this.shadowSprites.clear();
+  }
+
+  /** A relationship arrow, with a real blurred shadow when V3 is on. Arrows
+   *  are few, so shadowBlur is affordable here; it is skipped while moving. */
+  private drawRelationshipShadowed(theme: RenderTheme, a: Placed, b: Placed, rel: Relationship, state: RenderState, shadow: boolean): void {
+    const ctx = this.ctx;
+    if (shadow) {
+      const k = state.camera.scale * this.dpr; // shadow* ignore the transform
+      ctx.shadowColor = theme.shadow;
+      ctx.shadowBlur = Math.min(24, 8 * k);
+      ctx.shadowOffsetY = CONNECTOR_SHADOW_DY * k;
+    }
+    this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
+    if (shadow) {
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+    }
   }
 
   /**
@@ -1576,7 +2816,76 @@ export class Renderer {
     }
   }
 
-  private traceShape(ctx: CanvasRenderingContext2D, p: Placed, shape: string, radius: number): void {
+  private getNodeShapePath(p: Placed, shape: string, radius: number): Path2D | null {
+    if (typeof Path2D === "undefined" || shape === "none") return null;
+    const key = `${p.x}|${p.y}|${p.w}|${p.h}|${shape}|${radius}`;
+    const cached = this.nodeShapePaths.get(p);
+    if (cached && cached.key === key) return cached.path;
+    const path = new Path2D();
+    this.traceShapeToPath(path, p.x, p.y, p.w, p.h, shape, radius);
+    this.nodeShapePaths.set(p, { key, path });
+    return path;
+  }
+
+  private traceShapeToPath(path: Path2D, x: number, y: number, w: number, h: number, shape: string, radius: number): void {
+    switch (shape) {
+      case "rect":
+        path.rect(x, y, w, h);
+        break;
+      case "capsule":
+        this.roundRectPath(path, x, y, w, h, h / 2);
+        break;
+      case "circle": {
+        const r = Math.max(w, h) / 2;
+        path.arc(x + w / 2, y + h / 2, r, 0, Math.PI * 2);
+        break;
+      }
+      case "diamond":
+        path.moveTo(x + w / 2, y);
+        path.lineTo(x + w, y + h / 2);
+        path.lineTo(x + w / 2, y + h);
+        path.lineTo(x, y + h / 2);
+        path.closePath();
+        break;
+      case "hexagon":
+        path.moveTo(x + w * 0.25, y);
+        path.lineTo(x + w * 0.75, y);
+        path.lineTo(x + w, y + h / 2);
+        path.lineTo(x + w * 0.75, y + h);
+        path.lineTo(x + w * 0.25, y + h);
+        path.lineTo(x, y + h / 2);
+        path.closePath();
+        break;
+      case "underline":
+        this.roundRectPath(path, x, y, w, h, radius);
+        break;
+      case "none":
+        break;
+      default:
+        if (isDiagramShape(shape)) {
+          for (const seg of diagramShapePath(shape, x, y, w, h).outline) {
+            if (seg[0] === "M") path.moveTo(seg[1], seg[2]);
+            else if (seg[0] === "L") path.lineTo(seg[1], seg[2]);
+            else if (seg[0] === "C") path.bezierCurveTo(seg[1], seg[2], seg[3], seg[4], seg[5], seg[6]);
+            else path.closePath();
+          }
+        } else {
+          this.roundRectPath(path, x, y, w, h, radius);
+        }
+    }
+  }
+
+  private roundRectPath(path: Path2D, x: number, y: number, w: number, h: number, r: number): void {
+    const rr = Math.min(r, w / 2, h / 2);
+    path.moveTo(x + rr, y);
+    path.arcTo(x + w, y, x + w, y + h, rr);
+    path.arcTo(x + w, y + h, x, y + h, rr);
+    path.arcTo(x, y + h, x, y, rr);
+    path.arcTo(x, y, x + w, y, rr);
+    path.closePath();
+  }
+
+  private traceShape(ctx: CanvasRenderingContext2D, p: { x: number; y: number; w: number; h: number }, shape: string, radius: number): void {
     const { x, y, w, h } = p;
     ctx.beginPath();
     switch (shape) {
@@ -2177,6 +3486,12 @@ export class Renderer {
     });
     trace.mark("render", "render:image-cache", { kind: "insert", bytes });
     this.evictToBudget();
+    // The cached scene (E2) still holds the fallback this picture was drawn
+    // with while it decoded. Without dropping it, the repaint below re-blits
+    // that blurred frame (the camera has not moved, so renderScene takes the
+    // "nothing changed" path) and every pan copies it on: zoomed-in pictures
+    // stayed soft until the next edit.
+    this.sceneCacheKey = null;
     this.onRepaint?.();
   }
 
@@ -3309,6 +4624,14 @@ export class Renderer {
     return this.hitGrid.cells.get(`${Math.floor(wx / Renderer.HIT_CELL)},${Math.floor(wy / Renderer.HIT_CELL)}`) ?? [];
   }
 
+  snapshotPlacements(state: RenderState): Map<string, { x: number; y: number; w: number; h: number }> {
+    const out = new Map<string, { x: number; y: number; w: number; h: number }>();
+    for (const p of this.visiblePlacedList(state)) {
+      out.set(p.node.id, { x: p.x, y: p.y, w: p.w, h: p.h });
+    }
+    return out;
+  }
+
   hitTest(state: RenderState, worldX: number, worldY: number, skip?: (id: string) => boolean): string | null {
     const placed = this.placedNodes(state);
     const candidates = this.hitCandidates(placed, worldX, worldY);
@@ -3601,13 +4924,29 @@ export class Renderer {
     this.dpr = pixelRatio;
     this.resolveImage = imageResolver(state.sheet);
     for (const placed of this.placedNodes(state)) if (placed.visible) await this.preloadNodeImages(placed,state.camera.scale*this.dpr,true);
-    this.render({...state,hideStudyMarkers:true,selection:new Set(),editingId:null,hoverId:null,drop:null,imageSel:null,gallerySel:null,relSel:null,groupSel:null,summarySel:null,searchMatches:undefined,searchCurrent:undefined,marqueeSel:null,ghostImage:null,galleryDrop:null});
+    this.render({...state,opaque:true,hideStudyMarkers:true,selection:new Set(),editingId:null,hoverId:null,drop:null,imageSel:null,gallerySel:null,relSel:null,groupSel:null,summarySel:null,searchMatches:undefined,searchCurrent:undefined,marqueeSel:null,ghostImage:null,galleryDrop:null});
   }
 
   dispose(): void {
     this.quizMarkerCache=null;
+    this.connectorBatchCache = null;
+    this.branchColorCache = null;
+    this.rootGradCache = null;
+    if (this.sceneCacheCanvas) {
+      this.sceneCacheCanvas.width = 0;
+      this.sceneCacheCanvas.height = 0;
+      this.sceneCacheCanvas = null;
+    }
+    if (this.sceneCacheBuf) {
+      this.sceneCacheBuf.width = 0;
+      this.sceneCacheBuf.height = 0;
+      this.sceneCacheBuf = null;
+    }
+    this.sceneCacheKey = null;
+    this.sceneCacheCam = null;
     for (const item of this.imageCache.values()) item.bitmap.close();
     for (const item of this.textCache.values()) { item.canvas.width=0;item.canvas.height=0; }
+    this.freeShadowSprites();
     this.imageCache.clear();
     this.imageBuckets.clear();
     this.frameKeys.clear();

@@ -6,6 +6,8 @@ import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, gr
 import { THEMES, readableOn, type RenderTheme } from "../render/theme";
 import { groupBoxes, groupRadius, wavePoints } from "../layout/groups";
 import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET } from "../layout/measure";
+import { connectorRibbon } from "../layout/connectorRibbon";
+import { getVisualFlags } from "../render/visualFlags";
 /**
  * PDF export — one tall strip of paper, cut into pages.
  *
@@ -1131,6 +1133,16 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     }
 
     // Connectors first, so every box paints over the line that reaches it.
+    const vflags = getVisualFlags();
+    const nodeDepth = (id: string): number => {
+      let depth = 0;
+      let cur: string | null = id;
+      while (cur && cur !== sheet.rootNodeId && depth < 64) {
+        cur = sheet.nodes[cur]?.parentId ?? null;
+        depth++;
+      }
+      return cur === sheet.rootNodeId ? depth : 3;
+    };
     cmds.push(`${f(Math.max(0.05, 1.7 * s))} w`);
     for (const p of placed) {
       if (!p.node.parentId) continue;
@@ -1138,7 +1150,25 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
       if (!parent || parent.node.style.freeform) continue;
       const curve = connectorCurve(parent, p, sheet);
       if (!curveTouches(curve, pg.top, pg.height) || (phone && (Math.max(curve.p0.x,curve.p1.x,curve.p2.x,curve.p3.x)<pg.left || Math.min(curve.p0.x,curve.p1.x,curve.p2.x,curve.p3.x)>pg.left+pg.width))) continue;
-      cmds.push(`${rgb(opts.linkColorOf(p.node.id))} RG`, curveCmd(curve, fr));
+      const color = opts.linkColorOf(p.node.id);
+      if (vflags.taper) {
+        const st = sheet.structure;
+        const vertical =
+          p.y > parent.y + parent.h - 1 &&
+          st.structureType !== "mindmap" &&
+          !(st.structureType === "logic" && st.orientation !== "vertical");
+        const { forward: fw, backward: bw } = connectorRibbon(
+          curve.p0.x, curve.p0.y, curve.p1.x, curve.p1.y, curve.p2.x, curve.p2.y, curve.p3.x, curve.p3.y,
+          nodeDepth(p.node.id),
+          vertical
+        );
+        cmds.push(
+          `${rgb(color)} rg`,
+          `${f(fr.X(fw.x0))} ${f(fr.Y(fw.y0))} m ${f(fr.X(fw.cp1x))} ${f(fr.Y(fw.cp1y))} ${f(fr.X(fw.cp2x))} ${f(fr.Y(fw.cp2y))} ${f(fr.X(fw.x1))} ${f(fr.Y(fw.y1))} c ${f(fr.X(bw.x0))} ${f(fr.Y(bw.y0))} l ${f(fr.X(bw.cp1x))} ${f(fr.Y(bw.cp1y))} ${f(fr.X(bw.cp2x))} ${f(fr.Y(bw.cp2y))} ${f(fr.X(bw.x1))} ${f(fr.Y(bw.y1))} c h f`
+        );
+      } else {
+        cmds.push(`${rgb(color)} RG`, curveCmd(curve, fr));
+      }
       ops += 2;
     }
 

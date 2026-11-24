@@ -96,6 +96,29 @@ export function lighten(hex: string, t: number): string {
 }
 
 /**
+ * The vignette behind a transparent canvas, derived from the theme's own
+ * background so its middle stop IS the background. Hand-picked stops ran from
+ * +15 to -20 levels on Matte: the corners looked dirty and the canvas no longer
+ * matched the colour the theme (and the exports) say it has. This keeps the
+ * whole swing within a few percent, felt rather than seen.
+ */
+export function vignetteFor(background: string): string {
+  return `radial-gradient(ellipse farthest-corner at 50% 50%, ${lighten(background, 0.025)} 0%, ${background} 55%, ${darken(background, 0.045)} 100%)`;
+}
+
+/** Mix a `#rrggbb` colour toward black by `t` (0..1). */
+export function darken(hex: string, t: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  const mix = (c: number) => Math.round(c * (1 - t));
+  return `#${((1 << 24) | (mix(r) << 16) | (mix(g) << 8) | mix(b)).toString(16).slice(1)}`;
+}
+
+/**
  * Near-black or white, whichever reads on `color` (a hex, rgb() or rgba()).
  * For text drawn on a surface the user coloured — a group's title tab — where
  * no theme colour is guaranteed to contrast.

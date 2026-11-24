@@ -3023,9 +3023,24 @@ export class EditorStore {
     this.execOps(ops);
   }
 
+  /** Optional hook fired right before toggleCollapsed mutates the sheet (V9 tween). */
+  onBeforeCollapse: ((id: string) => void) | null = null;
+
   toggleCollapsed(id: string): void {
     const node = this.model.node(id);
     if (!node) return;
+    if (this.onBeforeCollapse) {
+      let vis = 0;
+      const q = [...node.childrenIds];
+      while (q.length > 0 && vis < 300) {
+        const cid = q.pop()!;
+        const c = this.model.node(cid);
+        if (!c) continue;
+        vis++;
+        if (!c.collapsed) q.push(...c.childrenIds);
+      }
+      if (vis < 300) this.onBeforeCollapse(id);
+    }
     this.execOps([makeOp<Op & { type: "setCollapsed" }>("setCollapsed", { id, collapsed: !node.collapsed, prev: node.collapsed })]);
   }
 
