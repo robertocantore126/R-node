@@ -117,7 +117,9 @@ describe("G5: the layout makes room for a group", () => {
 
   it("without the reservation the same box WOULD overlap (the test can fail)", () => {
     const { sheet, add } = makeSheet("logic");
-    const ids = ["One", "Two", "Three"].map((t) => add(sheet.rootNodeId, t));
+    // Subtopics, not main topics: the root's wider sibling gap would hide it.
+    const parent = add(sheet.rootNodeId, "Parent");
+    const ids = ["One", "Two", "Three"].map((t) => add(parent, t));
     const placed = placedOf(sheet); // laid out with no group
     sheet.boundaries.push({ id: "g", memberIds: [ids[1]], label: "Two" });
     const { occupied } = groupBoxes(sheet, placed).get("g")!;

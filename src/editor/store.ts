@@ -37,7 +37,7 @@ import { parseFlashcards, type FlashcardSeed } from "../core/flashcards";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
-import { imageResolver, applyLayout, layoutSheet } from "../layout/mindmap";
+import { imageResolver, applyLayout, layoutSheet, LEVEL_GAP, LEVEL_GAP_ROOT, SIBLING_GAP, SIBLING_GAP_ROOT } from "../layout/mindmap";
 import { CHART_COLS, CHART_MAX_SIDE, CHART_ROWS, createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { asGridPattern, asThemeName, isThemeDependentColor, THEME_ORDER, THEMES, type GridPattern, type ThemeName } from "../render/theme";
@@ -1894,8 +1894,6 @@ export class EditorStore {
       structure: {
         structureType: s.structure?.structureType ?? "mindmap",
         orientation: s.structure?.orientation ?? "horizontal",
-        spacing: typeof s.structure?.spacing === "number" ? s.structure.spacing : 180,
-        branchSpacing: typeof s.structure?.branchSpacing === "number" ? s.structure.branchSpacing : 14,
         padding: typeof s.structure?.padding === "number" ? s.structure.padding : 18,
         compactMode: !!s.structure?.compactMode,
         autoBalance: s.structure?.autoBalance ?? true,
@@ -2483,8 +2481,11 @@ export class EditorStore {
     const st = this.sheet.structure;
     const pSize = measureNode(parent, this.measurer);
     const estimatedW = 140;
-    const offsetX = parent.type === "central" ? pSize.w / 2 + st.spacing + estimatedW / 2 + 20 : pSize.w / 2 + st.spacing + estimatedW / 2 + 10;
-    const offsetY = parent.type === "central" ? parent.childrenIds.length * (pSize.h + st.branchSpacing) - (parent.childrenIds.length > 0 ? pSize.h / 2 : 0) : parent.childrenIds.length * (pSize.h + st.branchSpacing);
+    const central = parent.type === "central";
+    const levelGap = central ? LEVEL_GAP_ROOT : LEVEL_GAP;
+    const siblingGap = central ? SIBLING_GAP_ROOT : SIBLING_GAP;
+    const offsetX = central ? pSize.w / 2 + levelGap + estimatedW / 2 + 20 : pSize.w / 2 + levelGap + estimatedW / 2 + 10;
+    const offsetY = central ? parent.childrenIds.length * (pSize.h + siblingGap) - (parent.childrenIds.length > 0 ? pSize.h / 2 : 0) : parent.childrenIds.length * (pSize.h + siblingGap);
     // Mirror the offset on a left-hand branch, or the topic is born on the far
     // side of its own parent.
     //

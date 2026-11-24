@@ -29,6 +29,10 @@ import { getVisualFlags, LOD_BARE, type VisualFlags } from "./visualFlags";
 import { trace } from "../dev/trace";
 import type { Camera } from "./viewport";
 
+/** From this zoom up (50%) titles and code are drawn as vectors every frame;
+ *  below it they come from the per-node bitmap cache, rescaled. */
+export const VECTOR_TEXT_MIN_SCALE = 0.5;
+
 export interface DropIndicator {
   mode: "child" | "before" | "after" | "floating" | "none";
   nodeId: string;
@@ -292,6 +296,16 @@ export class Renderer {
   private shadowSprites = new Map<string, HTMLCanvasElement>();
   /** E6: Count of topics drawn as greeking bars this frame. */
   private greekedCount = 0;
+  /**
+   * The on-screen canvas is opaque (`alpha: false`). Chrome only gives canvas
+   * text subpixel (ClearType) antialiasing on an opaque context; on a
+   * transparent one every glyph is grey-scale, thinner and softer than the
+   * same text in the DOM editor — it read like a JPEG next to a PNG the moment
+   * editing ended. The scene cache it is blitted from is opaque too, and the
+   * CSS vignette that showed through the transparent canvas is gone (the
+   * background is filled flat).
+   */
+  private readonly opaqueCanvas: boolean;
   /** E2: Offscreen scene cache for pan/zoom. */
   private sceneCacheCanvas: HTMLCanvasElement | null = null;
   private sceneCacheBuf: HTMLCanvasElement | null = null;
@@ -375,9 +389,10 @@ export class Renderer {
 
   constructor(
     canvas: HTMLCanvasElement,
-    opts: { assetStore?: AssetStore; onRepaint?: () => void; overlayCanvas?: HTMLCanvasElement | null } = {}
+    opts: { assetStore?: AssetStore; onRepaint?: () => void; overlayCanvas?: HTMLCanvasElement | null; opaque?: boolean } = {}
   ) {
-    const ctx = canvas.getContext("2d");
+    this.opaqueCanvas = !!opts.opaque;
+    const ctx = canvas.getContext("2d", this.opaqueCanvas ? { alpha: false } : undefined);
     if (!ctx) throw new Error("2d context unavailable");
     this.ctx = ctx;
     if (opts.overlayCanvas) {
@@ -717,8 +732,15 @@ export class Renderer {
 
   private ensureSceneCache(w: number, h: number): { main: HTMLCanvasElement; buf: HTMLCanvasElement } | null {
     if (typeof document === "undefined") return null;
-    if (!this.sceneCacheCanvas) this.sceneCacheCanvas = document.createElement("canvas");
-    if (!this.sceneCacheBuf) this.sceneCacheBuf = document.createElement("canvas");
+    // The first getContext call fixes a canvas's attributes for good, so the
+    // opaque ones are requested right where the canvases are made.
+    const make = (): HTMLCanvasElement => {
+      const c = document.createElement("canvas");
+      if (this.opaqueCanvas) c.getContext("2d", { alpha: false });
+      return c;
+    };
+    if (!this.sceneCacheCanvas) this.sceneCacheCanvas = make();
+    if (!this.sceneCacheBuf) this.sceneCacheBuf = make();
     if (this.sceneCacheCanvas.width !== w || this.sceneCacheCanvas.height !== h) {
       this.sceneCacheCanvas.width = w;
       this.sceneCacheCanvas.height = h;
@@ -752,7 +774,7 @@ export class Renderer {
           const ctx = this.ctx;
           const baseTheme = THEMES[state.themeName];
           const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
-          const transparentVignette = flags.vignette && !state.opaque && !state.background && !state.grid;
+          const transparentVignette = !this.opaqueCanvas && flags.vignette && !state.opaque && !state.background && !state.grid;
           ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
           ctx.clearRect(0, 0, state.viewW, state.viewH);
           if (!transparentVignette) {
@@ -834,21 +856,24 @@ export class Renderer {
               cacheCtx.clearRect(0, 0, devW, devH);
               cacheCtx.drawImage(cache.buf, shiftDx, shiftDy);
 
+              // The uncovered strips, from the WHOLE device-pixel shift and the
+              // real buffer size (paintScenePass snaps them back to device px).
+              const d = this.dpr;
               const strips: Array<{ x: number; y: number; w: number; h: number }> = [];
-              if (shiftX !== 0) {
+              if (shiftDx !== 0) {
                 strips.push({
-                  x: shiftX > 0 ? 0 : state.viewW + shiftX,
+                  x: (shiftDx > 0 ? 0 : devW + shiftDx) / d,
                   y: 0,
-                  w: Math.abs(shiftX),
-                  h: state.viewH,
+                  w: Math.abs(shiftDx) / d,
+                  h: devH / d,
                 });
               }
-              if (shiftY !== 0) {
+              if (shiftDy !== 0) {
                 strips.push({
-                  x: shiftX > 0 ? shiftX : 0,
-                  y: shiftY > 0 ? 0 : state.viewH + shiftY,
-                  w: state.viewW - Math.abs(shiftX),
-                  h: Math.abs(shiftY),
+                  x: (shiftDx > 0 ? shiftDx : 0) / d,
+                  y: (shiftDy > 0 ? 0 : devH + shiftDy) / d,
+                  w: (devW - Math.abs(shiftDx)) / d,
+                  h: Math.abs(shiftDy) / d,
                 });
               }
               const alignedState: RenderState = {
@@ -952,22 +977,36 @@ export class Renderer {
     const baseTheme = THEMES[state.themeName];
     const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
     this.curBranchCacheKey = null;
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    // Clip, clear and background are done in whole DEVICE pixels. In CSS
+    // units a strip edge lands mid-pixel whenever the display scale is not an
+    // integer (125%, 150%): the anti-aliased clip then cleared that pixel only
+    // partly, the pan blit carried the residue along, and every pan frame
+    // left one more line stacked along the right and bottom edges. The same
+    // holds for the canvas edge itself (viewW × dpr is rarely whole).
+    const devW = ctx.canvas.width;
+    const devH = ctx.canvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    let dev = { x: 0, y: 0, w: devW, h: devH };
     if (clipCss) {
+      const x0 = Math.max(0, Math.round(clipCss.x * this.dpr));
+      const y0 = Math.max(0, Math.round(clipCss.y * this.dpr));
+      const xr = Math.round((clipCss.x + clipCss.w) * this.dpr);
+      const yb = Math.round((clipCss.y + clipCss.h) * this.dpr);
+      const x1 = xr >= devW - 1 ? devW : xr;
+      const y1 = yb >= devH - 1 ? devH : yb;
+      dev = { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
       ctx.save();
       ctx.beginPath();
-      ctx.rect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
+      ctx.rect(dev.x, dev.y, dev.w, dev.h);
       ctx.clip();
-      ctx.clearRect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
-    } else {
-      ctx.clearRect(0, 0, state.viewW, state.viewH);
     }
-    const transparentVignette = flags.vignette && !state.opaque && !state.background && !state.grid;
+    ctx.clearRect(dev.x, dev.y, dev.w, dev.h);
+    const transparentVignette = !this.opaqueCanvas && flags.vignette && !state.opaque && !state.background && !state.grid;
     if (!transparentVignette) {
       ctx.fillStyle = theme.background;
-      if (clipCss) ctx.fillRect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
-      else ctx.fillRect(0, 0, state.viewW, state.viewH);
+      ctx.fillRect(dev.x, dev.y, dev.w, dev.h);
     }
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.resetCanvasState();
 
     const s = state.camera.scale;
@@ -3035,12 +3074,11 @@ export class Renderer {
     const topBlock = slots.insets.top;
     const botBlock = slots.insets.bottom;
     const startX = p.x + pad + slots.insets.left;
-    // Above 100% the text is drawn as vectors, every frame: a cached bitmap
-    // is a picture of the text, rescaled between its resolution steps and
-    // capped at 4×, so zoomed in it read soft. Zoomed in few topics are on
-    // screen, so the direct path costs little; at 100% and below — where a
-    // whole map can be visible — the bitmap cache stays.
-    if (vector || this.curScale > 1) {
+    // From 50% up the text is drawn as vectors, every frame: a cached bitmap
+    // is a picture of the text, rescaled between its resolution steps, so it
+    // read soft (at DPR 1 everything below 100% was a 1× bitmap shrunk). Below
+    // 50% — where a whole map can be visible — the bitmap cache stays.
+    if (vector || this.curScale >= VECTOR_TEXT_MIN_SCALE) {
       const size = n.style.fontSize ?? 14;
       const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, this.measurer, n.style);
       let totalH = 0;
@@ -3729,8 +3767,8 @@ export class Renderer {
   private drawCodeBlock(theme: RenderTheme, p: Placed): void {
     const n = p.node;
     const lang = asCodeLang(n.style.code?.lang);
-    // Above 100%, vectors (see drawText): no rescaled bitmap when zoomed in.
-    if (this.curScale > 1) {
+    // From 50% up, vectors (see drawText): no rescaled bitmap.
+    if (this.curScale >= VECTOR_TEXT_MIN_SCALE) {
       this.ctx.save();
       this.ctx.translate(p.x, p.y);
       this.paintCodeBlock(this.ctx, theme, p, lang);
