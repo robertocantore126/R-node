@@ -175,6 +175,8 @@ export function CanvasView(): JSX.Element {
   // Right-click context menu: null = closed, otherwise the wrap-space cursor
   // position and the right-clicked topic (see onContextMenu).
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  // Right-click on a group's line or title: its own small menu.
+  const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; groupId: string } | null>(null);
   /** The double-click picker over a freeform canvas (text or a shape). */
   const [ffInsert, setFfInsert] = useState<FreeformInsertAt | null>(null);
   const closeFfInsert = useCallback(() => setFfInsert(null), []);
@@ -1803,6 +1805,14 @@ export function CanvasView(): JSX.Element {
     const s = store.getSnapshot();
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
+    // A group's line or title tab answers with the group's menu: study
+    // prompts built from the topics it encloses.
+    const groupHit = rendererRef.current?.hitTestGroup(currentRenderState(), world.x, world.y) ?? null;
+    if (groupHit && (!hit || isDiagramPage(store.sheet, hit) || store.doc.node(hit)?.style.freeform)) {
+      const r = canvasRef.current!.parentElement!.getBoundingClientRect();
+      setGroupMenu({ x: clientX - r.left, y: clientY - r.top, groupId: groupHit });
+      return;
+    }
     if (!hit) return;
     // A diagram's page is the paper, not a topic: empty paper has no menu,
     // as empty map has none.
@@ -2377,6 +2387,17 @@ export function CanvasView(): JSX.Element {
       {ffInsert && <FreeformInsertMenu at={ffInsert} bounds={sizeRef.current} onClose={closeFfInsert} />}
       {store.sheet.structure.structureType === "diagram" && (
         <DiagramPalette toWorld={paletteToWorld} viewCenter={paletteViewCenter} />
+      )}
+      {groupMenu && (
+        <div
+          className="menu"
+          style={{ position: "absolute", left: groupMenu.x, top: groupMenu.y, zIndex: 40 }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onMouseLeave={() => setGroupMenu(null)}
+        >
+          <button onClick={() => { void store.copyGroupStudyPrompt(groupMenu.groupId, "quiz"); setGroupMenu(null); }}>Copy as quiz prompt</button>
+          <button onClick={() => { void store.copyGroupStudyPrompt(groupMenu.groupId, "flashcards"); setGroupMenu(null); }}>Copy as flashcards prompt</button>
+        </div>
       )}
       {ctxMenu && <NodeContextMenu key={`${ctxMenu.nodeId}:${ctxMenu.cell ?? ""}`} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
       {captionField}

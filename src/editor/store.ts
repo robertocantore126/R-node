@@ -6035,6 +6035,29 @@ export class EditorStore {
     return false;
   }
 
+  /**
+   * A group's study prompt: the outline of the topics it encloses (each
+   * member with its branch; a member inside another member's branch counted
+   * once), plus the quiz or flashcard prompt. What a topic's menu does for
+   * its branch, done for the group's content.
+   */
+  async copyGroupStudyPrompt(groupId: string, kind: "quiz" | "flashcards"): Promise<void> {
+    const group = this.sheet.boundaries.find((g) => g.id === groupId);
+    if (!group) return;
+    this.commitEdit();
+    const roots = this.topmostIds(group.memberIds.filter((id) => !!this.model.node(id)));
+    if (roots.length === 0) return;
+    const text = kind === "quiz"
+      ? quizClipText(studyOutline(this.sheet, roots, "quiz"))
+      : flashcardsClipText(studyOutline(this.sheet, roots, "plain"));
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be blocked; the prompt was still built */
+    }
+    this.toast(kind === "quiz" ? `Copied quiz prompt (${roots.length} topics)` : `Copied flashcards prompt (${roots.length} topics)`);
+  }
+
   /** Copy a branch's outline plus the flashcard-generation prompt. The
    *  outline is the plain one: cards carry no topic links. */
   async copyFlashcardsPrompt(nodeId: string): Promise<void> {
