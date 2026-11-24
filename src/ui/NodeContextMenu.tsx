@@ -18,6 +18,8 @@ import { THEMES } from "../render/theme";
 import { quizHasMistakes } from "../core/quiz";
 import { flashcardCounts } from "../core/flashcards";
 import { NodeBorderPicker } from "./Inspector";
+import { ColorWheelPanel } from "./ColorWheelPanel";
+import { toHex } from "../core/paint";
 import { chartSlotNote, freeformNote } from "../core/chartNotes";
 import { freeformOwner, isFreeTransform } from "../core/freeform";
 
@@ -44,34 +46,57 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
   const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
   const [recent, setRecent] = useState<string[]>(() => getRecentColors());
   const [pos, setPos] = useState({ x: menu.x, y: menu.y });
+  const [wheelPos, setWheelPos] = useState<{ x: number; y: number } | null>(null);
   const [outlineOpen, setOutlineOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const wheelRef = useRef<HTMLDivElement>(null);
 
   // Keep the menu inside the canvas area: measure after mount and clamp when
   // it would run past the right/bottom edge (the menu is ~200px wide).
+  // Position the companion ColorWheelPanel beside the menu (right side when
+  // room allows, otherwise flipped to the left).
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const wrap = el.parentElement?.getBoundingClientRect();
     if (!wrap) return;
     const r = el.getBoundingClientRect();
-    setPos({
-      x: Math.max(6, Math.min(menu.x, wrap.width - r.width - 6)),
-      y: Math.max(6, Math.min(menu.y, wrap.height - r.height - 6)),
-    });
+    const mx = Math.max(6, Math.min(menu.x, wrap.width - r.width - 6));
+    const my = Math.max(6, Math.min(menu.y, wrap.height - r.height - 6));
+    setPos({ x: mx, y: my });
+
+    const wEl = wheelRef.current;
+    if (wEl) {
+      const wr = wEl.getBoundingClientRect();
+      const gap = 10;
+      const rightX = mx + r.width + gap;
+      const leftX = mx - wr.width - gap;
+      const wx =
+        rightX + wr.width <= wrap.width - 6
+          ? rightX
+          : leftX >= 6
+            ? leftX
+            : Math.max(6, wrap.width - wr.width - 6);
+      const wy = Math.max(6, Math.min(my + 24, wrap.height - wr.height - 6));
+      setWheelPos({ x: wx, y: wy });
+    }
   }, [menu.x, menu.y]);
 
-  // Close on: a pointerdown outside the menu, Escape, or any wheel gesture
+  // Close on: a pointerdown outside the menu + wheel, Escape, or any wheel gesture
   // (a pan/zoom while the menu is open would leave it floating over the map).
   useEffect(() => {
+    const inside = (target: EventTarget | null): boolean => {
+      const n = target as Node | null;
+      return !!(n && (ref.current?.contains(n) || wheelRef.current?.contains(n)));
+    };
     const onDown = (e: PointerEvent): void => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+      if (!inside(e.target)) onClose();
     };
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") onClose();
     };
     const onWheel = (e: WheelEvent): void => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
+      if (!inside(e.target)) onClose();
     };
     window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey, true);
@@ -103,6 +128,13 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
     onClose();
   };
 
+  // Picking from the side color wheel keeps the menu open so the user can
+  // explore harmonies or fine-tune lightness without reopening right-click.
+  const pickStayOpen = (color: string): void => {
+    store.setSelectionColor(color);
+    setRecent(getRecentColors());
+  };
+
   if (menu.cell !== undefined && node.style.gallery?.chart) {
     const cell = menu.cell;
     const note = chartSlotNote(store.sheet, node.id, cell);
@@ -123,7 +155,10 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
     );
   }
 
+  const initialWheelHex = toHex(node.style.fill) ?? "#6c68c9";
+
   return (
+    <>
     <div ref={ref} className="ctx-menu" style={{ left: pos.x, top: pos.y }} role="menu">
       <button role="menuitem" onClick={act(() => store.createChildOf(node.id))}>
         New subtopic
@@ -264,7 +299,28 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
                 title={q.name ?? "Quiz"}
                 onClick={act(() => store.openQuiz(node.id, q.id))}
               >
-                <span className="quiz-chip-box" />
+                <span className="quiz-chip-box" aria-hidden="true">
+                  <svg viewBox="0 0 32 32" width="30" height="30">
+                    <rect
+                      x="1.5"
+                      y="1.5"
+                      width="29"
+                      height="29"
+                      rx="8"
+                      fill="#33313d"
+                      stroke={pct !== null || active ? "#726ed6" : "#5a586b"}
+                      strokeWidth="1.6"
+                    />
+                    <path
+                      d="M12.2 12.2a3.9 3.9 0 0 1 7.6 1.2c0 2.2-2.6 2.9-3.5 4.2-.2.3-.3.7-.3 1.2"
+                      fill="none"
+                      stroke="#f3f3f6"
+                      strokeWidth="2.4"
+                      strokeLinecap="round"
+                    />
+                    <circle cx="16" cy="23.2" r="2.1" fill={pct !== null ? "#e0b82e" : "#726ed6"} />
+                  </svg>
+                </span>
                 <span className="quiz-chip-pct">{pct === null ? "—" : `${pct}%`}</span>
               </button>
               {/* Like the "+", deleting keeps the menu open; undo restores it. */}
@@ -318,7 +374,25 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
                 title={`${d.name ?? "Flashcards"} · ${total} card${total > 1 ? "s" : ""}`}
                 onClick={act(() => store.openFlashcards(node.id, d.id))}
               >
-                <span className="quiz-chip-box flash-chip-box" />
+                <span className="quiz-chip-box flash-chip-box" aria-hidden="true">
+                  <svg viewBox="0 0 32 32" width="30" height="30">
+                    <rect
+                      x="1.5"
+                      y="1.5"
+                      width="29"
+                      height="29"
+                      rx="8"
+                      fill="#33313d"
+                      stroke={active ? "#8c88eb" : "#726ed6"}
+                      strokeWidth="1.6"
+                    />
+                    <rect x="10.5" y="7" width="13.5" height="16.5" rx="2.6" transform="rotate(10 17 15)" fill="#726ed6" />
+                    <rect x="7.5" y="8.5" width="13.5" height="16.5" rx="2.6" fill="#f3f3f6" />
+                    <line x1="10.5" y1="14.5" x2="18" y2="14.5" stroke="#33313d" strokeWidth="1.8" strokeLinecap="round" />
+                    <line x1="10.5" y1="18.2" x2="15.5" y2="18.2" stroke="#6c68c9" strokeWidth="1.8" strokeLinecap="round" />
+                    <circle cx="18" cy="11.3" r="1.4" fill="#e0b82e" />
+                  </svg>
+                </span>
                 <span className="flash-chip-bar" aria-hidden="true">
                   {(["red", "yellow", "green", "none"] as const).map((k) =>
                     counts[k] > 0 ? <span key={k} className={k} style={{ flexGrow: counts[k] }} /> : null)}
@@ -358,5 +432,19 @@ export function NodeContextMenu({ menu, onClose }: Props): JSX.Element {
         Paste as AI expand
       </button>
     </div>
+    {!node.style.code && (
+      <ColorWheelPanel
+        key={node.id}
+        panelRef={wheelRef}
+        initialHex={initialWheelHex}
+        onCommit={pickStayOpen}
+        style={
+          wheelPos
+            ? { left: wheelPos.x, top: wheelPos.y }
+            : { left: pos.x + 230, top: pos.y + 24, visibility: "hidden" }
+        }
+      />
+    )}
+    </>
   );
 }

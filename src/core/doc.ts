@@ -157,8 +157,8 @@ export class DocumentModel {
       updatedAt: nowIso(),
       archived: false,
       pinned: false,
-      settings: { theme: "light", showOutliner: false, showInspector: true },
-      themeId: "r-node-light",
+      settings: { theme: "matte", showOutliner: false, showInspector: true },
+      themeId: "r-node-matte",
       sheets: [sheet],
     };
   }

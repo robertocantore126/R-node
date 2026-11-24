@@ -974,6 +974,198 @@ input[type="range"] {
   padding: 6px 10px 8px;
 }
 
+/* ---------- Companion Color Wheel (beside right-click menu) ---------- */
+
+.ctx-color-wheel-panel {
+  position: absolute;
+  z-index: 41;
+  width: 204px;
+  padding: 14px 12px 12px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  user-select: none;
+}
+
+.cw-stage {
+  position: relative;
+  border-radius: 50%;
+  cursor: crosshair;
+  touch-action: none;
+  flex-shrink: 0;
+}
+
+.cw-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+.cw-disc {
+  position: absolute;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.92) 0%, rgba(255, 255, 255, 0) 70%),
+    conic-gradient(
+      from 0deg,
+      #ff0000 0deg,
+      #ffff00 60deg,
+      #00ff00 120deg,
+      #00ffff 180deg,
+      #0000ff 240deg,
+      #ff00ff 300deg,
+      #ff0000 360deg
+    );
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.14);
+}
+
+.cw-disc-light {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.cw-dot-main {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2.5px solid #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cw-dot-sub {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.88);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cw-dot-ring {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1.5px solid rgba(19, 19, 31, 0.45);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.cw-harmony-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cw-harmony-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.cw-rand-btn {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.cw-rand-btn:hover {
+  filter: brightness(1.1);
+}
+
+.cw-swatches {
+  width: 100%;
+  display: flex;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.16);
+}
+
+.cw-swatch {
+  flex: 1;
+  border: none;
+  padding: 7px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: filter 100ms ease;
+}
+
+.cw-swatch:hover {
+  filter: brightness(1.08);
+}
+
+.cw-swatch.is-main {
+  box-shadow: inset 0 -2px 0 rgba(255, 255, 255, 0.7);
+}
+
+.cw-hex-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+:root[data-theme="matte"] .cw-hex-row {
+  background: #353340;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.cw-hex-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.cw-hex-hash {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+
+.cw-hex-input {
+  flex: 1;
+  min-width: 0;
+  border: none !important;
+  background: transparent !important;
+  padding: 0 !important;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text) !important;
+  outline: none;
+}
+
 .ctx-color {
   width: 22px;
   height: 22px;
@@ -2288,19 +2480,28 @@ input[type="range"] {
 }
 
 .quiz-chip-box {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  background: var(--accent-soft);
-  border: 1px solid var(--accent);
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
+}
+
+.quiz-chip-box svg {
+  display: block;
 }
 
 .quiz-chip:hover .quiz-chip-box {
-  background: var(--accent);
+  transform: translateY(-1px);
+  filter: brightness(1.12);
 }
 
 .quiz-chip.active .quiz-chip-box {
-  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 .quiz-chip-pct {
@@ -2315,10 +2516,10 @@ input[type="range"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border: 1px dashed var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-muted);
   font-size: 18px;
@@ -2340,12 +2541,10 @@ input[type="range"] {
 }
 .ctx-menu .quiz-mistakes-toggle:disabled { opacity: .35; cursor: default; }
 
-/* ---------- Flashcards (strip square + window) ---------- */
+/* ---------- Flashcards (strip badge + window) ---------- */
 
-/* A deck's square reads as a small stack of cards, not a quiz tile. */
 .flash-chip-box {
-  border-radius: 4px;
-  box-shadow: 3px -3px 0 -1px var(--surface), 3px -3px 0 0 var(--accent);
+  border-radius: 8px;
 }
 
 .flash-chip-bar {
@@ -2581,6 +2780,10 @@ input[type="range"] {
     max-height: 65dvh;
     border-radius: var(--radius) var(--radius) 0 0;
     padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .ctx-color-wheel-panel {
+    display: none;
   }
 
   .ctx-menu button {

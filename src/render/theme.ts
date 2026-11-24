@@ -8,12 +8,12 @@ import type { CodePalette } from "../core/codeHighlight";
 
 export type ThemeName = "light" | "dark" | "vanilla" | "matte" | "fog";
 
-/** Cycle order of the theme button. Light first: it is the default. */
-export const THEME_ORDER: ThemeName[] = ["light", "dark", "vanilla", "matte", "fog"];
+/** Cycle order of the theme button. Matte first: it is the default. */
+export const THEME_ORDER: ThemeName[] = ["matte", "light", "dark", "vanilla", "fog"];
 
-/** Coerce an arbitrary stored value to a known theme (unknown -> light). */
+/** Coerce an arbitrary stored value to a known theme (unknown -> matte). */
 export function asThemeName(value: unknown): ThemeName {
-  return value === "dark" || value === "vanilla" || value === "matte" || value === "fog" ? value : "light";
+  return value === "light" || value === "dark" || value === "vanilla" || value === "fog" ? value : "matte";
 }
 
 export type GridPattern = "lines" | "dots" | "graph" | "fine" | "none";
@@ -248,6 +248,7 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     background: "#878787",
     grid: "transparent",
     noGrid: true,
+    defaultGrid: "dots",
     text: "#13131f",
     textMuted: "#3d3b48",
     selection: "#4f46e5",
