@@ -1379,7 +1379,17 @@ function measureTopicUncached(
   slots: SlotSizes = slotSizes(n, resolveImage),
 ): Extent {
   const style = n.style;
-  if (style.width && style.height) return { w: style.width, h: style.height };
+  if (style.width && style.height) {
+    // A fixed box (a diagram shape, a canvas item, a library shape). Its
+    // width is the user's and the text wraps inside it; its height is a
+    // MINIMUM: text that needs more grows the box downwards instead of
+    // spilling out over the shapes below it (a long paste used to). Empty
+    // boxes, pictures, code, canvases and galleries keep their box exactly.
+    const fixed = { w: style.width, h: style.height };
+    if (!n.title.trim() || style.code || style.freeform || style.gallery || isBarePicture(n)) return fixed;
+    const natural = measureTopicUncached({ ...n, style: { ...style, height: undefined } }, measurer, resolveImage, slots);
+    return { w: style.width, h: Math.max(style.height, Math.ceil(natural.h)) };
+  }
   // A bare picture of a canvas: the box is the image, no padding, no strut.
   if (slots.top && isBarePicture(n)) return { w: slots.top.w, h: slots.top.h };
 
