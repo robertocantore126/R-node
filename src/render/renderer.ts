@@ -275,6 +275,8 @@ export class Renderer {
     key: string;
     visibleRef: Placed[];
     batches: Array<{ color: string; stroke?: Path2D; fill?: Path2D }>;
+    shadowStrokes?: Path2D;
+    shadowRibbons?: Path2D;
   } | null = null;
   /** E4: Cheap canvas state tracking (reset per frame and after ctx.restore()). */
   private curFont = "";
@@ -1048,7 +1050,6 @@ export class Renderer {
     // connectors and arrows lie on top of them. Each one is a 9-slice of a
     // pre-blurred sprite (see drawShadowSprite): no shadowBlur per node.
     const shadowsOn = flags.flatShadow && !(flags.lod && s < LOD_BARE);
-    const shadowsMoving = flags.motionQuality && !!state.moving;
     if (shadowsOn) {
       for (const p of visiblePlaced) {
         const sh = this.spriteShadowOf(p, state.sheet, flags);
@@ -1078,7 +1079,7 @@ export class Renderer {
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
         if (freeformOwner(state.sheet, rel.fromId) && freeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
-        else this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn && !shadowsMoving);
+        else this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn);
       }
     }
 
@@ -1094,7 +1095,7 @@ export class Renderer {
     const orientation = state.sheet.structure.orientation;
     const motionReduced = flags.motionQuality && !!state.moving;
     const lodBare = flags.lod && s < LOD_BARE;
-    const useTaper = flags.taper && !motionReduced && !lodBare;
+    const useTaper = flags.taper && !lodBare;
     const showJunctions = flags.junctions && !motionReduced && !lodBare;
     const taperBucket = !useTaper
       ? 0
@@ -1113,10 +1114,11 @@ export class Renderer {
     const tweenActive = !!(state.tween && state.tween.size > 0);
     if (flags.batchedPaths && !tweenActive && typeof Path2D !== "undefined") {
       const batchKey = pk !== null ? `${pk}|${theme.name}|${structure}|${orientation}|t${taperBucket}` : null;
-      let batches: Array<{ color: string; stroke?: Path2D; fill?: Path2D }> | null =
+      let cachedEntry =
         batchKey !== null && this.connectorBatchCache?.key === batchKey && this.connectorBatchCache.visibleRef === visiblePlaced
-          ? this.connectorBatchCache.batches
+          ? this.connectorBatchCache
           : null;
+      let batches: Array<{ color: string; stroke?: Path2D; fill?: Path2D }> | null = cachedEntry ? cachedEntry.batches : null;
       const byColor = batches ? null : new Map<string, { color: string; stroke?: Path2D; fill?: Path2D }>();
       for (const p of placed) {
         if (!p.node.parentId) continue;
@@ -1158,19 +1160,28 @@ export class Renderer {
       if (byColor) {
         batches = Array.from(byColor.values());
         if (batchKey !== null) {
-          this.connectorBatchCache = { key: batchKey, visibleRef: visiblePlaced, batches };
+          cachedEntry = { key: batchKey, visibleRef: visiblePlaced, batches };
+          this.connectorBatchCache = cachedEntry;
         }
       }
       if (batches) {
         // V3: connector shadows. All colours merged into one stroke path and
-        // one ribbon path, so overlapping branches near a parent do not stack
-        // into dark knots; a wide faint pass then a narrow one fake the blur.
-        if (shadowsOn && !shadowsMoving) {
-          const strokes = new Path2D();
-          const ribbons = new Path2D();
-          for (const b of batches) {
-            if (b.stroke) strokes.addPath(b.stroke);
-            if (b.fill) ribbons.addPath(b.fill);
+        // one ribbon path (cached across pan/zoom frames so shadows stay steady
+        // without flickering); a wide faint pass then a narrow one fake the blur.
+        if (shadowsOn) {
+          let strokes = cachedEntry?.shadowStrokes;
+          let ribbons = cachedEntry?.shadowRibbons;
+          if (!strokes || !ribbons) {
+            strokes = new Path2D();
+            ribbons = new Path2D();
+            for (const b of batches) {
+              if (b.stroke) strokes.addPath(b.stroke);
+              if (b.fill) ribbons.addPath(b.fill);
+            }
+            if (cachedEntry) {
+              cachedEntry.shadowStrokes = strokes;
+              cachedEntry.shadowRibbons = ribbons;
+            }
           }
           ctx.save();
           ctx.translate(0, CONNECTOR_SHADOW_DY);
@@ -1275,7 +1286,7 @@ export class Renderer {
       }
       this.drawNode(theme, p, state, false, flags, byId, !skipOverlays);
     }
-    for (const [a, b, rel] of overRels) this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn && !shadowsMoving);
+    for (const [a, b, rel] of overRels) this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn);
     // Handwriting goes over the items on its canvas, to annotate them.
     for (const p of visiblePlaced) if (p.node.style.freeform) this.drawInk(theme, p, state);
 
@@ -2268,14 +2279,13 @@ export class Renderer {
 
     const art = !isCode && n.style.shape === "custom" ? n.style.shapeParts : undefined;
     const lodBare = flags.lod && state.camera.scale < LOD_BARE;
-    const motionReduced = flags.motionQuality && !!state.moving;
 
     // shadow. With V3 on, every topic casts one: rounded boxes got theirs from
     // the sprite pass in render(); the shapes a 9-slice cannot follow
     // (circle, diamond, artwork, rotated items) fall back to a real blur, on
     // those few nodes only. With V3 off, only `style.shadow` topics, as before.
     const blurShadow = !lodBare && (flags.flatShadow
-      ? !motionReduced && this.castsShadow(n, state.sheet, art && art.length > 0 ? "custom" : boxShape) &&
+      ? this.castsShadow(n, state.sheet, art && art.length > 0 ? "custom" : boxShape) &&
         this.spriteShadowOf(p, state.sheet, flags) === null
       : !!n.style.shadow);
     if (blurShadow) {

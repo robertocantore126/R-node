@@ -5,8 +5,8 @@
 :root {
   --accent: #4f46e5;
   --accent-soft: rgba(79, 70, 229, 0.14);
-  --radius: 8px;
-  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-sm: 8px;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
 }
@@ -28,29 +28,34 @@
 
 :root[data-theme="matte"] {
   --bg: #878787;
-  --surface: #4d4b59;
-  --surface-2: #676573;
-  --border: #33313d;
+  --chrome: #3d3b48;
+  --surface: #464452;
+  --surface-2: #5b5968;
+  --border: rgba(255, 255, 255, 0.09);
   --text: #f3f3f6;
-  --text-muted: #c2c1c7;
+  --text-muted: #b8b6c4;
   --accent: #6c68c9;
-  --accent-soft: rgba(255, 255, 255, 0.16);
+  --accent-soft: rgba(108, 104, 201, 0.24);
   --danger: #f87171;
   --shadow: 0 10px 30px rgba(19, 19, 31, 0.42);
-  --hover: rgba(255, 255, 255, 0.1);
-  color-scheme: light;
+  --hover: rgba(255, 255, 255, 0.09);
+  color-scheme: dark;
 }
 
-/* Matte theme: darker slate menus (#3d3b48 / #4d4b59 / #676573) with
-   #13131f hairlines, #c2c1c7 muted labels, and crisp #ffffff inputs. */
+/* Matte theme: refined slate chrome (#3d3b48 / #464452) framing the rounded
+   canvas, with calm dark recessed inputs and periwinkle focus accents. */
 :root[data-theme="matte"] .topbar {
-  background: #3d3b48;
-  border-bottom: 2px solid #13131f;
+  background: var(--chrome);
+  border-bottom: none;
 }
 
 :root[data-theme="matte"] .statusbar {
-  background: #3d3b48;
-  border-top: 1px solid #13131f;
+  background: var(--chrome);
+  border-top: none;
+}
+
+:root[data-theme="matte"] .canvas-area {
+  border-color: rgba(19, 19, 31, 0.48);
 }
 
 :root[data-theme="matte"] .doc-title-input {
@@ -60,46 +65,53 @@
 
 :root[data-theme="matte"] .doc-title-input:hover,
 :root[data-theme="matte"] .doc-title-input:focus {
-  background: #4d4b59;
-  border-color: #676573;
+  background: #464452;
+  border-color: rgba(255, 255, 255, 0.14);
   color: #ffffff;
 }
 
-:root[data-theme="matte"] input:not(.doc-title-input):not([type="color"]),
+:root[data-theme="matte"] input:not(.doc-title-input):not([type="color"]):not([type="range"]),
 :root[data-theme="matte"] select,
 :root[data-theme="matte"] textarea {
-  background: #ffffff;
-  color: #13131f;
-  border-color: #2f2d38;
+  background: #353340;
+  color: #f3f3f6;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+:root[data-theme="matte"] input:not(.doc-title-input):not([type="color"]):not([type="range"]):focus,
+:root[data-theme="matte"] select:focus,
+:root[data-theme="matte"] textarea:focus {
+  background: #302e3b;
+  border-color: #7b77db;
 }
 
 :root[data-theme="matte"] input:not(.doc-title-input)::placeholder,
 :root[data-theme="matte"] textarea::placeholder {
-  color: #676573;
+  color: #9c9aa8;
 }
 
 :root[data-theme="matte"] input:disabled,
 :root[data-theme="matte"] select:disabled,
 :root[data-theme="matte"] textarea:disabled {
-  background: #c2c1c7;
-  color: #545261;
-  border-color: #33313d;
+  background: #3d3b49;
+  color: #918fa0;
+  border-color: rgba(255, 255, 255, 0.06);
   opacity: 0.85;
 }
 
 :root[data-theme="matte"] .btn {
-  background: #676573;
-  border-color: #33313d;
-  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #f3f3f6;
 }
 
 :root[data-theme="matte"] .btn:hover:not(:disabled) {
-  background: #767484;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 :root[data-theme="matte"] .btn.small.danger {
   background: #6b2c35;
-  border-color: #3d1d22;
+  border-color: rgba(255, 160, 160, 0.18);
   color: #ffd6d6;
 }
 
@@ -118,27 +130,33 @@
 }
 
 :root[data-theme="matte"] .topbar .btn:hover:not(:disabled) {
-  background: #676573;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 :root[data-theme="matte"] .btn.primary,
 :root[data-theme="matte"] .topbar .btn.primary {
   background: var(--accent);
-  border-color: var(--accent);
+  border-color: rgba(255, 255, 255, 0.14);
   color: #ffffff;
 }
 
 :root[data-theme="matte"] .btn.icon.on,
 :root[data-theme="matte"] .topbar .btn.icon.on,
 :root[data-theme="matte"] .topbar .btn.on {
-  background: #676573;
+  background: rgba(108, 104, 201, 0.28);
   color: #ffffff;
-  box-shadow: inset 0 0 0 1px #c2c1c7;
+  box-shadow: inset 0 0 0 1px rgba(139, 135, 232, 0.55);
 }
 
 :root[data-theme="matte"] .doc-row.active {
-  background: #676573;
-  box-shadow: inset 3px 0 0 #c2c1c7;
+  background: rgba(108, 104, 201, 0.24);
+  color: #ffffff;
+  box-shadow: inset 3px 0 0 #7b77db;
+}
+
+:root[data-theme="matte"] .save-status.dirty,
+:root[data-theme="matte"] .statusbar .dirty {
+  color: #e0b82e;
 }
 
 :root[data-theme="matte"] .status-hint {
@@ -266,6 +284,7 @@
 
 :root[data-theme="fog"] {
   --bg: #c4c3be;
+  --chrome: #3b3c40;
   --surface: #4a4b50;
   --surface-2: #606166;
   --border: #2d2e33;
@@ -343,6 +362,7 @@ textarea:focus {
   display: grid;
   grid-template-columns: 264px 1fr;
   height: 100vh;
+  background: var(--chrome, var(--surface));
 }
 
 /* Sidebar hidden: the grid must collapse to a single column, otherwise the
@@ -361,6 +381,7 @@ textarea:focus {
      dragged the workspace row with it — measured at 1239px inside a 1009px
      window. Capping anything further down cannot help once this has grown. */
   min-height: 0;
+  background: var(--chrome, var(--surface));
 }
 
 .workspace {
@@ -373,6 +394,9 @@ textarea:focus {
      min-height on .inspector for what that cost. */
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
+  padding: 0 8px 4px 8px;
+  gap: 8px;
+  background: var(--chrome, var(--surface));
 }
 
 .workspace:has(.inspector) {
@@ -383,6 +407,14 @@ textarea:focus {
   position: relative;
   min-width: 0;
   min-height: 0;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.14);
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
 }
 
 
@@ -461,7 +493,7 @@ textarea:focus {
 
 .sidebar {
   background: var(--surface);
-  border-right: 1px solid var(--border);
+  border-right: none;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -759,8 +791,8 @@ textarea:focus {
   align-items: center;
   gap: 14px;
   padding: 7px 12px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  background: var(--chrome, var(--surface));
+  border-bottom: none;
 }
 
 .doc-title-input {
@@ -1045,8 +1077,8 @@ textarea:focus {
   align-items: center;
   gap: 8px;
   padding: 4px 12px;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
+  background: var(--chrome, var(--surface));
+  border-top: none;
   font-size: 12px;
   color: var(--text-muted);
 }
@@ -1119,7 +1151,9 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
   background: var(--surface);
 }
 
@@ -2506,8 +2540,19 @@ textarea:focus {
     min-width: 60px;
   }
 
+  .workspace {
+    padding: 0;
+    gap: 0;
+  }
+
   .workspace:has(.inspector) {
     grid-template-columns: 1fr;
+  }
+
+  .canvas-area {
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
   }
 
   .rightcol {
@@ -2518,6 +2563,9 @@ textarea:focus {
     z-index: 55;
     max-height: 55dvh;
     border-left: none;
+    border-right: none;
+    border-bottom: none;
+    border-radius: 16px 16px 0 0;
     border-top: 1px solid var(--border);
     box-shadow: var(--shadow);
   }
