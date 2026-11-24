@@ -10,6 +10,7 @@ import { BrowserLibraryAdapter } from "./persist/library";
 import { generateStressMap, type StressOptions } from "./dev/stress";
 import { getVisualFlags, resetVisualFlags, setVisualFlags, type VisualFlags } from "./render/visualFlags";
 import { loadAppFonts } from "./render/fonts";
+import { installBrowserZoomBlock } from "./ui/blockBrowserZoom";
 import { resetTextMeasureCaches } from "./layout/measure";
 import "./styles.css";
 
@@ -39,6 +40,8 @@ const store = new EditorStore(adapter);
     reset: (): VisualFlags => resetVisualFlags(),
   },
 };
+
+installBrowserZoomBlock();
 
 // The app font first: nothing may be measured with the fallback face (see
 // render/fonts.ts). loadAppFonts never rejects and gives up after a timeout.
