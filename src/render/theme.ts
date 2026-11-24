@@ -6,14 +6,14 @@
  */
 import type { CodePalette } from "../core/codeHighlight";
 
-export type ThemeName = "light" | "dark" | "vanilla" | "matte" | "fog";
+export type ThemeName = "light" | "dark" | "vanilla" | "matte" | "fog" | "xmind";
 
 /** Cycle order of the theme button. Matte first: it is the default. */
-export const THEME_ORDER: ThemeName[] = ["matte", "light", "dark", "vanilla", "fog"];
+export const THEME_ORDER: ThemeName[] = ["matte", "light", "dark", "vanilla", "fog", "xmind"];
 
 /** Coerce an arbitrary stored value to a known theme (unknown -> matte). */
 export function asThemeName(value: unknown): ThemeName {
-  return value === "light" || value === "dark" || value === "vanilla" || value === "fog" ? value : "matte";
+  return value === "light" || value === "dark" || value === "vanilla" || value === "fog" || value === "xmind" ? value : "matte";
 }
 
 export type GridPattern = "lines" | "dots" | "graph" | "fine" | "none";
@@ -76,6 +76,12 @@ export interface RenderTheme {
   collapsedBadgeText: string;
   nodeBorder: string;
   shadow: string;
+  /** Every topic below the main ones wears its branch's soft tint (no
+   *  accent strip, no white deep levels), as XMind draws them. */
+  tintedTopics?: boolean;
+  /** Main-topic text picks dark or white for contrast with its fill, instead
+   *  of the theme text colour (white on XMind's vivid branch colours). */
+  contrastMainText?: boolean;
 }
 
 /**
@@ -320,6 +326,53 @@ export const THEMES: Record<ThemeName, RenderTheme> = {
     collapsedBadgeText: "#2c2e36",
     nodeBorder: "rgba(0,0,0,0.08)",
     shadow: "rgba(30,30,36,0.16)",
+  },
+  /**
+   * XMind: white paper with no grid, a navy-black root, XMind's own branch
+   * colours (from its default theme: F9423A F6A04D F3D321 00BC7B 486AFF
+   * 4D49BE, plus a cyan and a pink to fill the eight slots), white text on
+   * the main topics and every deeper topic in a 20% tint of its branch.
+   */
+  xmind: {
+    name: "xmind",
+    background: "#ffffff",
+    grid: "rgba(0,0,0,0.06)",
+    noGrid: true,
+    defaultGrid: "none",
+    text: "#1f2133",
+    textMuted: "#6b6e80",
+    selection: "#486aff",
+    selectionFill: "rgba(72, 106, 255, 0.12)",
+    dropIndicator: "#486aff",
+    searchMatch: "#f6a04d",
+    searchMatchActive: "#f9423a",
+    rootFill: "#000229",
+    // Used when the root has no box (on the white paper); a boxed root gets
+    // white on its navy fill through contrastMainText.
+    rootText: "#000229",
+    freeformFill: "#fafafc",
+    branch: ["#f9423a", "#f6a04d", "#f3d321", "#00bc7b", "#486aff", "#4d49be", "#00b4d8", "#ff5fa2"],
+    branchSoft: ["#fed9d8", "#fdecdb", "#fdf6d3", "#ccf2e5", "#dae1ff", "#dbdbf2", "#ccf0f7", "#ffdfec"],
+    deepFill: "#ffffff",
+    code: {
+      id: "xmind",
+      plain: "#1f2133",
+      keyword: "#d1242f",
+      string: "#0a3069",
+      number: "#0550ae",
+      comment: "#6b6e80",
+      fn: "#4d49be",
+      punct: "#57606a",
+    },
+    codeBg: "#f6f7fb",
+    codeBar: "#eceef5",
+    connector: "#8a8ea0",
+    collapsedBadge: "#eceef5",
+    collapsedBadgeText: "#1f2133",
+    nodeBorder: "rgba(0,2,41,0.08)",
+    shadow: "rgba(0,2,41,0.12)",
+    tintedTopics: true,
+    contrastMainText: true,
   },
 };
 

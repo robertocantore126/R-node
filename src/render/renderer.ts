@@ -1652,6 +1652,7 @@ export class Renderer {
     const boxShape = n.style.code ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded";
     const accent =
       flags.accentStrip &&
+      !theme.tintedTopics &&
       depth >= 2 &&
       !n.style.fill &&
       !n.style.code &&
@@ -1663,7 +1664,7 @@ export class Renderer {
       (boxShape === "rounded" || boxShape === "rect") &&
       !freeformOwner(state.sheet, n.id);
     const fill = accent ? theme.deepFill : this.resolveFill(theme, n, state.sheet);
-    const text = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
+    const text = this.defaultTextColor(theme, n, depth, fill);
     return { fill, text };
   }
 
@@ -1699,7 +1700,7 @@ export class Renderer {
       if (root?.style.fill) return root.style.fill;
       return theme.branch[this.branchIndex(n, sheet)];
     }
-    if (depth === 2) {
+    if (depth === 2 || (theme.tintedTopics && depth > 2)) {
       // Their children are the lightened step, derived from the main topic's
       // colour — which may itself be the root's colour, inherited. Uncoloured
       // branches keep the palette soft tint, as before.
@@ -1710,6 +1711,20 @@ export class Renderer {
       return theme.branchSoft[this.branchIndex(n, sheet)];
     }
     return theme.deepFill;
+  }
+
+  /** A topic's text colour when it has none of its own. */
+  private defaultTextColor(theme: RenderTheme, n: MindNode, depth: number, fill: string): string {
+    if (n.style.textColor) return n.style.textColor;
+    const boxed = fill && fill !== "transparent" && n.style.shape !== "none";
+    if (n.type === "central") {
+      // A root drawn without a box sits on the paper: its text must read on
+      // the background, whatever the root fill would have been.
+      if (theme.contrastMainText) return boxed ? readableOn(fill) : theme.rootText;
+      return theme.rootText;
+    }
+    if (theme.contrastMainText && depth === 1 && boxed) return readableOn(fill);
+    return theme.text;
   }
 
   /**
@@ -2285,6 +2300,7 @@ export class Renderer {
 
     const accentStripActive =
       flags.accentStrip &&
+      !theme.tintedTopics &&
       depth >= 2 &&
       !n.style.fill &&
       !isCode &&
@@ -2301,7 +2317,7 @@ export class Renderer {
       fill = this.hoverFill(fill, theme.name);
     }
 
-    const textColor = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
+    const textColor = this.defaultTextColor(theme, n, depth, fill);
     const tweenAlpha = state.tween?.get(n.id)?.alpha ?? 1;
     const opacity = (n.style.opacity ?? 1) * tweenAlpha;
     const rotated = !!n.style.rotation;

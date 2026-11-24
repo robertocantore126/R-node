@@ -13,6 +13,7 @@ const THEME_LABELS: Record<ThemeName, string> = {
   vanilla: "Vanilla",
   matte: "Matte",
   fog: "Fog",
+  xmind: "XMind",
 };
 
 export function TopBar(): JSX.Element {
@@ -119,7 +120,7 @@ export function TopBar(): JSX.Element {
         <button
           className="btn theme-btn"
           data-help="Theme"
-          data-help-more="Switches between Light (white), Dark, Vanilla (warm paper), Matte (solid slate) and Fog (soft grey on graph paper). The choice is saved with the document."
+          data-help-more="Switches between Light (white), Dark, Vanilla (warm paper), Matte (solid slate), Fog (soft grey on graph paper) and XMind (white, XMind's colours). The choice is saved with the document."
           title={`Theme: ${THEME_LABELS[state.theme]} — click for the next one`}
           onClick={() => store.cycleTheme()}
         >

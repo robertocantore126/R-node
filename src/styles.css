@@ -26,6 +26,34 @@
   color-scheme: light;
 }
 
+/* XMind: the light chrome of XMind's own app. White bars and panels on a
+   faint cool-grey page, navy text, XMind blue for focus and the primary
+   button; the canvas itself is white paper (render/theme.ts "xmind"). */
+:root[data-theme="xmind"] {
+  --bg: #f4f5f8;
+  --chrome: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f1f2f6;
+  --border: #e5e7ee;
+  --text: #1f2133;
+  --text-muted: #6b6e80;
+  --accent: #486aff;
+  --accent-soft: rgba(72, 106, 255, 0.12);
+  --danger: #f9423a;
+  --shadow: 0 8px 28px rgba(0, 2, 41, 0.12);
+  --hover: rgba(0, 2, 41, 0.05);
+  color-scheme: light;
+}
+
+:root[data-theme="xmind"] .topbar,
+:root[data-theme="xmind"] .statusbar {
+  background: var(--chrome);
+}
+
+:root[data-theme="xmind"] .canvas-area {
+  border-color: var(--border);
+}
+
 :root[data-theme="matte"] {
   --bg: #878787;
   --chrome: #3d3b48;
