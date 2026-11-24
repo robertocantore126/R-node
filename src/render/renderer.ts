@@ -838,21 +838,24 @@ export class Renderer {
               cacheCtx.clearRect(0, 0, devW, devH);
               cacheCtx.drawImage(cache.buf, shiftDx, shiftDy);
 
+              // The uncovered strips, from the WHOLE device-pixel shift and the
+              // real buffer size (paintScenePass snaps them back to device px).
+              const d = this.dpr;
               const strips: Array<{ x: number; y: number; w: number; h: number }> = [];
-              if (shiftX !== 0) {
+              if (shiftDx !== 0) {
                 strips.push({
-                  x: shiftX > 0 ? 0 : state.viewW + shiftX,
+                  x: (shiftDx > 0 ? 0 : devW + shiftDx) / d,
                   y: 0,
-                  w: Math.abs(shiftX),
-                  h: state.viewH,
+                  w: Math.abs(shiftDx) / d,
+                  h: devH / d,
                 });
               }
-              if (shiftY !== 0) {
+              if (shiftDy !== 0) {
                 strips.push({
-                  x: shiftX > 0 ? shiftX : 0,
-                  y: shiftY > 0 ? 0 : state.viewH + shiftY,
-                  w: state.viewW - Math.abs(shiftX),
-                  h: Math.abs(shiftY),
+                  x: (shiftDx > 0 ? shiftDx : 0) / d,
+                  y: (shiftDy > 0 ? 0 : devH + shiftDy) / d,
+                  w: (devW - Math.abs(shiftDx)) / d,
+                  h: Math.abs(shiftDy) / d,
                 });
               }
               const alignedState: RenderState = {
@@ -956,22 +959,36 @@ export class Renderer {
     const baseTheme = THEMES[state.themeName];
     const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
     this.curBranchCacheKey = null;
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    // Clip, clear and background are done in whole DEVICE pixels. In CSS
+    // units a strip edge lands mid-pixel whenever the display scale is not an
+    // integer (125%, 150%): the anti-aliased clip then cleared that pixel only
+    // partly, the pan blit carried the residue along, and every pan frame
+    // left one more line stacked along the right and bottom edges. The same
+    // holds for the canvas edge itself (viewW × dpr is rarely whole).
+    const devW = ctx.canvas.width;
+    const devH = ctx.canvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    let dev = { x: 0, y: 0, w: devW, h: devH };
     if (clipCss) {
+      const x0 = Math.max(0, Math.round(clipCss.x * this.dpr));
+      const y0 = Math.max(0, Math.round(clipCss.y * this.dpr));
+      const xr = Math.round((clipCss.x + clipCss.w) * this.dpr);
+      const yb = Math.round((clipCss.y + clipCss.h) * this.dpr);
+      const x1 = xr >= devW - 1 ? devW : xr;
+      const y1 = yb >= devH - 1 ? devH : yb;
+      dev = { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
       ctx.save();
       ctx.beginPath();
-      ctx.rect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
+      ctx.rect(dev.x, dev.y, dev.w, dev.h);
       ctx.clip();
-      ctx.clearRect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
-    } else {
-      ctx.clearRect(0, 0, state.viewW, state.viewH);
     }
+    ctx.clearRect(dev.x, dev.y, dev.w, dev.h);
     const transparentVignette = flags.vignette && !state.opaque && !state.background && !state.grid;
     if (!transparentVignette) {
       ctx.fillStyle = theme.background;
-      if (clipCss) ctx.fillRect(clipCss.x, clipCss.y, clipCss.w, clipCss.h);
-      else ctx.fillRect(0, 0, state.viewW, state.viewH);
+      ctx.fillRect(dev.x, dev.y, dev.w, dev.h);
     }
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.resetCanvasState();
 
     const s = state.camera.scale;
