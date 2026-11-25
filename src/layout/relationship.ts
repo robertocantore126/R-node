@@ -9,7 +9,7 @@
  * direction at the end.
  */
 import type { ArrowHead, ConnectorStyle, MindNode, RelAnchor, Relationship, Sheet } from "../core/types";
-import { freeformOwner } from "../core/freeform";
+import { endpointFreeformOwner, freeformOwner } from "../core/freeform";
 import {
   ARROW_HALF_ANGLE,
   ARROW_LEN,
@@ -605,7 +605,7 @@ export function waypointOrigin(
   placed: readonly { node: MindNode; x: number; y: number }[],
   rel: Pick<Relationship, "fromId">,
 ): Pt | undefined {
-  const owner = freeformOwner(sheet, rel.fromId);
+  const owner = endpointFreeformOwner(sheet, rel.fromId);
   if (!owner) return undefined;
   const p = placed.find((q) => q.node.id === owner);
   return p ? { x: p.x, y: p.y } : undefined;
@@ -634,12 +634,14 @@ export function routeObstacles(
   placed: readonly { node: MindNode; x: number; y: number; w: number; h: number }[],
   rel: Pick<Relationship, "fromId" | "toId">,
 ): Rect[] {
-  const owner = freeformOwner(sheet, rel.fromId);
-  if (!owner || freeformOwner(sheet, rel.toId) === null) return [];
+  const owner = endpointFreeformOwner(sheet, rel.fromId);
+  if (!owner || endpointFreeformOwner(sheet, rel.toId) === null) return [];
   const holders = new Set<string>();
   for (const id of [rel.fromId, rel.toId]) {
     let p = sheet.nodes[id]?.parentId;
     while (p) { holders.add(p); p = sheet.nodes[p]?.parentId ?? null; }
+    const g = sheet.boundaries.find((b) => b.id === id);
+    if (g) for (const mid of g.memberIds) holders.add(mid);
   }
   const out: Rect[] = [];
   for (const p of placed) {

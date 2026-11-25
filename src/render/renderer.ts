@@ -1,4 +1,4 @@
-import { freeformOwner, FREEFORM_HEADER, isBarePicture, isFreeTransform } from "../core/freeform";
+import { endpointFreeformOwner, freeformOwner, FREEFORM_HEADER, isBarePicture, isDiagramPage, isFreeTransform } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, tracePath } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
@@ -16,7 +16,7 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
 import type { Group, ImageSlot, MindNode, RelAnchor, Relationship, ResolvedBorder, Sheet, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, routeEnv, bendHandles, boxesMid, worldWaypoints, type RouteEnv, type HeadShape, type Rect, type RelRoute, type BendHandle } from "../layout/relationship";
 import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
-import { groupBoxes, groupRadius, wavePoints, type Box, type GroupBox } from "../layout/groups";
+import { groupBoxes, groupRadius, groupShown, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
@@ -32,6 +32,24 @@ import type { Camera } from "./viewport";
 /** From this zoom up (50%) titles and code are drawn as vectors every frame;
  *  below it they come from the per-node bitmap cache, rescaled. */
 export const VECTOR_TEXT_MIN_SCALE = 0.5;
+
+/** A draw.io page (A4 portrait at 96 dpi, draw.io's default), in world units. */
+export const DIAGRAM_PAGE = { w: 827, h: 1169 };
+
+/**
+ * The block of pages a diagram occupies: every page any shape touches, and
+ * always the first one (at the origin), as whole-page columns and rows.
+ */
+export function diagramPages(placed: readonly { x: number; y: number; w: number; h: number }[]): { col0: number; row0: number; cols: number; rows: number } {
+  let c0 = 0, c1 = 0, r0 = 0, r1 = 0;
+  for (const p of placed) {
+    c0 = Math.min(c0, Math.floor(p.x / DIAGRAM_PAGE.w));
+    c1 = Math.max(c1, Math.floor((p.x + p.w - 0.01) / DIAGRAM_PAGE.w));
+    r0 = Math.min(r0, Math.floor(p.y / DIAGRAM_PAGE.h));
+    r1 = Math.max(r1, Math.floor((p.y + p.h - 0.01) / DIAGRAM_PAGE.h));
+  }
+  return { col0: c0, row0: r0, cols: c1 - c0 + 1, rows: r1 - r0 + 1 };
+}
 
 export interface DropIndicator {
   mode: "child" | "before" | "after" | "floating" | "none";
@@ -55,6 +73,8 @@ export interface RenderState {
   relSel?: string | null;
   groupSel?: string | null;
   summarySel?: string | null;
+  /** Draw every link (Group.link), not only those of the selection. */
+  showLinks?: boolean;
   /** Node whose image is selected (mutually exclusive with node selection). */
   imageSel?: string | null;
   /** Which slot of `imageSel` was clicked (defaults to "top"). */
@@ -306,6 +326,8 @@ export class Renderer {
    * background is filled flat).
    */
   private readonly opaqueCanvas: boolean;
+  /** The sheet being painted is in diagram mode (set per paint pass). */
+  private curDiagram = false;
   /** E2: Offscreen scene cache for pan/zoom. */
   private sceneCacheCanvas: HTMLCanvasElement | null = null;
   private sceneCacheBuf: HTMLCanvasElement | null = null;
@@ -664,8 +686,11 @@ export class Renderer {
       if (isChartNote(n) && n.id !== openNote) { closedNotes++; continue; }
       add(n);
       // An open note brings its subtopics along (the layout put them in a
-      // column beside it); a closed one hides them with it.
-      if (isChartNote(n) && (state.showHidden === true || !n.collapsed)) {
+      // column beside it); a closed one hides them with it. In diagram mode
+      // every top-level shape brings the tree Tab grew from it (the layout
+      // placed it too).
+      const bringsTree = isChartNote(n) || sheet.structure.structureType === "diagram";
+      if (bringsTree && (state.showHidden === true || !n.collapsed)) {
         const stack = [...n.childrenIds];
         while (stack.length > 0) {
           const k = sheet.nodes[stack.shift()!];
@@ -1011,6 +1036,7 @@ export class Renderer {
 
     const s = state.camera.scale;
     this.curScale = s;
+    this.curDiagram = state.sheet.structure.structureType === "diagram";
     this.curCamX = state.camera.x;
     this.curCamY = state.camera.y;
     this.curViewW = state.viewW;
@@ -1022,7 +1048,8 @@ export class Renderer {
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
-    this.drawGrid(theme, state);
+    if (state.sheet.structure.structureType === "diagram") this.drawDiagramPages(theme, state);
+    else this.drawGrid(theme, state);
 
     this.textHits = 0;
     this.textMisses = 0;
@@ -1078,7 +1105,7 @@ export class Renderer {
      * Requiring both is what made a connector vanish as soon as its parent
      * scrolled off, while the child was still in view.
      */
-    const linkVisible = (a: Placed, b: Placed): boolean =>
+    const linkVisible = (a: Box, b: Box): boolean =>
       state.showHidden === true ||
       (Math.max(a.x + a.w, b.x + b.w) >= viewMinX &&
         Math.min(a.x, b.x) <= viewMaxX &&
@@ -1109,15 +1136,16 @@ export class Renderer {
     // arrow inside it. Arrows on the map stay under the topics, as always.
     let rels = 0;
     let relsDrawn = 0;
-    const overRels: [Placed, Placed, Relationship][] = [];
+    const overRels: [Box, Box, Relationship][] = [];
+    const relGeo = state.sheet.boundaries.length > 0 ? this.groupGeometry(state, byId) : undefined;
     for (const rel of state.sheet.relationships) {
       rels++;
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
+      const a = this.relEndBox(state, rel.fromId, byId, relGeo);
+      const b = this.relEndBox(state, rel.toId, byId, relGeo);
       if (state.relDraft?.replaces === rel.id) continue;
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
-        if (freeformOwner(state.sheet, rel.fromId) && freeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
+        if (endpointFreeformOwner(state.sheet, rel.fromId) && endpointFreeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
         else this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn);
       }
     }
@@ -1149,6 +1177,8 @@ export class Renderer {
               : 0;
     const junctionDots: Array<{ x: number; y: number; color: string }> = [];
     const seenJunctions = showJunctions ? new Set<string>() : null;
+    // Diagram mode draws parent → child as draw.io arrows, after the loops.
+    const diagramEdges: [Placed, Placed][] = [];
 
     const tweenActive = !!(state.tween && state.tween.size > 0);
     if (flags.batchedPaths && !tweenActive && typeof Path2D !== "undefined") {
@@ -1166,6 +1196,10 @@ export class Renderer {
         links++;
         if (!linkVisible(parent, p)) continue;
         linksDrawn++;
+        if (structure === "diagram") {
+          diagramEdges.push([parent, p]);
+          continue;
+        }
         if (chartNoteRoot(state.sheet, parent.node.id)) {
           noteLinks.push([parent, p]);
           continue;
@@ -1261,6 +1295,10 @@ export class Renderer {
         links++;
         if (!linkVisible(parent, p)) continue;
         linksDrawn++;
+        if (structure === "diagram") {
+          diagramEdges.push([parent, p]);
+          continue;
+        }
         if (chartNoteRoot(state.sheet, parent.node.id)) {
           noteLinks.push([parent, p]);
           continue;
@@ -1311,6 +1349,8 @@ export class Renderer {
         }
       }
     }
+
+    for (const [parent, kid] of diagramEdges) this.drawDiagramEdge(theme, parent, kid, s);
 
     // 3) nodes
     for (const p of visiblePlaced) {
@@ -1403,7 +1443,9 @@ export class Renderer {
     // 5) drop indicator
     if (state.drop && state.drop.mode !== "none") {
       const target = byId.get(state.drop.nodeId);
-      if (target) this.drawDropIndicator(theme, target, state.drop.mode);
+      // Moving shapes about a diagram's page is not "dropping into" anything:
+      // no frame round the whole paper.
+      if (target && !isDiagramPage(state.sheet, target.node.id)) this.drawDropIndicator(theme, target, state.drop.mode);
     }
 
     // 6) ghost preview of an image being dragged (internal reassignment) —
@@ -1477,6 +1519,89 @@ export class Renderer {
    * - fine:  draw.io's grid: 10-unit squares, a stronger line every 4, kept
    *          down to 4 px apart before it coarsens (by 4, the same handover).
    */
+  /**
+   * Diagram mode: draw.io's paper. Pages of DIAGRAM_PAGE size tile the world
+   * from the origin; as many are shown as the drawing covers (at least the
+   * first), so the sheet grows by whole pages in any direction the shapes go.
+   * The desk around them is a shade darker, the grid is drawn on the pages
+   * only, and the joins between pages are faint dashed lines.
+   */
+  private drawDiagramPages(theme: RenderTheme, state: RenderState): void {
+    const ctx = this.ctx;
+    const s = state.camera.scale;
+    const vx0 = state.camera.x - state.viewW / 2 / s;
+    const vy0 = state.camera.y - state.viewH / 2 / s;
+    const vw = state.viewW / s, vh = state.viewH / s;
+    const { w: PW, h: PH } = DIAGRAM_PAGE;
+    // The page canvas (the diagram's root) grows with its content; the paper
+    // is that canvas rounded UP to whole pages from its top-left corner.
+    const pageNode = isDiagramPage(state.sheet, state.sheet.rootNodeId) ? state.sheet.rootNodeId : null;
+    const pageRect = pageNode ? this.placedById(state).get(pageNode) : undefined;
+    // While a shape is dragged on the paper the canvas has not grown yet (it
+    // grows on release): the pages it is being taken to are shown already,
+    // from the live positions of the page's items.
+    const dragging = !!state.drop && state.drop.mode !== "none" && !!pageNode && state.drop.nodeId === pageNode;
+    let pages: { col0: number; row0: number; cols: number; rows: number };
+    let px: number, py: number;
+    if (pageRect) {
+      let x0 = pageRect.x, y0 = pageRect.y, x1 = pageRect.x + pageRect.w, y1 = pageRect.y + pageRect.h;
+      if (dragging) {
+        for (const q of this.placedNodes(state)) {
+          if (q.node.parentId !== pageNode) continue;
+          x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y);
+          x1 = Math.max(x1, q.x + q.w); y1 = Math.max(y1, q.y + q.h);
+        }
+      }
+      const c0 = Math.floor((x0 - pageRect.x) / PW), r0 = Math.floor((y0 - pageRect.y) / PH);
+      const c1 = Math.max(c0, Math.ceil((x1 - pageRect.x - 0.5) / PW) - 1), r1 = Math.max(r0, Math.ceil((y1 - pageRect.y - 0.5) / PH) - 1);
+      pages = { col0: c0, row0: r0, cols: c1 - c0 + 1, rows: r1 - r0 + 1 };
+      px = pageRect.x + c0 * PW;
+      py = pageRect.y + r0 * PH;
+    } else {
+      pages = diagramPages(this.placedNodes(state));
+      px = pages.col0 * PW;
+      py = pages.row0 * PH;
+    }
+    const pw = pages.cols * PW, ph = pages.rows * PH;
+
+    const base = state.background ?? theme.background;
+    const m = /^#([0-9a-f]{6})$/i.exec(base.trim());
+    const n = m ? parseInt(m[1], 16) : 0xf3f4f6;
+    const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+    const light = lum >= 0.4;
+    const paper = light && !state.background ? "#ffffff" : base;
+    const desk = light ? darken(paper === "#ffffff" ? "#f1f2f5" : base, 0.06) : darken(base, 0.35);
+
+    ctx.save();
+    ctx.fillStyle = desk;
+    ctx.fillRect(vx0, vy0, vw, vh);
+    // A soft drop shadow under the paper, then the paper.
+    ctx.fillStyle = light ? "rgba(0,0,0,0.10)" : "rgba(0,0,0,0.35)";
+    ctx.fillRect(px + 2 / s, py + 3 / s, pw, ph);
+    ctx.fillStyle = paper;
+    ctx.fillRect(px, py, pw, ph);
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, pw, ph);
+    ctx.clip();
+    this.drawGrid({ ...theme, background: paper }, { ...state, background: paper });
+    // Page joins only while a shape is being dragged on the paper, so you
+    // see where a page ends as you place it; they go away on release.
+    if (dragging && (pages.cols > 1 || pages.rows > 1)) {
+      ctx.strokeStyle = gridInk(paper, 0.22);
+      ctx.lineWidth = 1 / s;
+      ctx.setLineDash([6 / s, 6 / s]);
+      ctx.beginPath();
+      for (let c = 1; c < pages.cols; c++) { ctx.moveTo(px + c * PW, py); ctx.lineTo(px + c * PW, py + ph); }
+      for (let r = 1; r < pages.rows; r++) { ctx.moveTo(px, py + r * PH); ctx.lineTo(px + pw, py + r * PH); }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
   private drawGrid(theme: RenderTheme, state: RenderState): void {
     const pattern = state.grid ?? defaultGridPattern(theme);
     if (pattern === "none") return;
@@ -1601,6 +1726,60 @@ export class Renderer {
     path.closePath();
   }
 
+  /**
+   * Diagram mode: parent → child as a draw.io orthogonal arrow. It leaves the
+   * parent on the side facing the child and enters the child on the opposite
+   * side — right/left when the child is beside the parent, bottom/top when it
+   * is above or below — with one bend pair at the midpoint and a filled head.
+   */
+  private drawDiagramEdge(theme: RenderTheme, parent: Placed, child: Placed, scale: number): void {
+    const ctx = this.ctx;
+    const pcx = parent.x + parent.w / 2, pcy = parent.y + parent.h / 2;
+    const ccx = child.x + child.w / 2, ccy = child.y + child.h / 2;
+    const beside = child.x >= parent.x + parent.w || child.x + child.w <= parent.x;
+    const pts: { x: number; y: number }[] = [];
+    let dir: { x: number; y: number };
+    if (beside) {
+      const right = ccx > pcx;
+      const sx = right ? parent.x + parent.w : parent.x;
+      const ex = right ? child.x : child.x + child.w;
+      const mx = (sx + ex) / 2;
+      pts.push({ x: sx, y: pcy }, { x: mx, y: pcy }, { x: mx, y: ccy }, { x: ex, y: ccy });
+      dir = { x: right ? 1 : -1, y: 0 };
+    } else {
+      const down = ccy > pcy;
+      const sy = down ? parent.y + parent.h : parent.y;
+      const ey = down ? child.y : child.y + child.h;
+      const my = (sy + ey) / 2;
+      pts.push({ x: pcx, y: sy }, { x: pcx, y: my }, { x: ccx, y: my }, { x: ccx, y: ey });
+      dir = { x: 0, y: down ? 1 : -1 };
+    }
+    const width = Math.max(1.25, 1 / scale);
+    const head = 8;
+    const end = pts[pts.length - 1];
+    // The line stops where the head begins, so the head's tip is sharp.
+    const lineEnd = { x: end.x - dir.x * head * 0.8, y: end.y - dir.y * head * 0.8 };
+    ctx.save();
+    ctx.strokeStyle = theme.text;
+    ctx.fillStyle = theme.text;
+    ctx.lineWidth = width;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length - 1; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.lineTo(lineEnd.x, lineEnd.y);
+    ctx.stroke();
+    const nx = -dir.y, ny = dir.x;
+    ctx.beginPath();
+    ctx.moveTo(end.x, end.y);
+    ctx.lineTo(end.x - dir.x * head + nx * head * 0.45, end.y - dir.y * head + ny * head * 0.45);
+    ctx.lineTo(end.x - dir.x * head * 0.7, end.y - dir.y * head * 0.7);
+    ctx.lineTo(end.x - dir.x * head - nx * head * 0.45, end.y - dir.y * head - ny * head * 0.45);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
   private drawConnector(
     parent: Placed,
     child: Placed,
@@ -1652,6 +1831,8 @@ export class Renderer {
     const boxShape = n.style.code ? "rounded" : isBarePicture(n) ? "none" : n.style.shape ?? "rounded";
     const accent =
       flags.accentStrip &&
+      !theme.tintedTopics &&
+      state.sheet.structure.structureType !== "diagram" &&
       depth >= 2 &&
       !n.style.fill &&
       !n.style.code &&
@@ -1663,7 +1844,7 @@ export class Renderer {
       (boxShape === "rounded" || boxShape === "rect") &&
       !freeformOwner(state.sheet, n.id);
     const fill = accent ? theme.deepFill : this.resolveFill(theme, n, state.sheet);
-    const text = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
+    const text = this.defaultTextColor(theme, n, depth, fill);
     return { fill, text };
   }
 
@@ -1689,6 +1870,12 @@ export class Renderer {
    */
   private resolveFill(theme: RenderTheme, n: MindNode, sheet: Sheet): string {
     if (n.style.fill) return n.style.fill;
+    // Diagram: draw.io shapes are white boxes on the paper; plain text stays
+    // transparent, and so do containers.
+    if (sheet.structure.structureType === "diagram") {
+      if (n.style.freeform) return "transparent";
+      return n.style.shape && n.style.shape !== "none" ? theme.deepFill : "transparent";
+    }
     if (!n.style.freeform && freeformOwner(sheet, n.id)) return "transparent";
     const depth = this.depthOf(n, sheet);
     if (depth === 0) return theme.rootFill;
@@ -1699,7 +1886,7 @@ export class Renderer {
       if (root?.style.fill) return root.style.fill;
       return theme.branch[this.branchIndex(n, sheet)];
     }
-    if (depth === 2) {
+    if (depth === 2 || (theme.tintedTopics && depth > 2)) {
       // Their children are the lightened step, derived from the main topic's
       // colour — which may itself be the root's colour, inherited. Uncoloured
       // branches keep the palette soft tint, as before.
@@ -1710,6 +1897,20 @@ export class Renderer {
       return theme.branchSoft[this.branchIndex(n, sheet)];
     }
     return theme.deepFill;
+  }
+
+  /** A topic's text colour when it has none of its own. */
+  private defaultTextColor(theme: RenderTheme, n: MindNode, depth: number, fill: string): string {
+    if (n.style.textColor) return n.style.textColor;
+    const boxed = fill && fill !== "transparent" && n.style.shape !== "none";
+    if (n.type === "central") {
+      // A root drawn without a box sits on the paper: its text must read on
+      // the background, whatever the root fill would have been.
+      if (theme.contrastMainText) return boxed ? readableOn(fill) : theme.rootText;
+      return theme.rootText;
+    }
+    if (theme.contrastMainText && depth === 1 && boxed) return readableOn(fill);
+    return theme.text;
   }
 
   /**
@@ -1758,6 +1959,12 @@ export class Renderer {
   private resolveBorder(theme: RenderTheme, n: MindNode, sheet: Sheet): ResolvedBorder | null {
     const { stroke, borderWidth, borderStyle } = n.style;
     if (borderStyle === "none" || stroke === "transparent") return null;
+    // Diagram mode: draw.io's dark outline, not the branch colour.
+    if (sheet.structure.structureType === "diagram" && (stroke === undefined || stroke === BRANCH_STROKE)
+      && !!n.style.shape && n.style.shape !== "none" && !n.style.freeform && !isBarePicture(n)) {
+      const width = Math.max(borderStyle === "double" ? 3 : 0.5, borderWidth ?? 1.5);
+      return { color: theme.text, width, ...borderDash(borderStyle, width), double: borderStyle === "double" };
+    }
     if (stroke === undefined && borderWidth === undefined && borderStyle === undefined) {
       // A text-only topic (or an image item inside a freeform canvas with no explicit shape) has no box for the hairline to trace.
       const freeformImageOnly = !n.style.shape && !n.style.fill && !n.style.code && !!(n.style.image || n.style.imageBottom || n.style.imageLeft || n.style.imageRight) && !!freeformOwner(sheet, n.id);
@@ -1914,6 +2121,9 @@ export class Renderer {
   }
 
   private drawFreeform(theme: RenderTheme, p: Placed, state?: RenderState): void {
+    // A diagram's page is painted as draw.io paper under everything
+    // (drawDiagramPages), not as a canvas box with a title band.
+    if (state && isDiagramPage(state.sheet, p.node.id)) return;
     const ctx = this.ctx;
     ctx.save();
     ctx.fillStyle = p.node.style.fill ?? theme.freeformFill ?? theme.background;
@@ -2028,6 +2238,8 @@ export class Renderer {
   ): void {
     const n = p.node;
     const selected = state.selection.has(n.id);
+    // The diagram page is the paper: no hover or selection ring round it.
+    if (isDiagramPage(state.sheet, n.id)) return;
     if (n.style.freeform) {
       if (selected || state.hoverId === n.id) {
         ctx.save();
@@ -2257,6 +2469,8 @@ export class Renderer {
     const editing = state.editingId === n.id;
     const selected = state.selection.has(n.id);
     if (n.style.freeform) {
+      // The diagram page has no frame, ring or handles: it is the paper.
+      if (isDiagramPage(state.sheet, n.id)) return;
       if (paintBackground) this.drawFreeform(theme, p);
       if (drawOverlays && (selected || state.hoverId === n.id)) {
         ctx.save(); ctx.strokeStyle = theme.selection;
@@ -2285,6 +2499,8 @@ export class Renderer {
 
     const accentStripActive =
       flags.accentStrip &&
+      !theme.tintedTopics &&
+      state.sheet.structure.structureType !== "diagram" &&
       depth >= 2 &&
       !n.style.fill &&
       !isCode &&
@@ -2301,7 +2517,7 @@ export class Renderer {
       fill = this.hoverFill(fill, theme.name);
     }
 
-    const textColor = n.style.textColor ?? (n.type === "central" ? theme.rootText : theme.text);
+    const textColor = this.defaultTextColor(theme, n, depth, fill);
     const tweenAlpha = state.tween?.get(n.id)?.alpha ?? 1;
     const opacity = (n.style.opacity ?? 1) * tweenAlpha;
     const rotated = !!n.style.rotation;
@@ -2817,7 +3033,7 @@ export class Renderer {
 
   /** A relationship arrow, with a real blurred shadow when V3 is on. Arrows
    *  are few, so shadowBlur is affordable here; it is skipped while moving. */
-  private drawRelationshipShadowed(theme: RenderTheme, a: Placed, b: Placed, rel: Relationship, state: RenderState, shadow: boolean): void {
+  private drawRelationshipShadowed(theme: RenderTheme, a: Box, b: Box, rel: Relationship, state: RenderState, shadow: boolean): void {
     const ctx = this.ctx;
     if (shadow) {
       const k = state.camera.scale * this.dpr; // shadow* ignore the transform
@@ -2825,7 +3041,7 @@ export class Renderer {
       ctx.shadowBlur = Math.min(24, 8 * k);
       ctx.shadowOffsetY = CONNECTOR_SHADOW_DY * k;
     }
-    this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, state.relSel === rel.id, this.relEnv(state, rel));
+    this.drawRelationship(theme, a, b, rel, rel.color ?? (rel.tree || state.sheet.structure.structureType === "diagram" ? theme.text : theme.selection), state.relSel === rel.id, this.relEnv(state, rel));
     if (shadow) {
       ctx.shadowColor = "transparent";
       ctx.shadowBlur = 0;
@@ -3056,7 +3272,8 @@ export class Renderer {
     // Pictures are content too: an empty title on a topic that owns an image
     // must not grow a hint on top of it.
     if (n.title.trim() === "") {
-      if (!this.hasPictures(n)) this.drawPlaceholder(p, color);
+      // A draw.io shape is allowed to be empty: no hint inside it.
+      if (!this.hasPictures(n) && !(this.curDiagram && n.style.shape && n.style.shape !== "none")) this.drawPlaceholder(p, color);
       return;
     }
     const pad = n.style.padding ?? 10;
@@ -3866,11 +4083,24 @@ export class Renderer {
     return routeEnv(state.sheet, this.placedNodes(state), rel);
   }
 
+  /** Resolve a relationship endpoint box (either a topic or a group boundary). */
+  private relEndBox(state: RenderState, id: string, byId: Map<string, Placed>, geo?: Map<string, GroupBox>): Box | null {
+    const nodeBox = byId.get(id);
+    if (nodeBox) return nodeBox;
+    if (state.sheet.boundaries.length === 0) return null;
+    return (geo ?? this.groupGeometry(state, byId)).get(id)?.box ?? null;
+  }
+
+  /** World-space box of a relationship endpoint (topic or group). */
+  relEndWorldRect(state: RenderState, id: string): Box | null {
+    return this.relEndBox(state, id, this.placedById(state));
+  }
+
   /** The world point a relationship's waypoints are measured from. */
   relOrigin(state: RenderState, rel: Relationship): { x: number; y: number } {
     const o = this.relEnv(state, rel).origin;
     if (o) return o;
-    const a = this.nodeWorldRect(state, rel.fromId), b = this.nodeWorldRect(state, rel.toId);
+    const a = this.relEndWorldRect(state, rel.fromId), b = this.relEndWorldRect(state, rel.toId);
     return a && b ? boxesMid(a, b) : { x: 0, y: 0 };
   }
 
@@ -3928,9 +4158,9 @@ export class Renderer {
     const draft = state.relDraft;
     if (draft) {
       const pt = { x: draft.pointer.x, y: draft.pointer.y, w: 0, h: 0 };
-      const a = draft.rel.fromId ? byId.get(draft.rel.fromId) : undefined;
-      const b = draft.rel.toId ? byId.get(draft.rel.toId) : undefined;
-      const target = draft.target ? byId.get(draft.target) : undefined;
+      const a = draft.rel.fromId ? this.relEndBox(state, draft.rel.fromId, byId) : null;
+      const b = draft.rel.toId ? this.relEndBox(state, draft.rel.toId, byId) : null;
+      const target = draft.target ? this.relEndBox(state, draft.target, byId) : null;
       if (target) {
         ctx.strokeStyle = theme.selection;
         ctx.lineWidth = 2 * k;
@@ -3941,8 +4171,8 @@ export class Renderer {
     }
     if (state.relSel) {
       const rel = state.sheet.relationships.find((r) => r.id === state.relSel);
-      const a = rel && byId.get(rel.fromId);
-      const b = rel && byId.get(rel.toId);
+      const a = rel && this.relEndBox(state, rel.fromId, byId);
+      const b = rel && this.relEndBox(state, rel.toId, byId);
       if (rel && a && b) {
         const route = this.relRoute(state, rel, a, b);
         for (const p of [route.start.tip, route.end.tip]) {
@@ -3974,11 +4204,16 @@ export class Renderer {
       }
       return;
     }
-    if (state.selection.size !== 1 || state.editingId) return;
-    const [id] = state.selection;
-    const p = byId.get(id);
-    if (!p || !freeformOwner(state.sheet, id)) return;
-    for (const h of connectHandles(p, this.curScale)) {
+    if (state.editingId) return;
+    let connectBox: Box | null = null;
+    if (state.selection.size === 1) {
+      const [id] = state.selection;
+      if (freeformOwner(state.sheet, id)) connectBox = byId.get(id) ?? null;
+    } else if (state.groupSel && endpointFreeformOwner(state.sheet, state.groupSel)) {
+      connectBox = this.relEndBox(state, state.groupSel, byId);
+    }
+    if (!connectBox) return;
+    for (const h of connectHandles(connectBox, this.curScale)) {
       ctx.beginPath();
       ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2);
       ctx.fillStyle = theme.selection;
@@ -4138,6 +4373,23 @@ export class Renderer {
     return { x: box.x + GROUP_LABEL_INSET, y: box.y - GROUP_LABEL_H / 2, w, h: GROUP_LABEL_H, text };
   }
 
+  /** World-space bounds of a group's title tab (or where a new title tab sits). */
+  groupTabWorldRect(state: RenderState, groupId: string): Box | null {
+    const g = state.sheet.boundaries.find((b) => b.id === groupId);
+    if (!g) return null;
+    const gb = groupBoxes(state.sheet, this.placedById(state)).get(groupId);
+    if (!gb) return null;
+    const tab = this.groupTab(g, gb.box);
+    if (tab) return { x: tab.x, y: tab.y, w: tab.w, h: tab.h };
+    const b = gb.box;
+    return {
+      x: b.x + GROUP_LABEL_INSET,
+      y: b.y - GROUP_LABEL_H / 2,
+      w: Math.min(120, Math.max(60, b.w - GROUP_LABEL_INSET * 2)),
+      h: GROUP_LABEL_H,
+    };
+  }
+
   private groupOnScreen(state: RenderState, b: Box): boolean {
     const s = state.camera.scale;
     if (b.x + b.w < state.camera.x - state.viewW / 2 / s - 40 || b.x > state.camera.x + state.viewW / 2 / s + 40) return false;
@@ -4160,6 +4412,11 @@ export class Renderer {
 
   /** Group fills go UNDER connectors and topics: a tint behind the branch,
    *  never a film over it. */
+  /** A link (Group.link) is drawn and clickable only while shown (groupShown). */
+  private groupVisible(state: RenderState, g: Group): boolean {
+    return groupShown(g, state);
+  }
+
   private drawGroupFills(state: RenderState, byId: Map<string, Placed>): void {
     if (!state.sheet.boundaries.some((g) => g.fill)) return;
     const ctx = this.ctx;
@@ -4168,7 +4425,7 @@ export class Renderer {
     const order = [...state.sheet.boundaries].sort((a, b) => (geo.get(b.id)?.covered.size ?? 0) - (geo.get(a.id)?.covered.size ?? 0));
     for (const g of order) {
       const gb = geo.get(g.id);
-      if (!g.fill || !gb || !this.groupOnScreen(state, gb.box)) continue;
+      if (!g.fill || !gb || !this.groupOnScreen(state, gb.box) || !this.groupVisible(state, g)) continue;
       ctx.save();
       ctx.globalAlpha = GROUP_FILL_ALPHA;
       ctx.fillStyle = g.fill;
@@ -4183,7 +4440,7 @@ export class Renderer {
     const geo = this.groupGeometry(state, byId);
     for (const g of state.sheet.boundaries) {
       const gb = geo.get(g.id);
-      if (!gb || !this.groupOnScreen(state, gb.occupied)) continue;
+      if (!gb || !this.groupOnScreen(state, gb.occupied) || !this.groupVisible(state, g)) continue;
       this.drawGroup(theme, g, gb.box, state.groupSel === g.id, s);
     }
     for (const sum of state.sheet.summaries) {
@@ -4324,12 +4581,13 @@ export class Renderer {
   /** Distance from a point to the relationship bezier, in world units. */
   hitTestRelationship(state: RenderState, wx: number, wy: number): string | null {
     const byId = this.placedById(state);
+    const geo = state.sheet.boundaries.length > 0 ? this.groupGeometry(state, byId) : undefined;
     const threshold = 8 / state.camera.scale;
     let best: string | null = null;
     let bestD = Infinity;
     for (const rel of state.sheet.relationships) {
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
+      const a = this.relEndBox(state, rel.fromId, byId, geo);
+      const b = this.relEndBox(state, rel.toId, byId, geo);
       if (!a || !b) continue;
       // The drawn route, not the old centre-to-centre curve: an elbow or an
       // anchored line runs somewhere else entirely.
@@ -4342,12 +4600,12 @@ export class Renderer {
     return best;
   }
 
-  /** World rect of a placed topic plus its route endpoints for a relationship. */
+  /** World rect of a placed topic/group plus its route endpoints for a relationship. */
   relationshipEnds(state: RenderState, relId: string): { from: { x: number; y: number }; to: { x: number; y: number } } | null {
     const rel = state.sheet.relationships.find((r) => r.id === relId);
     if (!rel) return null;
-    const a = this.nodeWorldRect(state, rel.fromId);
-    const b = this.nodeWorldRect(state, rel.toId);
+    const a = this.relEndWorldRect(state, rel.fromId);
+    const b = this.relEndWorldRect(state, rel.toId);
     if (!a || !b) return null;
     const route = this.relRoute(state, rel, a, b);
     return { from: route.start.tip, to: route.end.tip };
@@ -4362,8 +4620,8 @@ export class Renderer {
   hitTestBend(state: RenderState, wx: number, wy: number, reach = REL_END_R + 3): BendHandle | null {
     if (!state.relSel) return null;
     const rel = state.sheet.relationships.find((r) => r.id === state.relSel);
-    const a = rel && this.nodeWorldRect(state, rel.fromId);
-    const b = rel && this.nodeWorldRect(state, rel.toId);
+    const a = rel && this.relEndWorldRect(state, rel.fromId);
+    const b = rel && this.relEndWorldRect(state, rel.toId);
     if (!rel || !a || !b) return null;
     const tol = reach / state.camera.scale;
     let best: BendHandle | null = null, bestD = Infinity;
@@ -4396,12 +4654,18 @@ export class Renderer {
     return null;
   }
 
-  /** The connection arrow of a selected freeform item under the pointer. */
+  /** The connection arrow of a selected freeform item or group under the pointer. */
   hitTestConnectHandle(state: RenderState, wx: number, wy: number): { id: string; anchor: RelAnchor } | null {
-    if (state.relSel || state.selection.size !== 1) return null;
-    const [id] = state.selection;
-    if (!freeformOwner(state.sheet, id)) return null;
-    const r = this.nodeWorldRect(state, id);
+    if (state.relSel) return null;
+    let id: string | null = null;
+    if (state.selection.size === 1) {
+      const [sel] = state.selection;
+      if (freeformOwner(state.sheet, sel)) id = sel;
+    } else if (state.groupSel && endpointFreeformOwner(state.sheet, state.groupSel)) {
+      id = state.groupSel;
+    }
+    if (!id) return null;
+    const r = this.relEndWorldRect(state, id);
     if (!r) return null;
     for (const h of connectHandles(r, state.camera.scale)) {
       if (Math.hypot(wx - h.x, wy - h.y) <= h.r * 1.4) return { id, anchor: h.anchor };
@@ -4409,14 +4673,35 @@ export class Renderer {
     return null;
   }
 
+  /** Hit-test only the title tabs of groups; smallest group wins when nested. */
+  hitTestGroupTab(state: RenderState, wx: number, wy: number): string | null {
+    const placed = this.placedById(state);
+    const geo = groupBoxes(state.sheet, placed);
+    let best: string | null = null;
+    let bestArea = Infinity;
+    for (const g of state.sheet.boundaries) {
+      const gb = geo.get(g.id);
+      if (!gb || !this.groupVisible(state, g)) continue;
+      const tab = this.groupTab(g, gb.box);
+      if (!tab || wx < tab.x || wx > tab.x + tab.w || wy < tab.y || wy > tab.y + tab.h) continue;
+      const area = gb.box.w * gb.box.h;
+      if (area < bestArea) {
+        bestArea = area;
+        best = g.id;
+      }
+    }
+    return best;
+  }
+
   /**
    * A group is hit on its LINE (a band a few screen pixels wide) or its title
-   * tab — not anywhere inside the box (G4). The whole interior used to count,
-   * which made a marquee started inside a group impossible and let the first
-   * of two overlapping groups win every click. Among several hits the smallest
-   * box wins: a click on a nested group's line means that group.
+   * tab — not anywhere inside the box by default (G4), so a marquee started
+   * inside a group still works. Context menus pass `{ includeInterior: true }`
+   * so right-clicking anywhere inside the group opens its menu unless a topic
+   * was hit directly. Among several hits the smallest box wins: a click on a
+   * nested group resolves to that inner group.
    */
-  hitTestGroup(state: RenderState, wx: number, wy: number): string | null {
+  hitTestGroup(state: RenderState, wx: number, wy: number, opts?: { includeInterior?: boolean }): string | null {
     const placed = this.placedById(state);
     const geo = groupBoxes(state.sheet, placed);
     const s = state.camera.scale;
@@ -4424,14 +4709,15 @@ export class Renderer {
     let bestArea = Infinity;
     for (const g of state.sheet.boundaries) {
       const gb = geo.get(g.id);
-      if (!gb) continue;
+      if (!gb || !this.groupVisible(state, g)) continue;
       const b = gb.box;
       const tol = Math.max(6, (g.borderWidth ?? DEFAULT_GROUP_BORDER_WIDTH) / 2 + 3) / s + (g.shape === "wave" ? 3 : 0);
       const inOuter = wx >= b.x - tol && wx <= b.x + b.w + tol && wy >= b.y - tol && wy <= b.y + b.h + tol;
       const inInner = wx > b.x + tol && wx < b.x + b.w - tol && wy > b.y + tol && wy < b.y + b.h - tol;
       const tab = this.groupTab(g, b);
       const onTab = !!tab && wx >= tab.x && wx <= tab.x + tab.w && wy >= tab.y && wy <= tab.y + tab.h;
-      if (!onTab && !(inOuter && !inInner)) continue;
+      const hitBox = opts?.includeInterior ? inOuter : (inOuter && !inInner);
+      if (!onTab && !hitBox) continue;
       const area = b.w * b.h;
       if (area < bestArea) {
         bestArea = area;
@@ -5052,7 +5338,9 @@ export class Renderer {
     return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
   }
 
-  private paintFull(_ctx: CanvasRenderingContext2D, state: RenderState, theme: RenderTheme): void {
+  private paintFull(_ctx: CanvasRenderingContext2D, shown: RenderState, theme: RenderTheme): void {
+    // Links are invisible: an export never draws them, whatever is selected.
+    const state: RenderState = { ...shown, showLinks: false, selection: new Set(), groupSel: null };
     const all = this.placedNodes({ ...state, showHidden: true });
     const byId = new Map(all.map((p) => [p.node.id, p]));
     for (const p of all) if (p.node.style.freeform) this.drawFreeform(theme, p);
@@ -5064,7 +5352,7 @@ export class Renderer {
         if (inCanvas(rel) !== over) continue;
         const a = byId.get(rel.fromId);
         const b = byId.get(rel.toId);
-        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? theme.selection, false, this.relEnv(state, rel));
+        if (a && b) this.drawRelationship(theme, a, b, rel, rel.color ?? (rel.tree || state.sheet.structure.structureType === "diagram" ? theme.text : theme.selection), false, this.relEnv(state, rel));
       }
     };
     paintRels(false);

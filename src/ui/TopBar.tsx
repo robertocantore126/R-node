@@ -1,3 +1,4 @@
+import { ZOOM_STEP } from "../render/viewport";
 import { useEffect, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
@@ -12,6 +13,7 @@ const THEME_LABELS: Record<ThemeName, string> = {
   vanilla: "Vanilla",
   matte: "Matte",
   fog: "Fog",
+  xmind: "XMind",
 };
 
 export function TopBar(): JSX.Element {
@@ -20,6 +22,8 @@ export function TopBar(): JSX.Element {
   const [title, setTitle] = useState(state.docTitle);
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
+  const [newOpen, setNewOpen] = useState(false);
+  const newRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setTitle(state.docTitle);
@@ -28,6 +32,7 @@ export function TopBar(): JSX.Element {
   useEffect(() => {
     const close = (e: MouseEvent): void => {
       if (exportRef.current && !exportRef.current.contains(e.target as Node)) setExportOpen(false);
+      if (newRef.current && !newRef.current.contains(e.target as Node)) setNewOpen(false);
     };
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
@@ -68,9 +73,17 @@ export function TopBar(): JSX.Element {
         <button className="btn primary" data-help="Save" data-help-more="Persists the document to storage (Ctrl+S). Changes reach disk only when you press this." title="Save (Ctrl+S)" onClick={() => void store.saveNow()}>
           Save
         </button>
-        <button className="btn small" data-help="New document" data-help-more="Creates a fresh empty map. Nothing is saved until you press Save." onClick={() => store.newDocument()}>
-          + New
-        </button>
+        <div className="menu-wrap" ref={newRef}>
+          <button className="btn small" data-help="New document" data-help-more="Creates a fresh document: a mind map, or a draw.io-style diagram. Nothing is saved until you press Save." onClick={() => setNewOpen((o) => !o)}>
+            + New
+          </button>
+          {newOpen && (
+            <div className="menu">
+              <button data-help="New mind map" data-help-more="A map that grows from a central topic." onClick={() => { store.newDocument("map"); setNewOpen(false); }}>Mind map</button>
+              <button data-help="New diagram" data-help-more="draw.io-style shapes on pages that grow with the drawing; Tab adds a child shape." onClick={() => { store.newDocument("diagram"); setNewOpen(false); }}>Diagram (draw.io style)</button>
+            </div>
+          )}
+        </div>
         <button className="btn" data-help="Open" data-help-more="Opens a .rnode document from disk (Ctrl+O)." title="Open a .rnode file (Ctrl+O)" onClick={() => void store.loadFile()}>
           Open
         </button>
@@ -100,16 +113,36 @@ export function TopBar(): JSX.Element {
         >
           ❐ Group
         </button>
+        <button
+          className="btn"
+          data-help="Link"
+          data-help-more="Links the selected topics like a group, but invisibly: the link is drawn only when you select one of its topics, or with Show links on. It takes no room in the layout and is not exported."
+          title="Link the selected topics invisibly (🔗)"
+          disabled={state.selection.length < 1}
+          onClick={() => store.createLinkFromSelection()}
+        >
+          🔗 Link
+        </button>
+        <button
+          className={`btn icon${state.showLinks ? " on" : ""}`}
+          data-help="Show links"
+          data-help-more="On: every link of the map is drawn. Off: a link shows only while one of its topics is selected."
+          title={state.showLinks ? "Hide links" : "Show all links"}
+          aria-pressed={state.showLinks}
+          onClick={() => store.toggleShowLinks()}
+        >
+          👁
+        </button>
       </div>
 
       <div className="topbar-group zoom-group">
-        <button className="btn icon" data-help="Zoom out" data-help-more="Shrinks the view around the cursor (Ctrl+-)." title="Zoom out (Ctrl+-)" onClick={() => store.zoomStep(1 / 1.2, viewSize.w, viewSize.h)}>
+        <button className="btn icon" data-help="Zoom out" data-help-more="Shrinks the view around the cursor (Ctrl+-)." title="Zoom out (Ctrl+-)" onClick={() => store.zoomStep(1 / ZOOM_STEP, viewSize.w, viewSize.h)}>
           −
         </button>
         <button className="btn zoom-pct" data-help="Current zoom" data-help-more="Click to fit the whole map into view (Ctrl+1)." title="Fit view (Ctrl+1)" onClick={() => store.fitView(viewSize.w, viewSize.h)}>
           {Math.round(state.camera.scale * 100)}%
         </button>
-        <button className="btn icon" data-help="Zoom in" data-help-more="Enlarges the view around the cursor (Ctrl+=)." title="Zoom in (Ctrl+=)" onClick={() => store.zoomStep(1.2, viewSize.w, viewSize.h)}>
+        <button className="btn icon" data-help="Zoom in" data-help-more="Enlarges the view around the cursor (Ctrl+=)." title="Zoom in (Ctrl+=)" onClick={() => store.zoomStep(ZOOM_STEP, viewSize.w, viewSize.h)}>
           +
         </button>
       </div>
@@ -118,7 +151,7 @@ export function TopBar(): JSX.Element {
         <button
           className="btn theme-btn"
           data-help="Theme"
-          data-help-more="Switches between Light (white), Dark, Vanilla (warm paper), Matte (solid slate) and Fog (soft grey on graph paper). The choice is saved with the document."
+          data-help-more="Switches between Light (white), Dark, Vanilla (warm paper), Matte (solid slate), Fog (soft grey on graph paper) and XMind (white, XMind's colours). The choice is saved with the document."
           title={`Theme: ${THEME_LABELS[state.theme]} — click for the next one`}
           onClick={() => store.cycleTheme()}
         >

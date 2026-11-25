@@ -7,7 +7,7 @@
   --accent-soft: rgba(79, 70, 229, 0.14);
   --radius: 10px;
   --radius-sm: 8px;
-  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font: "Xmind", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "SF Mono", "Cascadia Code", Consolas, monospace;
 }
 
@@ -24,6 +24,34 @@
   --shadow: 0 10px 30px rgba(28, 35, 51, 0.16);
   --hover: rgba(28, 35, 51, 0.06);
   color-scheme: light;
+}
+
+/* XMind: the light chrome of XMind's own app. White bars and panels on a
+   faint cool-grey page, navy text, XMind blue for focus and the primary
+   button; the canvas itself is white paper (render/theme.ts "xmind"). */
+:root[data-theme="xmind"] {
+  --bg: #f4f5f8;
+  --chrome: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f1f2f6;
+  --border: #e5e7ee;
+  --text: #1f2133;
+  --text-muted: #6b6e80;
+  --accent: #486aff;
+  --accent-soft: rgba(72, 106, 255, 0.12);
+  --danger: #f9423a;
+  --shadow: 0 8px 28px rgba(0, 2, 41, 0.12);
+  --hover: rgba(0, 2, 41, 0.05);
+  color-scheme: light;
+}
+
+:root[data-theme="xmind"] .topbar,
+:root[data-theme="xmind"] .statusbar {
+  background: var(--chrome);
+}
+
+:root[data-theme="xmind"] .canvas-area {
+  border-color: var(--border);
 }
 
 :root[data-theme="matte"] {
@@ -3133,4 +3161,64 @@ input[type="range"] {
   flex-wrap: wrap;
   gap: 4px;
   margin-bottom: 6px;
+}
+
+/* ---------- Diagram mode: draw.io-style shape bar, left of the map ---------- */
+
+.diagram-palette {
+  position: absolute;
+  top: 104px;
+  left: 12px;
+  z-index: 6;
+  width: 132px;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  user-select: none;
+}
+
+.diagram-palette-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 2px 6px;
+}
+
+.diagram-palette-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.diagram-palette-item {
+  display: grid;
+  place-items: center;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: grab;
+}
+
+.diagram-palette-item:hover {
+  background: var(--surface-2);
+}
+
+.diagram-palette-hint {
+  margin: 6px 2px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.diagram-palette-ghost {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(2);
+  color: var(--accent);
+  opacity: 0.85;
 }

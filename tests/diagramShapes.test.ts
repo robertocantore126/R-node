@@ -9,6 +9,21 @@ import { applyLayout } from "../src/layout/mindmap";
 const points = (cmds: PathCmd[]): number[][] =>
   cmds.flatMap((c) => (c[0] === "Z" ? [] : c[0] === "C" ? [[c[5], c[6]]] : [[c[1], c[2]]]));
 
+describe("diagram page in SVG export", () => {
+  it("is not drawn as a canvas: no frame, no \"Freeform\" label", async () => {
+    const sheet = DocumentModel.blankDiagram("d").sheets[0];
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+    const out = await sheetToSvg(sheet, {
+      measurer: HEURISTIC_MEASURER,
+      colorOf: () => ({ fill: "#ffffff", text: "#000000" }),
+      linkColorOf: () => "#888888",
+      background: null,
+    });
+    expect(out.svg).not.toContain(">Freeform<");
+    expect(out.svg).not.toContain('rx="12"');
+  });
+});
+
 describe("diagram shape paths", () => {
   it("every outline is closed, and every point lies on or inside its box", () => {
     for (const shape of DIAGRAM_SHAPES) {

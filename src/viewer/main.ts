@@ -104,6 +104,17 @@ async function start(): Promise<void> {
   // not carry a narrowing on a mutable global into them.
   const doc: ViewerDoc = await readPayload(loaded);
   document.title = doc.title;
+  // The embedded app font must be ready before the first measurement, or the
+  // topics are sized for the fallback face. Bounded: a viewer that cannot
+  // load it still opens, with the fallback.
+  try {
+    await Promise.race([
+      document.fonts.load('500 16px "Xmind"'),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
+  } catch {
+    /* fallback face */
+  }
 
   const canvas = document.createElement("canvas");
   canvas.style.cssText = "display:block;width:100%;height:100%;cursor:grab";

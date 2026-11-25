@@ -24,6 +24,8 @@ export type CanvasGesture =
   | { kind: "node-drag"; nodeId: string; grabOffsetX: number; grabOffsetY: number }
   /** A multi-selection inside one freeform canvas moving together (draw.io style). */
   | { kind: "group-drag"; nodeId: string; startWorldX: number; startWorldY: number }
+  /** A group boundary carried by its title tab, moving all enclosed items together. */
+  | { kind: "boundary-drag"; groupId: string; startWorldX: number; startWorldY: number }
   | { kind: "resize-topic"; nodeId: string; side: "left" | "right"; startWorldX: number; startWidth: number; startX: number }
   /** A canvas resized from one of its four corners; the start is in screen pixels. */
   | { kind: "resize-freeform"; nodeId: string; corner: "nw" | "ne" | "sw" | "se"; startScreenX: number; startScreenY: number }
@@ -55,11 +57,12 @@ const BACK_TO_IDLE = ["idle"] as const;
 
 /** A gesture only ever starts from idle and only ever ends there. */
 export const CANVAS_GESTURE_TABLE: TransitionTable<CanvasGesture> = {
-  idle: ["pan", "marquee", "node-drag", "group-drag", "resize-topic", "resize-freeform", "resize-item", "rotate-item", "resize-image", "move-image", "move-cell", "connect", "rel-bend", "chart-grow", "ink-stroke", "ink-erase"],
+  idle: ["pan", "marquee", "node-drag", "group-drag", "boundary-drag", "resize-topic", "resize-freeform", "resize-item", "rotate-item", "resize-image", "move-image", "move-cell", "connect", "rel-bend", "chart-grow", "ink-stroke", "ink-erase"],
   pan: BACK_TO_IDLE,
   marquee: BACK_TO_IDLE,
   "node-drag": BACK_TO_IDLE,
   "group-drag": BACK_TO_IDLE,
+  "boundary-drag": BACK_TO_IDLE,
   "resize-topic": BACK_TO_IDLE,
   "resize-freeform": BACK_TO_IDLE,
   "resize-item": BACK_TO_IDLE,

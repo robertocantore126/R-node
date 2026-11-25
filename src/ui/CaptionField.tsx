@@ -21,11 +21,13 @@ interface Props {
   /** Font size in screen pixels (caption size × zoom). */
   fontSize: number;
   caption: string;
+  placeholder?: string;
+  ariaLabel?: string;
   onCommit: (text: string) => void;
   onCancel: () => void;
 }
 
-export function CaptionField({ rect, fontSize, caption, onCommit, onCancel }: Props): JSX.Element {
+export function CaptionField({ rect, fontSize, caption, placeholder, ariaLabel, onCommit, onCancel }: Props): JSX.Element {
   const [text, setText] = useState(caption);
   const ref = useRef<HTMLInputElement>(null);
   // Escape must not ALSO commit through the blur that unmounting causes.
@@ -64,8 +66,8 @@ export function CaptionField({ rect, fontSize, caption, onCommit, onCancel }: Pr
       style={style}
       type="text"
       value={text}
-      placeholder="title"
-      aria-label="Cell title"
+      placeholder={placeholder ?? "title"}
+      aria-label={ariaLabel ?? "Cell title"}
       spellCheck={false}
       onChange={(e) => setText(e.target.value)}
       onBlur={() => finish(true)}

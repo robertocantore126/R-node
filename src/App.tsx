@@ -91,9 +91,17 @@ export function App(): JSX.Element {
 
       <Palette />
 
-      {state.quizOpen && <QuizWindow key={`${state.quizOpen.nodeId}:${state.quizOpen.quizId}`} />}
+      {state.quizOpen && (
+        <QuizWindow
+          key={"groupId" in state.quizOpen ? `g:${state.quizOpen.groupId}:${state.quizOpen.quizId}` : `${state.quizOpen.nodeId}:${state.quizOpen.quizId}`}
+        />
+      )}
       {state.aiDiagramOpen && <AiDiagramWindow key={state.aiDiagramOpen.nodeId} nodeId={state.aiDiagramOpen.nodeId} />}
-      {state.flashcardsOpen && <FlashcardWindow key={`${state.flashcardsOpen.nodeId}:${state.flashcardsOpen.deckId}`} />}
+      {state.flashcardsOpen && (
+        <FlashcardWindow
+          key={"groupId" in state.flashcardsOpen ? `g:${state.flashcardsOpen.groupId}:${state.flashcardsOpen.deckId}` : `${state.flashcardsOpen.nodeId}:${state.flashcardsOpen.deckId}`}
+        />
+      )}
 
       {state.message && (
         <div className="toast" onClick={() => store.toast("")}>

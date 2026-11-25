@@ -15,7 +15,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { useStore } from "../editor/context";
 import { flashcardCounts, flashcardRunOrder } from "../core/flashcards";
-import type { FlashcardRating } from "../core/types";
+import { groupLabel, type FlashcardRating } from "../core/types";
 import { clearStudyProgress, loadStudyProgress, saveStudyProgress, validFlashcardProgress } from "./studyProgress";
 
 const RATINGS: { rating: FlashcardRating; label: string; key: string }[] = [
@@ -27,14 +27,20 @@ const RATINGS: { rating: FlashcardRating; label: string; key: string }[] = [
 export function FlashcardWindow(): JSX.Element | null {
   const store = useStore();
   const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
-  const nodeId = state.flashcardsOpen?.nodeId ?? null;
-  const deckId = state.flashcardsOpen?.deckId ?? null;
-  const node = nodeId ? store.doc.node(nodeId) : null;
-  const deck = nodeId && deckId ? node?.style.flashcards?.find((d) => d.id === deckId) ?? null : null;
+  const open = state.flashcardsOpen;
+  const isGroup = !!open && "groupId" in open;
+  const ownerId = open ? (isGroup ? open.groupId : open.nodeId) : null;
+  const ownerKey = open ? (isGroup ? `group:${open.groupId}` : open.nodeId) : null;
+  const deckId = open?.deckId ?? null;
+  const node = !isGroup && ownerId ? store.doc.node(ownerId) : null;
+  const group = isGroup && ownerId ? store.sheet.boundaries.find((g) => g.id === ownerId) ?? null : null;
+  const deck = deckId
+    ? (isGroup ? group?.flashcards?.find((d) => d.id === deckId) : node?.style.flashcards?.find((d) => d.id === deckId)) ?? null
+    : null;
 
   // Resume where the last run stopped, if it still fits this deck.
   const [saved] = useState(() =>
-    nodeId && deckId && deck ? validFlashcardProgress(loadStudyProgress(nodeId, deckId), deck.cards.length) : null);
+    ownerKey && deckId && deck ? validFlashcardProgress(loadStudyProgress(ownerKey, deckId), deck.cards.length) : null);
   const [byCriticality, setByCriticality] = useState(saved?.byCriticality ?? false);
   const [order, setOrder] = useState<number[]>(() => saved?.order ?? (deck ? flashcardRunOrder(deck, false) : []));
   const [pos, setPos] = useState(saved?.pos ?? 0);
@@ -46,10 +52,10 @@ export function FlashcardWindow(): JSX.Element | null {
 
   // A finished run is forgotten, so the next open starts from card 1.
   useEffect(() => {
-    if (!nodeId || !deckId || order.length === 0) return;
-    if (done) clearStudyProgress(nodeId, deckId);
-    else saveStudyProgress(nodeId, deckId, { order, pos, byCriticality });
-  }, [nodeId, deckId, order, pos, byCriticality, done]);
+    if (!ownerKey || !deckId || order.length === 0) return;
+    if (done) clearStudyProgress(ownerKey, deckId);
+    else saveStudyProgress(ownerKey, deckId, { order, pos, byCriticality });
+  }, [ownerKey, deckId, order, pos, byCriticality, done]);
 
   const restart = useCallback((critical: boolean): void => {
     if (!deck) return;
@@ -60,11 +66,12 @@ export function FlashcardWindow(): JSX.Element | null {
   }, [deck]);
 
   const rate = useCallback((rating: FlashcardRating): void => {
-    if (!nodeId || !deckId || cardIndex === undefined) return;
-    store.rateFlashcard(nodeId, deckId, cardIndex, rating);
+    if (!ownerId || !deckId || cardIndex === undefined) return;
+    if (isGroup) store.rateGroupFlashcard(ownerId, deckId, cardIndex, rating);
+    else store.rateFlashcard(ownerId, deckId, cardIndex, rating);
     setPos((p) => p + 1);
     setFlipped(false);
-  }, [store, nodeId, deckId, cardIndex]);
+  }, [store, isGroup, ownerId, deckId, cardIndex]);
 
   const step = useCallback((delta: number): void => {
     setPos((p) => Math.max(0, Math.min(order.length - 1, p + delta)));
@@ -95,9 +102,9 @@ export function FlashcardWindow(): JSX.Element | null {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [store, done, rate, step]);
 
-  if (!node || !deck || deck.cards.length === 0) return null;
+  if ((!node && !group) || !deck || deck.cards.length === 0) return null;
 
-  const title = deck.name ?? node.title ?? "Flashcards";
+  const title = deck.name ?? (isGroup ? (group ? groupLabel(group) : null) ?? "Group flashcards" : node?.title || "Flashcards");
   const counts = flashcardCounts(deck);
   const orderToggle = (
     <button

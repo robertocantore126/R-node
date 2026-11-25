@@ -18,7 +18,7 @@ Rules:
     three sentences.
 - One idea per card. Do not put the answer in the term.
 - Lines starting with (note), (labels), (cell N), (picture N), (arrow ...),
-  (group) or (summary) are not topics: they are the content of the topic above
+  (group), (link) or (summary) are not topics: they are the content of the topic above
   them (its notes, a chart cell's caption, an arrow and its label, ...). Make
   cards from that content too.
 - Only use material that is IN the outline; do not invent facts.

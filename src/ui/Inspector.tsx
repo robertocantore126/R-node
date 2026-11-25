@@ -493,12 +493,21 @@ function SheetControls(): JSX.Element {
         onChange={(e) => setTitle(e.target.value)}
         onBlur={() => { if (title !== sheet.title) store.setSheetTitle(title); }}
       />
-      <div className="field">
-        <span data-help="Structure" data-help-more="The layout algorithm: mindmap (radial), logic, tree, org, timeline, fishbone, matrix, treetable or freeform (manual).">Structure</span>
-        <select value={sheet.structure.structureType} onChange={(e) => store.setStructure({ structureType: e.target.value as typeof STRUCTURES[number] })}>
-          {STRUCTURES.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-      </div>
+      {sheet.structure.structureType === "diagram" ? (
+        // A diagram is its own kind of document (chosen at New), not one of
+        // a mind map's layouts: there is nothing to switch to or from here.
+        <div className="field">
+          <span data-help="Type" data-help-more="A draw.io-style diagram: shapes on pages. The type is chosen when the document is created.">Type</span>
+          <span className="muted">Diagram</span>
+        </div>
+      ) : (
+        <div className="field">
+          <span data-help="Structure" data-help-more="The layout algorithm: mindmap (radial), logic, tree, org, timeline, fishbone, matrix, treetable or freeform (manual).">Structure</span>
+          <select value={sheet.structure.structureType} onChange={(e) => store.setStructure({ structureType: e.target.value as typeof STRUCTURES[number] })}>
+            {STRUCTURES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      )}
       <div className="field">
         <span data-help="Orientation" data-help-more="Whether the map grows horizontally or vertically. Not available for mindmap/freeform.">Orientation</span>
         <select value={sheet.structure.orientation} onChange={(e) => store.setStructure({ orientation: e.target.value as "horizontal" | "vertical" })} disabled={sheet.structure.structureType === "mindmap" || sheet.structure.structureType === "freeform"}>

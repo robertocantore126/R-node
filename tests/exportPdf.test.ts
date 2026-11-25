@@ -97,6 +97,24 @@ describe("vector editor surfaces", () => {
     expect(content).not.toMatch(/ l\nS\nQ\n\(Canvas title\)/);
   });
 
+  it("draws a diagram's page as paper: no canvas frame, no \"Freeform\", no hint", async () => {
+    const sheet = DocumentModel.blankDiagram("d").sheets[0];
+    const first = sheet.nodes[sheet.nodes[sheet.rootNodeId].childrenIds[0]];
+    first.title = "Start";
+    first.titleRuns = [{ text: "Start" }];
+    applyLayout(sheet, false, HEURISTIC_MEASURER);
+    const content = (await pageStreams((await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light })).blob)).join("\n");
+    expect(content).toContain("(Start) Tj");
+    expect(content).not.toContain("(Freeform) Tj");
+    expect(content).not.toContain("Double-click to add");
+    // An emptied diagram prints no hint either.
+    sheet.nodes[sheet.rootNodeId].childrenIds = [];
+    delete sheet.nodes[first.id];
+    const empty = (await pageStreams((await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light })).blob)).join("\n");
+    expect(empty).not.toContain("Double-click to add");
+    expect(empty).not.toContain("(Freeform) Tj");
+  });
+
   it("paints the page grid as dots, as the editor does", async () => {
     const { sheet } = boardMap();
     const out = await sheetToPdf(sheet, { ...OPTS, theme: THEMES.light, grid: true });

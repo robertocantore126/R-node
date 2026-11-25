@@ -6,7 +6,10 @@
  */
 import {
   DEFAULT_STRUCTURE,
+  FONT_DEFAULTS_VERSION,
   SCHEMA_VERSION,
+  TOPIC_FONT_SIZE,
+  TOPIC_FONT_WEIGHT,
   type MindNode,
   type NodeType,
   type RnodeDocument,
@@ -157,10 +160,42 @@ export class DocumentModel {
       updatedAt: nowIso(),
       archived: false,
       pinned: false,
-      settings: { theme: "matte", showOutliner: false, showInspector: true },
+      settings: { theme: "matte", showOutliner: false, showInspector: true, fontDefaults: FONT_DEFAULTS_VERSION },
       themeId: "r-node-matte",
       sheets: [sheet],
     };
+  }
+
+  /**
+   * An empty draw.io-style diagram: light paper with a grid. Its root is the
+   * PAGE — a freeform canvas one A4 page big (827 x 1169) that the renderer
+   * draws as draw.io's paper and that grows as shapes go past its edges.
+   * Every shape, text and arrow of the diagram is an item of it, so it has
+   * everything a canvas has: the double-click picker, arrows from the shape
+   * handles, corner resize, snapping, marquee. One empty rounded shape
+   * starts it off, ready for Tab.
+   */
+  static blankDiagram(title = "Untitled diagram"): RnodeDocument {
+    const doc = DocumentModel.blank(title);
+    const sheet = doc.sheets[0];
+    sheet.title = "Page 1";
+    sheet.structure = { ...sheet.structure, structureType: "diagram", orientation: "horizontal" };
+    const root = sheet.nodes[sheet.rootNodeId];
+    root.title = "";
+    root.titleRuns = [{ text: "" }];
+    root.style = { freeform: true, width: 827, height: 1169, shape: "rect", fill: "transparent", stroke: "transparent", fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT };
+    root.position = { x: 0, y: 0, manual: true };
+    const first = DocumentModel.makeNode("subtopic", root.id, "", {
+      shape: "rounded", width: 120, height: 60, borderWidth: 1.5, align: "center",
+      fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT,
+      freeformPosition: { x: 120, y: 120 },
+    });
+    first.titleRuns = [{ text: "" }];
+    first.position = { x: 120, y: 120, manual: false };
+    sheet.nodes[first.id] = first;
+    root.childrenIds = [first.id];
+    doc.settings = { ...doc.settings, theme: "light", grid: "lines" };
+    return doc;
   }
 
   /** Demo document so the first launch is not a blank canvas. */
@@ -216,9 +251,9 @@ export class DocumentModel {
     const typeStyle: Style = type === "central"
       ? { fontSize: 22, fontWeight: 700, padding: 4, shape: "none" }
       : type === "main"
-        ? { fontSize: 14, fontWeight: 600, padding: 9, cornerRadius: 8, shape: "rounded" }
+        ? { fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT, padding: 9, cornerRadius: 8, shape: "rounded" }
         : type === "subtopic"
-          ? { fontSize: 12, fontWeight: 400, padding: 7, cornerRadius: 8, shape: "rounded", align: "left" }
+          ? { fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT, padding: 7, cornerRadius: 8, shape: "rounded", align: "left" }
           : { fontSize: 14, fontWeight: 400, padding: 9, cornerRadius: 8, shape: "rounded" };
     return {
       id: uid("n"),

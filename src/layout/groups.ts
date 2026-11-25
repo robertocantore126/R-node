@@ -9,8 +9,26 @@
  * plus every group nested inside it, so an inner box never sits on the outer
  * one's line.
  */
-import { groupLabel, type GroupShape, type Sheet } from "../core/types";
+import { groupLabel, type Group, type GroupShape, type Sheet } from "../core/types";
 import { GROUP_LABEL_H, GROUP_PAD } from "./measure";
+
+/**
+ * Whether a group is drawn (and can be clicked) right now. Ordinary groups
+ * always are; a link (Group.link) only while one of its topics or the link
+ * itself is selected, or while "Show links" is on.
+ */
+export function groupShown(
+  g: Group,
+  view: { showLinks?: boolean; selection: ReadonlySet<string>; groupSel?: string | null },
+): boolean {
+  if (!g.link || view.showLinks || view.groupSel === g.id) return true;
+  return g.memberIds.some((id) => view.selection.has(id));
+}
+
+/** The groups that take room in the layout and appear in exports: not links. */
+export function solidGroups(sheet: Sheet): Group[] {
+  return sheet.boundaries.filter((g) => !g.link);
+}
 
 export interface Box {
   x: number;
@@ -64,7 +82,8 @@ export function groupBoxes(sheet: Sheet, placed: Map<string, Box>): Map<string, 
     const lift = groupLabel(g) ? GROUP_LABEL_H / 2 : 0;
     const occupied = { x: box.x, y: box.y - lift, w: box.w, h: box.h + lift };
     out.set(g.id, { box, occupied, covered });
-    done.push({ covered, occupied });
+    // A link is invisible: a box drawn round it would leave a gap for nothing.
+    if (!g.link) done.push({ covered, occupied });
   }
   return out;
 }

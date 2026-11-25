@@ -7,6 +7,8 @@ export const FREEFORM_PADDING = 16;
 export type FreeformShape = Extract<
   TopicShape,
   "rect" | "rounded" | "capsule" | "circle" | "diamond" | "hexagon" | "ellipse" | "cylinder" | "document" | "parallelogram" | "triangle" | "process" | "note" | "actor"
+  | "trapezoid" | "manualInput" | "delay" | "offPage" | "internalStorage" | "multiDocument"
+  | "step" | "arrowRight" | "doubleArrow" | "cross" | "star" | "octagon" | "cube" | "callout" | "cloud"
 >;
 export const FREEFORM_SHAPES: { shape: FreeformShape; label: string }[] = [
   { shape: "rect", label: "Rectangle" },
@@ -23,6 +25,21 @@ export const FREEFORM_SHAPES: { shape: FreeformShape; label: string }[] = [
   { shape: "triangle", label: "Triangle" },
   { shape: "note", label: "Note" },
   { shape: "actor", label: "Actor (person)" },
+  { shape: "trapezoid", label: "Manual operation (trapezoid)" },
+  { shape: "manualInput", label: "Manual input" },
+  { shape: "delay", label: "Delay" },
+  { shape: "offPage", label: "Off-page connector" },
+  { shape: "internalStorage", label: "Internal storage" },
+  { shape: "multiDocument", label: "Multiple documents" },
+  { shape: "step", label: "Step (chevron)" },
+  { shape: "arrowRight", label: "Arrow" },
+  { shape: "doubleArrow", label: "Double arrow" },
+  { shape: "cross", label: "Cross" },
+  { shape: "star", label: "Star" },
+  { shape: "octagon", label: "Octagon (stop)" },
+  { shape: "cube", label: "Cube" },
+  { shape: "callout", label: "Callout" },
+  { shape: "cloud", label: "Cloud" },
 ];
 /** Starting box of each shape; the user resizes it like any item. */
 export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number }> = {
@@ -40,6 +57,21 @@ export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number 
   process: { w: 130, h: 60 },
   note: { w: 110, h: 80 },
   actor: { w: 60, h: 100 },
+  trapezoid: { w: 130, h: 60 },
+  manualInput: { w: 120, h: 60 },
+  delay: { w: 120, h: 60 },
+  offPage: { w: 80, h: 80 },
+  internalStorage: { w: 90, h: 80 },
+  multiDocument: { w: 130, h: 80 },
+  step: { w: 130, h: 60 },
+  arrowRight: { w: 130, h: 60 },
+  doubleArrow: { w: 150, h: 60 },
+  cross: { w: 80, h: 80 },
+  star: { w: 90, h: 90 },
+  octagon: { w: 90, h: 90 },
+  cube: { w: 110, h: 90 },
+  callout: { w: 130, h: 80 },
+  cloud: { w: 140, h: 90 },
 };
 /**
  * A picture item of a freeform canvas: one image, no text, no grid. It is the
@@ -68,6 +100,14 @@ export function isFreeTransform(sheet: Sheet, node: MindNode): boolean {
   return !s.frame && (!s.image || isBarePicture(node));
 }
 
+/**
+ * The page of a diagram document: its root, a canvas drawn as draw.io's
+ * paper. Everything in the diagram is an item of it.
+ */
+export function isDiagramPage(sheet: Sheet, id: string): boolean {
+  return sheet.structure.structureType === "diagram" && id === sheet.rootNodeId && !!sheet.nodes[id]?.style.freeform;
+}
+
 /** Nearest enclosing canvas, excluding the topic itself. */
 export function freeformOwner(sheet: Sheet, id: string): string | null {
   let parentId = sheet.nodes[id]?.parentId;
@@ -78,6 +118,21 @@ export function freeformOwner(sheet: Sheet, id: string): string | null {
     if (!parent) break;
     if (parent.style.freeform) return parent.id;
     parentId = parent.parentId;
+  }
+  return null;
+}
+
+/**
+ * Nearest enclosing canvas for a relationship endpoint (either a topic id or
+ * a group id). A group belongs to the canvas holding its members.
+ */
+export function endpointFreeformOwner(sheet: Sheet, id: string): string | null {
+  if (sheet.nodes[id]) return freeformOwner(sheet, id);
+  const g = sheet.boundaries.find((b) => b.id === id);
+  if (!g) return null;
+  for (const mid of g.memberIds) {
+    const owner = freeformOwner(sheet, mid);
+    if (owner) return owner;
   }
   return null;
 }

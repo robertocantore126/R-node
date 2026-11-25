@@ -18,6 +18,7 @@ import { useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "re
 import { useStore } from "../editor/context";
 import { clearStudyProgress, loadStudyProgress, saveStudyProgress, validQuizProgress } from "./studyProgress";
 import { newQuizSeed, quizAnswerOrder, quizSearchTiers } from "../core/quiz";
+import { groupLabel } from "../core/types";
 
 let lastPos: { x: number; y: number } | null = null;
 
@@ -60,14 +61,20 @@ export function centerOffsetBeside(canvas: DOMRect, win: DOMRect): { dx: number;
 export function QuizWindow(): JSX.Element | null {
   const store = useStore();
   const state = useSyncExternalStore(store.subscribe, store.getUiSnapshot);
-  const nodeId = state.quizOpen?.nodeId ?? null;
-  const quizId = state.quizOpen?.quizId ?? null;
-  const node = nodeId ? store.doc.node(nodeId) : null;
-  const quiz = nodeId && quizId ? node?.style.quizzes?.find((q) => q.id === quizId) ?? null : null;
+  const open = state.quizOpen;
+  const isGroup = !!open && "groupId" in open;
+  const ownerId = open ? (isGroup ? open.groupId : open.nodeId) : null;
+  const ownerKey = open ? (isGroup ? `group:${open.groupId}` : open.nodeId) : null;
+  const quizId = open?.quizId ?? null;
+  const node = !isGroup && ownerId ? store.doc.node(ownerId) : null;
+  const group = isGroup && ownerId ? store.sheet.boundaries.find((g) => g.id === ownerId) ?? null : null;
+  const quiz = quizId
+    ? (isGroup ? group?.quizzes?.find((q) => q.id === quizId) : node?.style.quizzes?.find((q) => q.id === quizId)) ?? null
+    : null;
 
   // Resume where the last run stopped, if it still fits this quiz.
   const [saved] = useState(() =>
-    nodeId && quizId && quiz ? validQuizProgress(loadStudyProgress(nodeId, quizId), quiz.questions.length) : null);
+    ownerKey && quizId && quiz ? validQuizProgress(loadStudyProgress(ownerKey, quizId), quiz.questions.length) : null);
   const [index, setIndex] = useState(saved?.index ?? 0);
   const [picked, setPicked] = useState<number | null>(saved && saved.results.length > saved.index ? saved.results[saved.index] : null);
   const [results, setResults] = useState<number[]>(saved?.results ?? []);
@@ -128,19 +135,21 @@ export function QuizWindow(): JSX.Element | null {
 
   // A finished run is forgotten, so the next open starts from question 1.
   useEffect(() => {
-    if (!nodeId || !quizId) return;
-    if (done || results.length === 0) clearStudyProgress(nodeId, quizId);
-    else saveStudyProgress(nodeId, quizId, { index, results, seed });
-  }, [nodeId, quizId, index, results, done, seed]);
+    if (!ownerKey || !quizId) return;
+    if (done || results.length === 0) clearStudyProgress(ownerKey, quizId);
+    else saveStudyProgress(ownerKey, quizId, { index, results, seed });
+  }, [ownerKey, quizId, index, results, done, seed]);
 
   // Persist the score exactly once per finished run (a retry resets the guard).
   useEffect(() => {
-    if (!done || !nodeId || !quizId || submitted.current) return;
+    if (!done || !ownerId || !quizId || submitted.current) return;
     submitted.current = true;
-    store.submitQuizScore(nodeId, quizId, results);
-  }, [done, nodeId, quizId, results, store]);
+    if (isGroup) store.submitGroupQuizScore(ownerId, quizId, results);
+    else store.submitQuizScore(ownerId, quizId, results);
+  }, [done, isGroup, ownerId, quizId, results, store]);
 
-  if (!node || !quiz || questions.length === 0) return null;
+  if ((!node && !group) || !quiz || questions.length === 0) return null;
+  const title = quiz.name ?? (isGroup ? (group ? groupLabel(group) : null) ?? "Group quiz" : node?.title || "Quiz");
 
   const q = questions[index];
   const isLast = index === questions.length - 1;
@@ -203,7 +212,7 @@ export function QuizWindow(): JSX.Element | null {
         className="quiz-window"
         role="dialog"
         aria-modal="false"
-        aria-label={quiz.name ?? node.title}
+        aria-label={title}
         tabIndex={-1}
         onPointerDown={(e) => {
           // A click on the window body focuses it, so Escape closes the quiz.
@@ -211,7 +220,7 @@ export function QuizWindow(): JSX.Element | null {
         }}
       >
         <div className="quiz-head" onPointerDown={onHeadPointerDown} title="Drag to move">
-          <span className="quiz-title">{quiz.name ?? node.title ?? "Quiz"}</span>
+          <span className="quiz-title">{title}</span>
           <span className="quiz-progress">
             {done ? "Result" : `Question ${index + 1} / ${questions.length}`}
           </span>
@@ -268,15 +277,16 @@ export function QuizWindow(): JSX.Element | null {
             </p>
             <p className="quiz-score-label">{pct}% correct</p>
             {results.some((answer,i) => answer !== questions[i]?.correct && !questions[i]?.sourceNodeIds?.length) &&
-              <p className="quiz-best">Unlinked questions mark the topic holding this quiz. Generate a new quiz to link questions to individual topics.</p>}
+              <p className="quiz-best">Unlinked questions mark {isGroup ? "the group's topics" : "the topic holding this quiz"}. Generate a new quiz to link questions to individual topics.</p>}
             {score && (
               <p className="quiz-best">
                 Best {score.best} / {questions.length} · {score.attempts} attempt{score.attempts > 1 ? "s" : ""}
               </p>
             )}
             <div className="quiz-actions">
-              {correctCount < questions.length && <button className="btn" onClick={() => {
-                store.setQuizMistakesVisible(node.id,true);
+              {correctCount < questions.length && ownerId && <button className="btn" onClick={() => {
+                if (isGroup) store.setGroupQuizMistakesVisible(ownerId, true);
+                else store.setQuizMistakesVisible(ownerId, true);
                 store.closeQuiz();
               }}>Show mistakes on map</button>}
               <button className="btn" onClick={retry}>

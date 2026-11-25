@@ -1,4 +1,4 @@
-import { freeformOwner, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, isBarePicture, isFreeTransform, FREE_TRANSFORM_MIN_FONT, type FreeformShape } from "../core/freeform";
+import { freeformOwner, endpointFreeformOwner, isDiagramPage, freeformOffset, freeformContentBounds, FREEFORM_HEADER, FREEFORM_PADDING, FREEFORM_SHAPE_SIZES, isBarePicture, isFreeTransform, FREE_TRANSFORM_MIN_FONT, type FreeformShape } from "../core/freeform";
 import { looksLikeDrawio, parseDrawio, type DrawioDiagram } from "../core/drawio";
 import { diagramPrompt } from "../core/diagramPrompt";
 import { chartNoteIds, chartNoteRoot, chartSlotNote, freeformNote } from "../core/chartNotes";
@@ -20,7 +20,7 @@ import { guessCodeLang } from "../core/codeHighlight";
 import type { ShapeTemplate } from "./shapeLibrary";
 import { addRecentColor } from "./recentColors";
 import { quizClipText } from "./quizPrompts";
-import { studyOutline } from "../core/studyOutline";
+import { studyOutline, studyRoots } from "../core/studyOutline";
 import { flashcardsClipText } from "./flashcardPrompts";
 import { DocumentModel, nowIso, uid } from "../core/doc";
 import { History } from "../core/history";
@@ -31,13 +31,14 @@ import { INK_DEFAULT_WIDTH, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
 import { Machine, registerInspectable } from "./machine";
 import { LongOps, SAVE_FLOW_TABLE, saveRerunAllowed, selectionFields, selectionTargetOf, type LongOpKind, type LongOpView, type SaveFlow, type SaveOutcome, type SelectionTarget } from "./editorMachines";
-import { SCHEMA_VERSION, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type RelAnchor, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
+import { FONT_DEFAULTS_VERSION, SCHEMA_VERSION, TOPIC_FONT_SIZE, TOPIC_FONT_WEIGHT, type AttachmentInfo, type FlashcardDeck, type FlashcardRating, type GalleryItem, type Group, type ImageSlot, type MindNode, type NodeType, type Position, type QuizInfo, type RelAnchor, type Relationship, type RnodeDocument, type Sheet, type Style, type Summary, type TaskInfo, type TextRun } from "../core/types";
 import { parseQuiz, quizTopicOutline, type QuizSeed } from "../core/quiz";
 import { parseFlashcards, type FlashcardSeed } from "../core/flashcards";
 import { parseAiTree, topicKey, type AiTreeNode } from "../core/aiTree";
 import { aiExpandClipText } from "./aiTreePrompts";
 import { isEmptyRuns, nodeRuns, normalizeRuns, plainToRuns, runsEqual, runsToPlain, trimRuns } from "../core/text";
 import { imageResolver, applyLayout, layoutSheet, LEVEL_GAP, LEVEL_GAP_ROOT, SIBLING_GAP, SIBLING_GAP_ROOT } from "../layout/mindmap";
+import { groupBoxes, type Box } from "../layout/groups";
 import { CHART_COLS, CHART_MAX_SIDE, CHART_ROWS, createCanvasTextMeasurer, galleryExtent, measureNode, MAX_IMAGE_W, MIN_TOPIC_W, type TextMeasurer } from "../layout/measure";
 import { centerOn, fitBounds, panBy, zoomAt, type Camera } from "../render/viewport";
 import { asGridPattern, asThemeName, isThemeDependentColor, THEME_ORDER, THEMES, type GridPattern, type ThemeName } from "../render/theme";
@@ -199,6 +200,49 @@ function sanitizeTitleRuns(raw: unknown): TextRun[] | undefined {
   return normalizeRuns(runs);
 }
 
+function makeQuizInfo(seed: QuizSeed): QuizInfo {
+  const quiz: QuizInfo = { id: uid("quiz"), questions: seed.questions };
+  if (seed.name) quiz.name = seed.name;
+  return quiz;
+}
+
+function makeFlashcardDeck(seed: FlashcardSeed): FlashcardDeck {
+  const deck: FlashcardDeck = { id: uid("cards"), cards: seed.cards };
+  if (seed.name) deck.name = seed.name;
+  return deck;
+}
+
+function scoredQuizzes(quizzes: QuizInfo[] | undefined, quizId: string, answers: number | readonly number[]): QuizInfo[] | null {
+  if (!quizzes) return null;
+  const idx = quizzes.findIndex((q) => q.id === quizId);
+  if (idx < 0) return null;
+  const quiz = quizzes[idx];
+  const total = quiz.questions.length;
+  if (typeof answers !== "number" && (answers.length !== total || answers.some((a) => !Number.isInteger(a) || a < 0 || a > 3))) return null;
+  const correct = typeof answers === "number" ? answers : answers.filter((answer, i) => answer === quiz.questions[i].correct).length;
+  if (!Number.isFinite(correct)) return null;
+  const clamped = Math.max(0, Math.min(correct, total));
+  const prev = quiz.score;
+  const score = {
+    last: clamped,
+    best: Math.max(prev?.best ?? 0, clamped),
+    attempts: (prev?.attempts ?? 0) + 1,
+  };
+  return quizzes.map((q, i) => {
+    if (i !== idx) return q;
+    const next = { ...q, score, lastAnswers: typeof answers === "number" ? undefined : [...answers] };
+    if (next.lastAnswers === undefined) delete next.lastAnswers;
+    return next;
+  });
+}
+
+function ratedDecks(decks: FlashcardDeck[] | undefined, deckId: string, cardIndex: number, rating: FlashcardRating): FlashcardDeck[] | null {
+  const deck = decks?.find((d) => d.id === deckId);
+  if (!decks || !deck || !deck.cards[cardIndex] || deck.cards[cardIndex].rating === rating) return null;
+  const cards = deck.cards.map((card, i) => (i === cardIndex ? { ...card, rating } : card));
+  return decks.map((d) => (d.id === deckId ? { ...d, cards } : d));
+}
+
 export type NavDir = "up" | "down" | "left" | "right";
 
 /** What a left press does on the map. "ink" writes on freeform canvases. */
@@ -234,13 +278,13 @@ export interface EditorState {
   searchIndex: number;
   /** Whether the in-map search bar is open (Ctrl+F). */
   searchOpen: boolean;
-  /** The quiz window that is open — the topic and the quiz id within it — or
-   *  null. Opened from the topic's right-click menu; never drawn on the canvas. */
-  quizOpen: { nodeId: string; quizId: string } | null;
+  /** The quiz window that is open — the topic or group and the quiz id within it —
+   *  or null. Opened from the right-click menu; never drawn on the canvas. */
+  quizOpen: { nodeId: string; quizId: string } | { groupId: string; quizId: string } | null;
   /** The "Diagram from AI" window: the canvas (or topic) the diagram goes into. */
   aiDiagramOpen: { nodeId: string } | null;
-  /** The flashcard window that is open — the topic and the deck id — or null. */
-  flashcardsOpen: { nodeId: string; deckId: string } | null;
+  /** The flashcard window that is open — the topic or group and the deck id — or null. */
+  flashcardsOpen: { nodeId: string; deckId: string } | { groupId: string; deckId: string } | null;
   /** Initial content for the inline editor: set by type-to-edit / paste-to-edit. */
   pendingInsert: string | null;
   sync: "saved" | "dirty";
@@ -262,6 +306,9 @@ export interface EditorState {
   relSel: string | null;
   groupSel: string | null;
   summarySel: string | null;
+  /** "Show links" is on: every link (Group.link) is drawn, not only those
+   *  of the selected topics. A view setting, not saved with the document. */
+  showLinks: boolean;
   /** The node whose IMAGE is selected (image selection is exclusive: the
    *  node itself is not in `selection` then). Null = no image selected. */
   imageSel: string | null;
@@ -290,6 +337,19 @@ export interface EditorState {
 function isNarrowScreen(): boolean {
   return typeof window !== "undefined" && !!window.matchMedia?.("(max-width: 700px)").matches;
 }
+
+/** Diagram tree layout: gap between levels and between siblings. */
+/** Long text gets a reading width (fittedTextWidth): from this many
+ *  characters, aiming at a landscape box (h ≤ FIT_ASPECT·w), FIT_STEP px at
+ *  a time, never wider than FIT_MAX_W. */
+const FIT_MIN_CHARS = 120;
+const FIT_ASPECT = 0.75;
+const FIT_STEP = 20;
+const FIT_MAX_W = 640;
+const DIAGRAM_LEVEL = 60;
+const DIAGRAM_SIBLING = 30;
+/** One draw.io page (A4 at 96 dpi), as the renderer's DIAGRAM_PAGE. */
+const DIAGRAM_PAGE_SIZE = { w: 827, h: 1169 };
 
 export class EditorStore {
   private state: EditorState;
@@ -490,6 +550,7 @@ export class EditorStore {
       relSel: null,
       groupSel: null,
       summarySel: null,
+      showLinks: false,
       imageSel: null,
       imageSlot: null,
       gallerySel: null,
@@ -795,6 +856,15 @@ export class EditorStore {
         node = node.parentId ? this.model.node(node.parentId) : undefined;
       }
     };
+    // Diagram: a shape (or a Tab arrow) about to be deleted leaves a gap in
+    // its parent's column. Its tree parent is read NOW, while the arrow still
+    // exists, so that tree can be laid out again after the batch.
+    const lostChildOf = this.diagramPageId()
+      ? ops.flatMap((op) =>
+        op.type === "deleteNode" ? this.sheet.relationships.filter((r) => r.tree && r.toId === op.id).map((r) => r.fromId)
+        : op.type === "deleteRelationship" && op.relationship.tree ? [op.relationship.fromId]
+        : [])
+      : [];
     // All or nothing. applyOp trusts its ids, so an op naming a missing node
     // throws — and a throw half-way through a batch left the earlier ops
     // applied with no history entry to undo them. Roll back what was applied.
@@ -810,6 +880,35 @@ export class EditorStore {
       trace.error("execOps", `batch rolled back: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
+    // Diagram: whatever a command created as the CHILD of a shape (a code
+    // topic, a chart, an AI expansion, "New subtopic"...) becomes a shape of
+    // the page beside its parent, joined by a Tab arrow; anything put on the
+    // page without a place gets the middle of the view. Same history entry.
+    // A shape whose text or look changed may have grown (a longer title, a
+    // gallery that took pictures, a resize, a bigger font): its tree is laid
+    // out again. A move alone (position, pin) is not a change of size.
+    const moveOnly = new Set<string>(["freeformPosition", "diagramPinned"]);
+    const resizedBy = (style: Style, prev: Style): boolean => {
+      for (const k of new Set([...Object.keys(style), ...Object.keys(prev)])) {
+        if (moveOnly.has(k)) continue;
+        if (JSON.stringify((style as Record<string, unknown>)[k]) !== JSON.stringify((prev as Record<string, unknown>)[k])) return true;
+      }
+      return false;
+    };
+    const retitled = [
+      ...ops.flatMap((op) =>
+        op.type === "setTitle" || (op.type === "setStyle" && resizedBy(op.style, op.prev)) ? [op.id]
+        // A Tab arrow drawn (a shape dragged onto a new parent): that tree.
+        : op.type === "createRelationship" && op.relationship.tree ? [op.relationship.fromId]
+        : []),
+      ...lostChildOf.filter((id) => this.sheet.nodes[id]),
+    ];
+    this.adoptIntoDiagramPage((op) => {
+      inverses.push(applyWithInverse(this.sheet, op));
+      ops.push(op);
+      const id = "id" in op ? op.id : null;
+      if (id) collect(id);
+    }, retitled);
     // Inner canvases grow before their enclosing canvas is measured.
     const depth = (id: string): number => {
       let n = this.model.node(id), count = 0;
@@ -828,6 +927,9 @@ export class EditorStore {
     for (const id of [...canvases].sort((a, b) => depth(b) - depth(a))) {
       const node = this.model.node(id);
       if (!node?.style.freeform) continue;
+      // A diagram's page has no title band and is sized in whole pages by
+      // fitDiagramPage below, not grown here.
+      if (isDiagramPage(this.sheet, id)) continue;
       // Content past the left edge or above the title band: the canvas grows on
       // that side. Its items shift right/down by the same amount and the canvas
       // itself moves left/up, so nothing moves in the world.
@@ -845,6 +947,9 @@ export class EditorStore {
         });
         const style: Style = { ...node.style, width: (node.style.width ?? 720) + dx, height: (node.style.height ?? 480) + dy };
         if (node.style.ink?.length) style.ink = node.style.ink.map((s) => ({ ...s, path: s.path.map((v, i) => v + (i % 2 ? dy : dx)) }));
+        // Bends are measured from the canvas corner, like the items: they
+        // shift with them so they stay where they were among the items.
+        this.shiftCanvasWaypoints(id, dx, dy, apply);
         if (freeformOwner(this.sheet, id)) {
           const at = freeformOffset(node, this.model.node(node.parentId!)?.childrenIds.indexOf(id) ?? 0);
           style.freeformPosition = { x: at.x - dx, y: at.y - dy };
@@ -863,6 +968,10 @@ export class EditorStore {
       if (width === grown.style.width && height === grown.style.height) continue;
       apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...grown.style, width, height }, prev: grown.style }));
     }
+    // Diagram: the page is exactly the whole pages its shapes cover, on the
+    // grid of the first page, which always stays (draw.io: an emptied page
+    // goes away).
+    if (this.diagramPageId()) this.fitDiagramPage(apply);
     if (follow.length) {
       applyLayout(this.sheet, false, this.measurer);
       const f = follow[0];
@@ -1928,6 +2037,21 @@ export class EditorStore {
       return null;
     }
 
+    // Font defaults v2: main topics and subtopics still on the OLD defaults
+    // (14/600 and 12/400, or no size at all) move to 16/500. A size or weight
+    // someone chose by hand differs from those and is left alone. Runs once
+    // per document: the marker below is saved with it.
+    const fontDefaults = typeof d.settings?.fontDefaults === "number" ? d.settings.fontDefaults : 1;
+    if (fontDefaults < FONT_DEFAULTS_VERSION) {
+      for (const n of Object.values(nodes)) {
+        const size = n.style.fontSize;
+        const weight = n.style.fontWeight;
+        const oldMain = n.type === "main" && (size === undefined || size === 14) && (weight === undefined || weight === 600);
+        const oldSub = n.type === "subtopic" && (size === undefined || size === 12) && (weight === undefined || weight === 400);
+        if (oldMain || oldSub) n.style = { ...n.style, fontSize: TOPIC_FONT_SIZE, fontWeight: TOPIC_FONT_WEIGHT };
+      }
+    }
+
     return {
       schemaVersion: typeof d.schemaVersion === "string" ? d.schemaVersion : SCHEMA_VERSION,
       documentId: d.documentId,
@@ -1942,6 +2066,7 @@ export class EditorStore {
         grid: asGridPattern(d.settings?.grid),
         showOutliner: !!d.settings?.showOutliner,
         showInspector: d.settings?.showInspector ?? true,
+        fontDefaults: FONT_DEFAULTS_VERSION,
       },
       themeId: typeof d.themeId === "string" ? d.themeId : `r-node-${asThemeName(d.settings?.theme)}`,
       sheets: [sheet],
@@ -2286,6 +2411,9 @@ export class EditorStore {
     // state the renderer draws a hint over; Delete is what removes topics.
     const plain = runsToPlain(clean);
     if (plain !== original.title || !runsEqual(clean, original.titleRuns)) {
+      // A long text (a paste, mostly) would make a narrow tower: the box gets
+      // a reading width in the same history entry as the text.
+      const width = plain.length > original.title.length ? this.fittedTextWidth({ ...node, title: plain, titleRuns: clean }) : null;
       this.execOps([
         makeOp<Op & { type: "setTitle" }>("setTitle", {
           id,
@@ -2294,7 +2422,9 @@ export class EditorStore {
           titleRuns: clean,
           prevRuns: original.titleRuns,
         }),
+        ...(width ? [makeOp<Op & { type: "setStyle" }>("setStyle", { id, style: { ...node.style, width }, prev: node.style })] : []),
       ]);
+      if (width) trace.applied("text:fit-width", { id, width, chars: plain.length });
       // Settle NOW instead of 30ms from now. execOps schedules the layout on a
       // debounce, which is right while the user types — it coalesces a burst of
       // keystrokes — but a commit is a single discrete event with no burst to
@@ -2307,6 +2437,45 @@ export class EditorStore {
       this.restoreOriginal(node, original);
       this.notify();
     }
+  }
+
+  /**
+   * A width that lays a LONG text out as a page rather than a tower, or null
+   * when the box is fine as it is. A long paste used to land in a box 120-280
+   * px wide and thousands tall, and had to be widened by hand every time.
+   *
+   * Only widens, never narrows, and only past FIT_MIN_CHARS characters (a
+   * short title keeps its box). The width is the smallest one, in steps of
+   * FIT_STEP up to FIT_MAX_W, at which the box is landscape (h ≤ FIT_ASPECT·w);
+   * text made of short lines (a list) never gets there, so it gets the
+   * smallest width that is as short as the widest one: wide enough for its
+   * longest line, no wider. Code, canvases, pictures and galleries keep theirs.
+   */
+  private fittedTextWidth(node: MindNode): number | null {
+    const s = node.style;
+    if (node.title.length < FIT_MIN_CHARS || s.code || s.freeform || s.gallery || s.chartNote || isBarePicture(node)) return null;
+    const resolve = imageResolver(this.sheet);
+    const sizeAt = (w?: number): { w: number; h: number } => measureNode({ ...node, style: { ...s, width: w } }, this.measurer, resolve);
+    const now = sizeAt(s.width);
+    if (now.h <= now.w * FIT_ASPECT) return null;
+    const lo = Math.max(now.w, MIN_TOPIC_W);
+    if (lo >= FIT_MAX_W) return null;
+    const steps = Math.floor((FIT_MAX_W - lo) / FIT_STEP);
+    const widthAt = (i: number): number => (i >= steps ? FIT_MAX_W : Math.round(lo + i * FIT_STEP));
+    // Height only falls as the box widens, so both searches are bisections.
+    const smallest = (ok: (w: number, h: number) => boolean): number | null => {
+      let a = 1, b = steps, found: number | null = null;
+      while (a <= b) {
+        const mid = (a + b) >> 1, w = widthAt(mid), h = sizeAt(w).h;
+        if (ok(w, h)) { found = w; b = mid - 1; } else a = mid + 1;
+      }
+      return found;
+    };
+    const landscape = smallest((w, h) => h <= w * FIT_ASPECT);
+    if (landscape) return landscape;
+    const shortest = sizeAt(FIT_MAX_W).h;
+    if (shortest >= now.h) return null; // widening buys nothing (short lines)
+    return smallest((_w, h) => h <= shortest);
   }
 
   /**
@@ -2503,6 +2672,30 @@ export class EditorStore {
   createSibling(): void {
     const node = this.selectionNode;
     if (!node) return;
+    // Diagram: Enter adds a sibling in the diagram's tree (another Tab child
+    // of the shape's tree parent); a shape with no tree parent gets a copy of
+    // itself just below. Either way the new shape opens for typing.
+    const page = this.diagramPageId();
+    if (page && node.parentId === page) {
+      const treeParent = this.sheet.relationships.find((r) => r.tree && r.toId === node.id)?.fromId;
+      let id: string | null = null;
+      if (treeParent && this.model.node(treeParent)?.parentId === page) id = this.diagramTab(treeParent);
+      else {
+        const at = node.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+        const h = measureNode(node, this.measurer).h;
+        id = uid("n");
+        const pageNode = this.model.requireNode(page);
+        this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+          id, nodeType: "subtopic", parentId: page, index: pageNode.childrenIds.length,
+          title: "", titleRuns: [{ text: "" }],
+          style: { ...this.diagramChildStyle(node), freeformPosition: { x: at.x, y: at.y + h + DIAGRAM_SIBLING } },
+          position: { x: pageNode.position.x + at.x, y: pageNode.position.y + at.y + h + DIAGRAM_SIBLING, manual: false },
+        })]);
+        this.settleLayoutNow();
+      }
+      if (id) this.startEdit(id);
+      return;
+    }
     if (node.type === "central") return this.createChild();
     if (!node.parentId) {
       this.toast("Floating topics have no siblings");
@@ -2520,12 +2713,368 @@ export class EditorStore {
     this.startEdit(id);
   }
 
+  /**
+   * Diagram: the style a Tab child copies from its parent shape — outline,
+   * size, border, colours, text size — so it is the same kind of shape, and
+   * starts empty, like a draw.io clone. Position and pin are not copied.
+   */
+  private diagramChildStyle(parent: MindNode): Style {
+    const s = parent.style;
+    // A special node (a canvas, chart, gallery, code block, picture) is not a
+    // shape to clone: copying it gave a 720x480 box under a canvas and an
+    // invisible shapeless topic under a chart. Its child is a plain shape.
+    if (s.freeform || s.gallery || s.code || s.chartNote || isBarePicture(parent)) {
+      const { w, h } = FREEFORM_SHAPE_SIZES.rounded;
+      return { shape: "rounded", width: w, height: h, borderWidth: 1.5, align: "center" };
+    }
+    const keep: (keyof Style)[] = ["shape", "width", "height", "borderWidth", "borderStyle", "stroke", "fill", "textColor", "cornerRadius", "fontSize", "fontWeight", "fontFamily", "align", "titleAt", "freeTransform"];
+    const out: Style = {};
+    for (const k of keep) if (s[k] !== undefined) (out as Record<string, unknown>)[k] = s[k];
+    return out;
+  }
+
+  /** The page of the open diagram (its root canvas), or null in a mind map. */
+  private diagramPageId(): string | null {
+    const id = this.sheet.rootNodeId;
+    return isDiagramPage(this.sheet, id) ? id : null;
+  }
+
+  /**
+   * Diagram: a new shape from the shape bar, centred on the world point, on
+   * the page. Selected, not in edit (draw.io drops a blank shape).
+   */
+  createDiagramShape(shape: FreeformShape, x: number, y: number): string | null {
+    const page = this.diagramPageId();
+    if (!page) return null;
+    const id = this.createFreeformItem(page, x, y, "", undefined, shape);
+    if (id) this.select(id);
+    return id;
+  }
+
+  /**
+   * Diagram: where the tree under `rootId` goes (page-local positions, for
+   * every non-pinned shape that has to move). The tree is the `tree` arrows;
+   * each level is one column centred on its parent, DIAGRAM_LEVEL apart, the
+   * siblings DIAGRAM_SIBLING apart. `extra` adds a shape not created yet (Tab).
+   */
+  private diagramTreePositions(
+    rootId: string,
+    extra?: { id: string; size: { w: number; h: number }; kids: (id: string) => string[] },
+  ): Map<string, { x: number; y: number }> {
+    const page = this.diagramPageId();
+    const resolve = imageResolver(this.sheet);
+    const sizeOf = (nid: string): { w: number; h: number } =>
+      extra && nid === extra.id ? extra.size : measureNode(this.model.requireNode(nid), this.measurer, resolve);
+    const kidsOf = extra?.kids ?? ((nid: string): string[] =>
+      this.sheet.relationships
+        .filter((r) => r.tree && r.fromId === nid && this.sheet.nodes[r.toId]?.parentId === page)
+        .map((r) => r.toId));
+    const posOf = new Map<string, { x: number; y: number }>();
+    const local = (nid: string): { x: number; y: number } =>
+      posOf.get(nid) ?? this.model.node(nid)?.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+    const heights = new Map<string, number>();
+    const subtreeH = (nid: string, trail: Set<string>): number => {
+      const hit = heights.get(nid);
+      if (hit !== undefined) return hit;
+      if (trail.has(nid)) return 0;
+      const next = new Set(trail).add(nid);
+      const kids = kidsOf(nid).filter((k) => !next.has(k));
+      const col = kids.reduce((a, k) => a + subtreeH(k, next), 0) + DIAGRAM_SIBLING * Math.max(0, kids.length - 1);
+      const h = Math.max(sizeOf(nid).h, col);
+      heights.set(nid, h);
+      return h;
+    };
+    const placed = new Set<string>();
+    const place = (nid: string): void => {
+      if (placed.has(nid)) return;
+      placed.add(nid);
+      const at = local(nid), sz = sizeOf(nid);
+      const kids = kidsOf(nid).filter((k) => !placed.has(k));
+      if (kids.length === 0) return;
+      const trail = new Set<string>([nid]);
+      const total = kids.reduce((a, k) => a + subtreeH(k, trail), 0) + DIAGRAM_SIBLING * (kids.length - 1);
+      let y = at.y + sz.h / 2 - total / 2;
+      for (const k of kids) {
+        const kh = subtreeH(k, trail), ks = sizeOf(k);
+        const pinned = k !== extra?.id && !!this.model.node(k)?.style.diagramPinned;
+        if (!pinned) posOf.set(k, { x: Math.round(at.x + sz.w + DIAGRAM_LEVEL), y: Math.round(y + kh / 2 - ks.h / 2) });
+        place(k);
+        y += kh + DIAGRAM_SIBLING;
+      }
+    };
+    place(rootId);
+    return posOf;
+  }
+
+  /**
+   * A canvas's top-left corner moved by (-dx, -dy) while its items were
+   * shifted by (dx, dy) so nothing moved in the world. Arrow bends measured
+   * from that corner (waypointOrigin: the canvas holding the arrow's source)
+   * shift by the same amount, or every bend would jump.
+   */
+  private shiftCanvasWaypoints(canvasId: string, dx: number, dy: number, apply: (op: Op) => void): void {
+    if (!dx && !dy) return;
+    for (const rel of [...this.sheet.relationships]) {
+      if (!rel.waypoints?.length) continue;
+      if (endpointFreeformOwner(this.sheet, rel.fromId) !== canvasId) continue;
+      const next = { ...rel, waypoints: rel.waypoints.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+      apply(makeOp<Op & { type: "setRelationship" }>("setRelationship", { id: rel.id, relationship: next, prev: rel }));
+    }
+  }
+
+  /**
+   * Diagram: the top of the tree `id` belongs to, following the `tree` arrows
+   * up between shapes of the page (a loop made by reconnected arrows stops
+   * where it closes).
+   */
+  private diagramTreeTop(id: string): string {
+    const page = this.diagramPageId();
+    const seen = new Set<string>([id]);
+    let cur = id;
+    for (;;) {
+      const up = this.sheet.relationships.find((r) => r.tree && r.toId === cur && this.sheet.nodes[r.fromId]?.parentId === page)?.fromId;
+      if (!up || seen.has(up)) return cur;
+      seen.add(up);
+      cur = up;
+    }
+  }
+
+  /**
+   * Diagram: see execOps. Children of page shapes become page shapes with a
+   * Tab arrow from their old parent (in the parent's child order, at any
+   * depth: a pasted outline becomes a tree of shapes); the touched trees are
+   * laid out again, and so are the trees of the `retitled` shapes (new text
+   * can make a shape taller); page shapes with no position get the view's
+   * centre.
+   */
+  private adoptIntoDiagramPage(apply: (op: Op) => void, retitled: string[] = []): void {
+    const page = this.diagramPageId();
+    if (!page) return;
+    const inTree = (id: string): boolean => this.sheet.relationships.some((r) => r.tree && (r.fromId === id || r.toId === id));
+    const touched: string[] = retitled.filter((id) => this.sheet.nodes[id]?.parentId === page && inTree(id));
+    for (let guard = 0; guard < 10000; guard++) {
+      const pageNode = this.model.requireNode(page);
+      let parent: MindNode | undefined;
+      for (const cid of pageNode.childrenIds) {
+        const c = this.model.node(cid);
+        if (c && !c.style.freeform && c.childrenIds.length > 0) { parent = c; break; }
+      }
+      if (!parent) break;
+      const childId = parent.childrenIds[0];
+      const child = this.model.requireNode(childId);
+      const pAt = parent.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+      apply(makeOp<Op & { type: "moveNode" }>("moveNode", {
+        id: childId, fromParentId: parent.id, fromIndex: 0, toParentId: page, toIndex: pageNode.childrenIds.length,
+      }));
+      const moved = this.model.requireNode(childId);
+      apply(makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: childId,
+        style: { ...moved.style, freeformPosition: { x: pAt.x + measureNode(parent, this.measurer).w + DIAGRAM_LEVEL, y: pAt.y } },
+        prev: moved.style,
+      }));
+      apply(makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+        relationship: {
+          id: uid("rel"), fromId: parent.id, toId: child.id, tree: true,
+          connector: "elbow", lineStyle: "solid", endArrow: "triangle",
+          fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 },
+        },
+      }));
+      if (!touched.includes(parent.id)) touched.push(parent.id);
+    }
+    // Lay out each touched tree once, from its top: a branch that grew must
+    // push its siblings' branches apart, all the way up.
+    const tops = [...new Set(touched.map((t) => this.diagramTreeTop(t)))];
+    for (const top of tops) {
+      for (const [nid, at] of this.diagramTreePositions(top)) {
+        const n = this.model.requireNode(nid);
+        const cur = n.style.freeformPosition;
+        if (cur && cur.x === at.x && cur.y === at.y) continue;
+        apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: nid, style: { ...n.style, freeformPosition: at }, prev: n.style }));
+      }
+    }
+    // Shapes on the page with no place of their own: the middle of the view.
+    const pageNode = this.model.requireNode(page);
+    for (const cid of pageNode.childrenIds) {
+      const c = this.model.node(cid);
+      if (!c || c.style.freeformPosition) continue;
+      const sz = measureNode(c, this.measurer);
+      const cam = this.state.camera;
+      apply(makeOp<Op & { type: "setStyle" }>("setStyle", {
+        id: cid,
+        style: { ...c.style, freeformPosition: { x: Math.round(cam.x - pageNode.position.x - sz.w / 2), y: Math.round(cam.y - pageNode.position.y - sz.h / 2) } },
+        prev: c.style,
+      }));
+    }
+  }
+
+  /**
+   * Diagram: size the page to the whole pages (DIAGRAM_PAGE, on the grid of
+   * the first page at the world origin) that its content covers, the first
+   * page always included. Grows past any edge and shrinks back when the
+   * shapes leave a page (draw.io). The items keep their place in the world.
+   */
+  private fitDiagramPage(apply: (op: Op) => void): void {
+    const page = this.diagramPageId();
+    if (!page) return;
+    const node = this.model.requireNode(page);
+    const resolve = imageResolver(this.sheet);
+    const tight = freeformContentBounds(this.sheet, page, (n) => measureNode(n, this.measurer, resolve), true);
+    const ox = node.position.x, oy = node.position.y;
+    const W = DIAGRAM_PAGE_SIZE.w, H = DIAGRAM_PAGE_SIZE.h;
+    let c0 = 0, c1 = 0, r0 = 0, r1 = 0;
+    if (Number.isFinite(tight.minX)) {
+      // A page is added as soon as a shape crosses into it, like draw.io.
+      c0 = Math.min(0, Math.floor((ox + tight.minX) / W));
+      c1 = Math.max(0, Math.floor((ox + tight.maxX - 0.01) / W));
+      r0 = Math.min(0, Math.floor((oy + tight.minY) / H));
+      r1 = Math.max(0, Math.floor((oy + tight.maxY - 0.01) / H));
+    }
+    const nx = c0 * W, ny = r0 * H, nw = (c1 - c0 + 1) * W, nh = (r1 - r0 + 1) * H;
+    const dx = ox - nx, dy = oy - ny;
+    if (dx === 0 && dy === 0 && node.style.width === nw && node.style.height === nh) return;
+    if (dx || dy) {
+      node.childrenIds.forEach((cid, index) => {
+        const c = this.model.node(cid);
+        if (!c) return;
+        const at = freeformOffset(c, index);
+        apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: cid, style: { ...c.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: c.style }));
+      });
+      apply(makeOp<Op & { type: "setPosition" }>("setPosition", { id: page, x: nx, y: ny, manual: true, prev: { ...node.position } }));
+      this.shiftCanvasWaypoints(page, dx, dy, apply);
+    }
+    const cur = this.model.requireNode(page);
+    const style: Style = { ...cur.style, width: nw, height: nh };
+    if ((dx || dy) && cur.style.ink?.length) style.ink = cur.style.ink.map((st) => ({ ...st, path: st.path.map((v, i) => v + (i % 2 ? dy : dx)) }));
+    apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: page, style, prev: cur.style }));
+    trace.applied("diagram:fit-page", { cols: c1 - c0 + 1, rows: r1 - r0 + 1, dx, dy });
+  }
+
+  /** Diagram: the shapes Tab grew from `id`, at any depth (they move with it). */
+  diagramDescendants(id: string): string[] {
+    return this.diagramFollowers(id);
+  }
+
+  /**
+   * Diagram: whether `childId` may be dragged onto `parentId` to become its
+   * Tab child — both shapes of the page, and not onto itself or one of its
+   * own descendants (that would make a loop).
+   */
+  canDiagramReparent(childId: string, parentId: string): boolean {
+    const page = this.diagramPageId();
+    if (!page || childId === parentId) return false;
+    if (this.model.node(childId)?.parentId !== page || this.model.node(parentId)?.parentId !== page) return false;
+    if (this.sheet.relationships.some((r) => r.tree && r.fromId === parentId && r.toId === childId)) return false;
+    return !this.diagramFollowers(childId).includes(parentId);
+  }
+
+  /**
+   * Diagram: a shape dragged onto another one becomes its Tab child, with
+   * everything Tab grew from it. Its old Tab arrow goes, a new one comes from
+   * the new parent, it joins that parent's column (unpinned), and both trees
+   * close up / make room (execOps lays out the trees an arrow left or
+   * reached). One history entry.
+   */
+  diagramReparent(childId: string, parentId: string): boolean {
+    if (!this.canDiagramReparent(childId, parentId)) return false;
+    const child = this.model.requireNode(childId);
+    const old = this.sheet.relationships.filter((r) => r.tree && r.toId === childId);
+    const { diagramPinned: _pin, ...unpinned } = child.style;
+    this.execOps([
+      ...old.map((r) => makeOp<Op & { type: "deleteRelationship" }>("deleteRelationship", { id: r.id, relationship: r })),
+      makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+        relationship: {
+          id: uid("rel"), fromId: parentId, toId: childId, tree: true,
+          connector: "elbow", lineStyle: "solid", endArrow: "triangle",
+          fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 },
+        },
+      }),
+      ...(child.style.diagramPinned ? [makeOp<Op & { type: "setStyle" }>("setStyle", { id: childId, style: unpinned, prev: child.style })] : []),
+    ]);
+    this.settleLayoutNow();
+    this.select(childId);
+    trace.applied("diagram:reparent", { child: childId, parent: parentId, from: old.map((r) => r.fromId).join(",") });
+    return true;
+  }
+
+  /**
+   * Diagram: Tab on a shape. A child of the same shape is created on the
+   * page, joined to its parent by a draw.io arrow (a real, editable arrow
+   * flagged `tree`), and the parent's whole tree is laid out again beside it:
+   * one column per level, centred on its parent, 60 px between levels and
+   * 30 px between siblings. Shapes moved by hand (diagramPinned) stay put,
+   * their own children still follow them. One history entry for all of it.
+   */
+  diagramTab(parentId: string): string | null {
+    const page = this.diagramPageId();
+    const parent = this.model.node(parentId);
+    if (!page || !parent || parent.parentId !== page) return null;
+    const pageNode = this.model.requireNode(page);
+    const id = uid("n");
+    const style = this.diagramChildStyle(parent);
+    const resolve = imageResolver(this.sheet);
+    const sizeOf = (nid: string): { w: number; h: number } => {
+      if (nid === id) {
+        const probe = { ...parent, id, title: "", titleRuns: [{ text: "" }], style, childrenIds: [] } as MindNode;
+        return measureNode(probe, this.measurer, resolve);
+      }
+      return measureNode(this.model.requireNode(nid), this.measurer, resolve);
+    };
+    // The tree: Tab arrows from each shape, in creation order, plus the new one.
+    const kidsOf = (nid: string): string[] => {
+      const kids = this.sheet.relationships
+        .filter((r) => r.tree && r.fromId === nid && this.sheet.nodes[r.toId]?.parentId === page)
+        .map((r) => r.toId);
+      return nid === parentId ? [...kids, id] : kids;
+    };
+    // From the top of the tree, not from the parent: the parent's column may
+    // have grown past its own slot, and its siblings' branches must make room.
+    const posOf = this.diagramTreePositions(this.diagramTreeTop(parentId), { id, size: sizeOf(id), kids: kidsOf });
+
+    const ops: Op[] = [];
+    const pAt = parent.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+    const newAt = posOf.get(id) ?? { x: pAt.x + sizeOf(parentId).w + DIAGRAM_LEVEL, y: pAt.y };
+    ops.push(makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: "subtopic", parentId: page, index: pageNode.childrenIds.length,
+      title: "", titleRuns: [{ text: "" }],
+      style: { ...style, freeformPosition: newAt },
+      position: { x: pageNode.position.x + newAt.x, y: pageNode.position.y + newAt.y, manual: false },
+    }));
+    ops.push(makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+      relationship: {
+        id: uid("rel"), fromId: parentId, toId: id, tree: true,
+        connector: "elbow", lineStyle: "solid", endArrow: "triangle",
+        fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 },
+      },
+    }));
+    for (const [nid, at] of posOf) {
+      if (nid === id) continue;
+      const n = this.model.requireNode(nid);
+      const cur = n.style.freeformPosition;
+      if (cur && cur.x === at.x && cur.y === at.y) continue;
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: nid, style: { ...n.style, freeformPosition: at }, prev: n.style }));
+    }
+    this.execOps(ops);
+    this.settleLayoutNow();
+    trace.applied("diagram:tab", { parent: parentId, child: id, moved: posOf.size - 1 });
+    return id;
+  }
+
   createChild(): void {
     const node = this.selectionNode ?? this.model.rootNode;
+    // Diagram: Tab on a shape of the page grows the diagram's tree; the
+    // selection stays on the parent, so repeated Tab adds siblings.
+    const page = this.diagramPageId();
+    if (page && node.parentId === page) {
+      this.diagramTab(node.id);
+      return;
+    }
     const type: NodeType = node.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(node);
-    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", { id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(), position })]);
+    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+      id, nodeType: type, parentId: node.id, index: node.childrenIds.length, title: this.defaultTopicTitle(),
+      position,
+    })]);
     // Tab spawns the child without entering edit mode: the selection stays on
     // the source node, so repeated Tab keeps adding siblings under the same
     // parent instead of nesting (or stealing the selection).
@@ -2542,6 +3091,14 @@ export class EditorStore {
   createChildOf(parentId: string): string | null {
     const parent = this.model.node(parentId);
     if (!parent) return null;
+    // Diagram: "New subtopic" on a shape is Tab's child (same shape, arrow,
+    // tree layout), opened for typing.
+    const page = this.diagramPageId();
+    if (page && parent.parentId === page) {
+      const id = this.diagramTab(parentId);
+      if (id) this.startEdit(id);
+      return id;
+    }
     const type: NodeType = parent.type === "central" ? "main" : "subtopic";
     const id = uid("n");
     const position = this.createNodePosition(parent);
@@ -2614,12 +3171,23 @@ export class EditorStore {
       : size && shape
         ? { shape, width: size.w, height: size.h, borderWidth: 1.5, ...(shape === "actor" ? { titleAt: "bottom" as const } : {}) }
         : { shape: "none", align: "left" };
-    this.execOps([makeOp<Op & { type: "createNode" }>("createNode", {
+    // Pasted long text: a reading width from the start, not a tower.
+    if (text && !imageId) {
+      const probe = { ...DocumentModel.makeNode("subtopic", parentId, text, { ...look }), title: text, titleRuns: [{ text }] } as MindNode;
+      const width = this.fittedTextWidth(probe);
+      if (width) look.width = width;
+    }
+    const ops: Op[] = [makeOp<Op & { type: "createNode" }>("createNode", {
       id, nodeType: "subtopic", parentId, index: parent.childrenIds.length,
       title: text, titleRuns: [{ text }],
       style: { freeformPosition: { x: px, y: py }, ...look },
       position: { x: parent.position.x + px, y: parent.position.y + py, manual: false },
-    })]);
+    })];
+    const att = imageId ? this.sheet.attachments.find((a) => a.id === imageId) : undefined;
+    const iw = imageId ? 180 : (size?.w ?? 120);
+    const ih = imageId ? (att && att.w > 0 ? Math.round((iw * att.h) / att.w) : 120) : (size?.h ?? 40);
+    ops.push(...this.groupAdoptOps([{ id, box: { x: parent.position.x + px, y: parent.position.y + py, w: iw, h: ih } }]));
+    this.execOps(ops);
     this.settleLayoutNow();
     if (!text && !imageId) this.startEdit(id); else this.select(id);
     return id;
@@ -2792,7 +3360,10 @@ export class EditorStore {
       toParentId: parentId, toIndex: parent.childrenIds.length,
     }));
     const capture = (n: MindNode, offset: { x: number; y: number }): void => {
-      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: n.id, style: { ...n.style, freeformPosition: offset }, prev: n.style }));
+      // A shape moved by hand on a diagram page is pinned: Tab's tree layout
+      // will not pull it back into its column.
+      const pin = n.id === id && isDiagramPage(this.sheet, parentId) ? { diagramPinned: true } : {};
+      ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: n.id, style: { ...n.style, freeformPosition: offset, ...pin }, prev: n.style }));
       if (internal || n.style.freeform) return;
       n.childrenIds.forEach((childId, index) => {
         const child = this.model.requireNode(childId);
@@ -2801,6 +3372,22 @@ export class EditorStore {
       });
     };
     capture(node, offset);
+    const resolve = imageResolver(this.sheet);
+    const sz = measureNode(node, this.measurer, resolve);
+    const moved: { id: string; box: Box }[] = [{ id, box: { x, y, w: sz.w, h: sz.h } }];
+    // Diagram: the shapes Tab grew from it move with it, by the same amount.
+    const from = node.style.freeformPosition;
+    if (internal && from && isDiagramPage(this.sheet, parentId)) {
+      const dx = offset.x - from.x, dy = offset.y - from.y;
+      for (const fid of this.diagramFollowers(id)) {
+        const f = this.model.requireNode(fid), at = f.style.freeformPosition;
+        if (!at || (dx === 0 && dy === 0)) continue;
+        ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: fid, style: { ...f.style, freeformPosition: { x: at.x + dx, y: at.y + dy } }, prev: f.style }));
+        const fsz = measureNode(f, this.measurer, resolve);
+        moved.push({ id: fid, box: { x: parent.position.x + at.x + dx, y: parent.position.y + at.y + dy, w: fsz.w, h: fsz.h } });
+      }
+    }
+    ops.push(...this.groupAdoptOps(moved));
     this.execOps(ops);
     this.settleLayoutNow();
     this.select(id);
@@ -3060,7 +3647,10 @@ export class EditorStore {
 
   /** Delete nodes (and descendants); central topic is protected. */
   deleteNodes(ids: string[]): void {
-    const asked = [...new Set(ids)].filter((id) => id !== this.sheet.rootNodeId && this.model.node(id));
+    const picked = [...new Set(ids)].filter((id) => id !== this.sheet.rootNodeId && this.model.node(id));
+    // Diagram: a shape takes the tree Tab grew from it along, as a topic takes
+    // its branch on a map. (A child kept is dragged onto another shape first.)
+    const asked = [...new Set(picked.flatMap((id) => [id, ...this.diagramFollowers(id)]))];
     // A chart takes its slot notes with it: they are floating topics, outside
     // its subtree, and would otherwise linger as notes of nothing.
     const notes = asked.flatMap((id) => this.model.subtreeIds(id).flatMap((sid) => chartNoteIds(this.sheet, sid)));
@@ -3105,6 +3695,12 @@ export class EditorStore {
     for (const id of toDelete) for (const sid of this.model.subtreeIds(id)) deletedSet.add(sid);
     for (const g of this.sheet.boundaries) {
       if (g.memberIds.length > 0 && g.memberIds.every((m) => deletedSet.has(m))) {
+        for (const r of this.sheet.relationships) {
+          if (!claimedRels.has(r.id) && (r.fromId === g.id || r.toId === g.id)) {
+            claimedRels.add(r.id);
+            ops.push(makeOp<Op & { type: "deleteRelationship" }>("deleteRelationship", { id: r.id, relationship: r }));
+          }
+        }
         ops.push(makeOp<Op & { type: "deleteGroup" }>("deleteGroup", { id: g.id, group: g }));
       }
     }
@@ -3132,9 +3728,22 @@ export class EditorStore {
     }
     if (ops.length) {
       this.execOps(ops);
+      this.closeOrphanStudyWindows();
       this.setSelectionTarget({ kind: "none" });
       this.notify();
     }
+  }
+
+  /**
+   * A quiz or flashcard window whose owner is gone — a deleted topic, or a
+   * group deleted because all its topics were — closes, as deleteGroup does.
+   * Left open it pointed at nothing, and an undo brought it back on screen.
+   */
+  private closeOrphanStudyWindows(): void {
+    const gone = (o: { nodeId: string } | { groupId: string }): boolean =>
+      "groupId" in o ? !this.sheet.boundaries.some((g) => g.id === o.groupId) : !this.model.node(o.nodeId);
+    if (this.state.quizOpen && gone(this.state.quizOpen)) this.closeQuiz();
+    if (this.state.flashcardsOpen && gone(this.state.flashcardsOpen)) this.closeFlashcards();
   }
 
   private isDescendant(ancestorId: string, id: string): boolean {
@@ -3324,12 +3933,25 @@ export class EditorStore {
       // on empty canvas does nothing.
       const isRootChild = node.parentId === this.sheet.rootNodeId;
       const isFloatingTopic = !node.parentId;
-      if (!isRootChild && !isFloatingTopic) {
+      const adoptFloating = (): Op[] => {
+        const sz = measureNode(node, this.measurer, imageResolver(this.sheet));
+        return this.groupAdoptOps([{ id: draggedId, box: { x: worldX, y: worldY, w: sz.w, h: sz.h } }]);
+      };
+      if (this.sheet.structure.structureType === "diagram") {
+        // draw.io: any shape goes exactly where it is dropped and keeps its
+        // parent (and its arrow); its own subtree follows it.
+        this.execOps([
+          makeOp<Op & { type: "setPosition" }>("setPosition", { id: draggedId, x: worldX, y: worldY, manual: true, prev: node.position }),
+          ...adoptFloating(),
+        ]);
+      } else if (!isRootChild && !isFloatingTopic) {
         this.setDrop(null);
         return;
       }
       // If dragging a direct child of root, allow swapping sides by reordering
-      if (isRootChild) {
+      if (this.sheet.structure.structureType === "diagram") {
+        /* placed above */
+      } else if (isRootChild) {
         const parent = this.model.requireNode(this.sheet.rootNodeId);
         const layout = layoutSheet(this.sheet, false, this.measurer);
         const rootCx = layout.positions.get(this.sheet.rootNodeId)?.x ?? parent.position.x;
@@ -3367,6 +3989,7 @@ export class EditorStore {
             prev: { ...d.position },
           }));
         }
+        ops.push(...adoptFloating());
         this.execOps(ops);
       } else {
         this.execOps([
@@ -3377,6 +4000,7 @@ export class EditorStore {
             manual: true,
             prev: node.position,
           }),
+          ...adoptFloating(),
         ]);
       }
     }
@@ -3392,13 +4016,45 @@ export class EditorStore {
    * emits ONE setPosition op whose `prev` is the PRE-drag position, so a
    * single undo restores the exact pre-drag state.
    */
-  private nodeDragState: { nodeId: string; origPos: Position; origStyle: Style } | null = null;
+  private nodeDragState: { nodeId: string; origPos: Position; origStyle: Style; followers: { id: string; style: Style }[] } | null = null;
+
+  /**
+   * Diagram: the shapes Tab grew from `id`, at any depth (following the
+   * `tree` arrows), on the same page. They ride along when `id` is moved.
+   */
+  private diagramFollowers(id: string): string[] {
+    const page = this.diagramPageId();
+    if (!page || this.model.node(id)?.parentId !== page) return [];
+    const out: string[] = [];
+    const seen = new Set<string>([id]);
+    const queue = [id];
+    while (queue.length > 0) {
+      const from = queue.shift()!;
+      for (const r of this.sheet.relationships) {
+        if (!r.tree || r.fromId !== from || seen.has(r.toId)) continue;
+        if (this.sheet.nodes[r.toId]?.parentId !== page) continue;
+        seen.add(r.toId);
+        out.push(r.toId);
+        queue.push(r.toId);
+      }
+    }
+    return out;
+  }
+
+  /** Put the riding shapes back where they were before the drag. */
+  private restoreFollowers(d: { followers: { id: string; style: Style }[] }): void {
+    for (const f of d.followers) {
+      const n = this.model.node(f.id);
+      if (n) n.style = { ...f.style };
+    }
+  }
 
   /** A node drag started: capture the pre-drag position for the final op. */
   beginNodeDrag(nodeId: string): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    this.nodeDragState = { nodeId, origPos: { ...node.position }, origStyle: { ...node.style } };
+    const followers = this.diagramFollowers(nodeId).map((id) => ({ id, style: { ...this.model.requireNode(id).style } }));
+    this.nodeDragState = { nodeId, origPos: { ...node.position }, origStyle: { ...node.style }, followers };
   }
 
   /**
@@ -3413,6 +4069,15 @@ export class EditorStore {
     if (freeformOwner(this.sheet, nodeId) && node.parentId) {
       const parent = this.model.requireNode(node.parentId);
       node.style = { ...node.style, freeformPosition: { x: worldX - parent.position.x, y: worldY - parent.position.y } };
+      const d = this.nodeDragState;
+      const from = d?.nodeId === nodeId ? d.origStyle.freeformPosition : undefined;
+      if (d && from) {
+        const dx = worldX - parent.position.x - from.x, dy = worldY - parent.position.y - from.y;
+        for (const f of d.followers) {
+          const n = this.model.node(f.id), at = f.style.freeformPosition;
+          if (n && at) n.style = { ...n.style, freeformPosition: { x: at.x + dx, y: at.y + dy } };
+        }
+      }
     }
     node.position = { ...node.position, x: worldX, y: worldY, manual: true };
     applyLayout(this.sheet, false, this.measurer);
@@ -3427,6 +4092,7 @@ export class EditorStore {
     if (!node) return;
     node.position = { ...d.origPos };
     node.style = { ...d.origStyle };
+    this.restoreFollowers(d);
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
@@ -3448,6 +4114,7 @@ export class EditorStore {
     if (d) {
       const node = this.model.node(d.nodeId);
       if (node) { node.position = { ...d.origPos }; node.style = { ...d.origStyle }; }
+      this.restoreFollowers(d);
     }
     this.dropAt(draggedId, targetId, mode, worldX, worldY);
     if (this.layoutTimer) {
@@ -3476,6 +4143,7 @@ export class EditorStore {
     if (untouched) return;
     node.position = { ...d.origPos };
     node.style = { ...d.origStyle };
+    this.restoreFollowers(d);
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
@@ -3662,7 +4330,7 @@ export class EditorStore {
     this.itemResize = { id, corner, style: n.style, runs, w: g.w, h: g.h, at: freeformOffset(n, parent.childrenIds.indexOf(id)), g: { x: g.x, y: g.y } };
   }
 
-  setItemResizeDraft(dx: number, dy: number, keepRatio = false, snap = 0): void {
+  setItemResizeDraft(dx: number, dy: number, keepRatio = false, snap = 0, freeTransform = false): void {
     const r = this.itemResize;
     const n = r ? this.model.node(r.id) : undefined;
     if (!r || !n) return;
@@ -3673,46 +4341,47 @@ export class EditorStore {
     const isEdge = r.corner === "n" || r.corner === "s" || r.corner === "w" || r.corner === "e";
     let w = west || east ? Math.max(16, r.w + (west ? -dx : dx)) : r.w;
     let h = north || south ? Math.max(16, r.h + (north ? -dy : dy)) : r.h;
-    if (isFreeTransform(this.sheet, { ...n, style: r.style })) {
-      // Photoshop-style free transform. The new box is a scale per axis
-      // (fx, fy). Its even part goes into the font size — what the Inspector
-      // shows and what later typing uses — and only the uneven part stays a
-      // stretch (textScaleX/Y), so one of the two is always 1 and no factor
-      // caps how far a drag can go.
+    const computeScale = (): { fx: number; fy: number } => {
+      if (keepRatio && !isEdge) {
+        const k = (w >= r.w || h >= r.h) ? Math.max(w / r.w, h / r.h) : Math.min(w / r.w, h / r.h);
+        return { fx: k, fy: k };
+      }
+      if (snap > 0) {
+        // The moving edges land on the canvas grid, as for any other item.
+        const q = (v: number): number => Math.round(v / snap) * snap;
+        if (west || east) w = Math.max(16, west ? r.g.x + r.w - q(r.g.x + r.w - w) : q(r.g.x + w) - r.g.x);
+        if (north || south) h = Math.max(16, north ? r.g.y + r.h - q(r.g.y + r.h - h) : q(r.g.y + h) - r.g.y);
+      }
+      return { fx: w / r.w, fy: h / r.h };
+    };
+    if (isBarePicture({ ...n, style: r.style })) {
+      // A bare picture: the handles size the image itself. Off its aspect
+      // ratio it keeps an explicit height (a stretch); on it, none.
+      const { fx, fy } = computeScale();
+      const iw = Math.max(4, Math.round(r.w * fx)), ih = Math.max(4, Math.round(r.h * fy));
+      const nat = imageResolver(this.sheet)(r.style.image!);
+      const natH = nat && nat.w > 0 ? (iw * nat.h) / nat.w : ih;
+      n.style = {
+        ...r.style,
+        imageWidth: iw,
+        imageHeight: Math.abs(ih - natH) < 1 ? undefined : ih,
+        freeformPosition: { x: Math.round(r.at.x + (west ? r.w - iw : 0)), y: Math.round(r.at.y + (north ? r.h - ih : 0)) },
+      };
+      applyLayout(this.sheet, false, this.measurer);
+      this.notify();
+      return;
+    }
+    if (freeTransform && isFreeTransform(this.sheet, { ...n, style: r.style })) {
+      // Photoshop-style free transform (Ctrl+drag). The new box is a scale per
+      // axis (fx, fy). Its even part goes into the font size — what the
+      // Inspector shows and what later typing uses — and only the uneven part
+      // stays a stretch (textScaleX/Y), so one of the two is always 1 and no
+      // factor caps how far a drag can go.
       // measureTopic returns a fixed box (width AND height set: a diagram
       // shape) as is, but multiplies any other box by textScaleX/Y: a fixed box
       // stores its STRETCHED size, everything else its unstretched one.
       const fixedBox = !!r.style.width && !!r.style.height;
-      let fx: number, fy: number;
-      if (keepRatio && !isEdge) {
-        const k = (w >= r.w || h >= r.h) ? Math.max(w / r.w, h / r.h) : Math.min(w / r.w, h / r.h);
-        fx = fy = k;
-      } else {
-        if (snap > 0) {
-          // The moving edges land on the canvas grid, as for any other item.
-          const q = (v: number): number => Math.round(v / snap) * snap;
-          if (west || east) w = Math.max(16, west ? r.g.x + r.w - q(r.g.x + r.w - w) : q(r.g.x + w) - r.g.x);
-          if (north || south) h = Math.max(16, north ? r.g.y + r.h - q(r.g.y + r.h - h) : q(r.g.y + h) - r.g.y);
-        }
-        fx = w / r.w;
-        fy = h / r.h;
-      }
-      if (isBarePicture({ ...n, style: r.style })) {
-        // A bare picture: the handles size the image itself. Off its aspect
-        // ratio it keeps an explicit height (a stretch); on it, none.
-        const iw = Math.max(4, Math.round(r.w * fx)), ih = Math.max(4, Math.round(r.h * fy));
-        const nat = imageResolver(this.sheet)(r.style.image!);
-        const natH = nat && nat.w > 0 ? (iw * nat.h) / nat.w : ih;
-        n.style = {
-          ...r.style,
-          imageWidth: iw,
-          imageHeight: Math.abs(ih - natH) < 1 ? undefined : ih,
-          freeformPosition: { x: Math.round(r.at.x + (west ? r.w - iw : 0)), y: Math.round(r.at.y + (north ? r.h - ih : 0)) },
-        };
-        applyLayout(this.sheet, false, this.measurer);
-        this.notify();
-        return;
-      }
+      const { fx, fy } = computeScale();
       const baseFont = r.style.fontSize ?? 14;
       const tx = (r.style.textScaleX ?? 1) * fx, ty = (r.style.textScaleY ?? 1) * fy;
       // Below the smallest glyph the even part stays a squash instead.
@@ -3748,21 +4417,28 @@ export class EditorStore {
       this.notify();
       return;
     }
-    if (keepRatio && r.w > 0 && r.h > 0) {
-      const k = Math.max(w / r.w, h / r.h);
+    // Normal resize drag: change width/height and reflow wrapped text without
+    // changing fontSize or stretching.
+    n.titleRuns = r.runs;
+    if (keepRatio && !isEdge && r.w > 0 && r.h > 0) {
+      const k = (w >= r.w || h >= r.h) ? Math.max(w / r.w, h / r.h) : Math.min(w / r.w, h / r.h);
       w = Math.max(16, r.w * k); h = Math.max(16, r.h * k);
     } else if (snap > 0) {
       // The moving edges land on the canvas grid (measured from its corner).
       const q = (v: number): number => Math.round(v / snap) * snap;
-      w = Math.max(16, west ? r.g.x + r.w - q(r.g.x + r.w - w) : q(r.g.x + w) - r.g.x);
-      h = Math.max(16, north ? r.g.y + r.h - q(r.g.y + r.h - h) : q(r.g.y + h) - r.g.y);
+      if (west || east) w = Math.max(16, west ? r.g.x + r.w - q(r.g.x + r.w - w) : q(r.g.x + w) - r.g.x);
+      if (north || south) h = Math.max(16, north ? r.g.y + r.h - q(r.g.y + r.h - h) : q(r.g.y + h) - r.g.y);
     }
-    w = Math.round(w); h = Math.round(h);
+    const sx = r.style.textScaleX ?? 1;
+    const sy = r.style.textScaleY ?? 1;
+    const nextStyle: Style = { ...r.style };
+    if (west || east) nextStyle.width = Math.max(16, Math.round(w / sx));
+    if (north || south) nextStyle.height = Math.max(16, Math.round(h / sy));
+    n.style = nextStyle;
+    const measured = measureNode(n, this.measurer, imageResolver(this.sheet));
     n.style = {
-      ...r.style,
-      width: w,
-      height: h,
-      freeformPosition: { x: r.at.x + (west ? r.w - w : 0), y: r.at.y + (north ? r.h - h : 0) },
+      ...nextStyle,
+      freeformPosition: { x: Math.round(r.at.x + (west ? r.w - measured.w : 0)), y: Math.round(r.at.y + (north ? r.h - measured.h : 0)) },
     };
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
@@ -3900,6 +4576,8 @@ export class EditorStore {
     const next = this.groupStyles(dx, dy);
     this.groupDragState = null;
     const ops: Op[] = [];
+    const moved: { id: string; box: Box }[] = [];
+    const resolve = imageResolver(this.sheet);
     for (const id of d.roots) {
       const node = this.model.node(id);
       if (!node) continue;
@@ -3907,7 +4585,14 @@ export class EditorStore {
       const style = next.get(id)!;
       if (style.freeformPosition?.x === node.style.freeformPosition?.x && style.freeformPosition?.y === node.style.freeformPosition?.y) continue;
       ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id, style, prev: node.style }));
+      const parent = node.parentId ? this.model.node(node.parentId) : undefined;
+      const fp = style.freeformPosition;
+      if (parent && fp) {
+        const sz = measureNode(node, this.measurer, resolve);
+        moved.push({ id, box: { x: parent.position.x + fp.x, y: parent.position.y + fp.y, w: sz.w, h: sz.h } });
+      }
     }
+    ops.push(...this.groupAdoptOps(moved));
     if (ops.length) this.execOps(ops);
     if (this.layoutTimer) {
       clearTimeout(this.layoutTimer);
@@ -3928,6 +4613,123 @@ export class EditorStore {
       if (node && node.style !== d.orig.get(id)) { node.style = d.orig.get(id)!; moved = true; }
     }
     if (!moved) return;
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  private boundaryDragState: {
+    freeform: { id: string; orig: Style; base: { x: number; y: number } }[];
+    positioned: { id: string; orig: Position }[];
+    anchor: { x: number; y: number } | null;
+  } | null = null;
+
+  /**
+   * Capture a group's movable members before dragging its title tab: canvas
+   * items (plus diagram followers) move via `freeformPosition`, floating/root
+   * topics via `position`. Returns false if no member can be moved.
+   */
+  beginBoundaryDrag(groupId: string): boolean {
+    const g = this.findGroup(groupId);
+    if (!g) { this.boundaryDragState = null; return false; }
+    const roots = this.topmostIds(g.memberIds.filter((id) => !!this.model.node(id)));
+    const allIds = new Set<string>(roots);
+    for (const id of roots) {
+      for (const fid of this.diagramFollowers(id)) allIds.add(fid);
+    }
+    const freeform: { id: string; orig: Style; base: { x: number; y: number } }[] = [];
+    const positioned: { id: string; orig: Position }[] = [];
+    for (const id of allIds) {
+      const n = this.model.node(id);
+      if (!n || n.id === this.sheet.rootNodeId) continue;
+      if (freeformOwner(this.sheet, id) && n.parentId) {
+        const parent = this.model.node(n.parentId);
+        const base = n.style.freeformPosition ?? freeformOffset(n, parent ? parent.childrenIds.indexOf(id) : 0);
+        freeform.push({ id, orig: n.style, base: { x: base.x, y: base.y } });
+      } else if (!n.parentId || n.parentId === this.sheet.rootNodeId || this.sheet.structure.structureType === "diagram") {
+        positioned.push({ id, orig: { ...n.position } });
+      }
+    }
+    if (freeform.length === 0 && positioned.length === 0) { this.boundaryDragState = null; return false; }
+    const firstFf = freeform[0] ? this.itemGeometry(freeform[0].id) : null;
+    const anchor = firstFf ? { x: firstFf.x, y: firstFf.y } : positioned[0] ? { x: positioned[0].orig.x, y: positioned[0].orig.y } : null;
+    this.boundaryDragState = { freeform, positioned, anchor };
+    return true;
+  }
+
+  snapBoundaryDelta(dx: number, dy: number, snap: number): { dx: number; dy: number } {
+    const a = this.boundaryDragState?.anchor;
+    if (!a || snap <= 0) return { dx, dy };
+    return { dx: Math.round((a.x + dx) / snap) * snap - a.x, dy: Math.round((a.y + dy) / snap) * snap - a.y };
+  }
+
+  setBoundaryDragDraft(dx: number, dy: number): void {
+    const d = this.boundaryDragState;
+    if (!d) return;
+    for (const f of d.freeform) {
+      const node = this.model.node(f.id);
+      if (node) node.style = { ...f.orig, freeformPosition: { x: f.base.x + dx, y: f.base.y + dy } };
+    }
+    for (const p of d.positioned) {
+      const node = this.model.node(p.id);
+      if (node) node.position = { x: p.orig.x + dx, y: p.orig.y + dy, manual: true };
+    }
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  private restoreBoundaryDrag(d: NonNullable<EditorStore["boundaryDragState"]>): boolean {
+    let changed = false;
+    for (const f of d.freeform) {
+      const node = this.model.node(f.id);
+      if (node && node.style !== f.orig) { node.style = f.orig; changed = true; }
+    }
+    for (const p of d.positioned) {
+      const node = this.model.node(p.id);
+      if (node && (node.position.x !== p.orig.x || node.position.y !== p.orig.y || node.position.manual !== p.orig.manual)) {
+        node.position = { ...p.orig };
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  commitBoundaryDrag(dx: number, dy: number): void {
+    const d = this.boundaryDragState;
+    this.boundaryDragState = null;
+    if (!d) return;
+    this.restoreBoundaryDrag(d);
+    const ops: Op[] = [];
+    if (dx !== 0 || dy !== 0) {
+      for (const f of d.freeform) {
+        ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", {
+          id: f.id,
+          style: { ...f.orig, freeformPosition: { x: f.base.x + dx, y: f.base.y + dy } },
+          prev: f.orig,
+        }));
+      }
+      for (const p of d.positioned) {
+        ops.push(makeOp<Op & { type: "setPosition" }>("setPosition", {
+          id: p.id,
+          x: p.orig.x + dx,
+          y: p.orig.y + dy,
+          manual: true,
+          prev: p.orig,
+        }));
+      }
+    }
+    if (ops.length) this.execOps(ops);
+    if (this.layoutTimer) {
+      clearTimeout(this.layoutTimer);
+      this.layoutTimer = null;
+    }
+    applyLayout(this.sheet, false, this.measurer);
+    this.notify();
+  }
+
+  cancelBoundaryDrag(): void {
+    const d = this.boundaryDragState;
+    this.boundaryDragState = null;
+    if (!d || !this.restoreBoundaryDrag(d)) return;
     applyLayout(this.sheet, false, this.measurer);
     this.notify();
   }
@@ -4247,6 +5049,13 @@ export class EditorStore {
       const sel = this.state.gallerySel;
       const at = sel && sel.nodeId === nodeId ? sel.index : undefined;
       const res = await this.fillChartSlots(nodeId, [file], at);
+      return res.added > 0 ? { ok: true } : { ok: false, reason: res.reason };
+    }
+    if (this.model.node(nodeId)?.style.gallery) {
+      // A gallery takes the picture into its grid, wherever it sits — inside
+      // a canvas (every diagram shape is) it used to become a loose picture
+      // next to it, and on the map it went into the topic's edge slot.
+      const res = await this.addGalleryImageFiles(nodeId, [file]);
       return res.added > 0 ? { ok: true } : { ok: false, reason: res.reason };
     }
     const res = await this.importToCard(file);
@@ -5584,14 +6393,110 @@ export class EditorStore {
   attachQuiz(nodeId: string, seed: QuizSeed): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const quiz: QuizInfo = { id: uid("quiz"), questions: seed.questions };
-    if (seed.name) quiz.name = seed.name;
+    const quiz = makeQuizInfo(seed);
     const quizzes = [...(node.style.quizzes ?? []), quiz];
     this.execOps([
       makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style: { ...node.style, quizzes }, prev: node.style }),
     ]);
     const n = seed.questions.length;
     this.toast(`Quiz added (${n} question${n > 1 ? "s" : ""})`);
+  }
+
+  /** APPEND a quiz to a group's strip — one undoable `setGroup`. */
+  attachGroupQuiz(groupId: string, seed: QuizSeed): void {
+    if (!this.findGroup(groupId)) return;
+    const quiz = makeQuizInfo(seed);
+    this.updateGroup(groupId, (g) => ({ ...g, quizzes: [...(g.quizzes ?? []), quiz] }));
+    const n = seed.questions.length;
+    this.toast(`Quiz added (${n} question${n > 1 ? "s" : ""})`);
+  }
+
+  private findGroup(groupId: string): Group | undefined {
+    return this.sheet.boundaries.find((g) => g.id === groupId);
+  }
+
+  /**
+   * When items are dropped or created inside an existing group's boundary box,
+   * add them to that group (and any strictly enclosing outer group) in the same
+   * undoable batch so the group box automatically expands around them.
+   */
+  private groupAdoptOps(items: { id: string; box: Box }[]): Op[] {
+    if (this.sheet.boundaries.length === 0 || items.length === 0) return [];
+    const resolve = imageResolver(this.sheet);
+    const layout = layoutSheet(this.sheet, false, this.measurer);
+    const placed = new Map<string, Box>();
+    for (const [id, pos] of layout.positions) {
+      const n = this.sheet.nodes[id];
+      if (!n) continue;
+      const m = measureNode(n, this.measurer, resolve);
+      placed.set(id, { x: pos.x, y: pos.y, w: m.w, h: m.h });
+    }
+    const geo = groupBoxes(this.sheet, placed);
+    if (geo.size === 0) return [];
+
+    const matches = (box: Box, target: Box): boolean => {
+      const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+      if (cx >= target.x && cx <= target.x + target.w && cy >= target.y && cy <= target.y + target.h) return true;
+      const ix = Math.max(0, Math.min(box.x + box.w, target.x + target.w) - Math.max(box.x, target.x));
+      const iy = Math.max(0, Math.min(box.y + box.h, target.y + target.h) - Math.max(box.y, target.y));
+      const area = box.w * box.h;
+      return area > 0 && (ix * iy) / area >= 0.25;
+    };
+    const isSuperset = (outer: Set<string>, inner: Set<string>): boolean => {
+      if (outer.size <= inner.size) return false;
+      for (const id of inner) if (!outer.has(id)) return false;
+      return true;
+    };
+
+    const additions = new Map<string, Set<string>>();
+    for (const { id, box } of items) {
+      if (id === this.sheet.rootNodeId || this.model.node(id)?.style.freeform) continue;
+      const hit: { id: string; covered: Set<string>; area: number }[] = [];
+      for (const g of this.sheet.boundaries) {
+        const gb = geo.get(g.id);
+        if (!gb || !matches(box, gb.box)) continue;
+        hit.push({ id: g.id, covered: gb.covered, area: gb.box.w * gb.box.h });
+      }
+      if (hit.length === 0) continue;
+      hit.sort((a, b) => a.area - b.area);
+      const primary = hit[0];
+      const targets = [primary, ...hit.slice(1).filter((h) => isSuperset(h.covered, primary.covered))];
+      for (const t of targets) {
+        const g = this.findGroup(t.id);
+        if (!g || g.memberIds.includes(id)) continue;
+        let set = additions.get(g.id);
+        if (!set) { set = new Set(); additions.set(g.id, set); }
+        set.add(id);
+      }
+    }
+
+    const ops: Op[] = [];
+    for (const [groupId, added] of additions) {
+      const g = this.findGroup(groupId);
+      if (!g || added.size === 0) continue;
+      ops.push(makeOp<Op & { type: "setGroup" }>("setGroup", {
+        id: groupId,
+        group: { ...g, memberIds: [...g.memberIds, ...added] },
+        prev: { ...g, memberIds: [...g.memberIds] },
+      }));
+    }
+    return ops;
+  }
+
+  private updateGroup(groupId: string, mutate: (g: Group) => Group): void {
+    const g = this.findGroup(groupId);
+    if (!g) return;
+    const prev: Group = { ...g, memberIds: [...g.memberIds] };
+    const next = mutate(g);
+    this.execOps([makeOp<Op & { type: "setGroup" }>("setGroup", { id: groupId, group: next, prev })]);
+  }
+
+  private async readClipboardText(): Promise<string | null> {
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -5601,16 +6506,26 @@ export class EditorStore {
    * traced rather than pasted into the topic as raw JSON.
    */
   async addQuizFromClipboard(nodeId: string): Promise<void> {
-    const node = this.model.node(nodeId);
-    if (!node) return;
-    let text: string | null = null;
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      /* clipboard read blocked — treat as empty */
-    }
+    if (!this.model.node(nodeId)) return;
+    const text = await this.readClipboardText();
     if (!text) return trace.ignored("quiz:add", "clipboard empty or blocked");
     if (!this.attachStudyPayload(nodeId, text)) trace.ignored("quiz:add", "clipboard holds neither a quiz nor flashcards");
+  }
+
+  /** Read a quiz or flashcard payload from the clipboard and append it to a group. */
+  async addGroupQuizFromClipboard(groupId: string): Promise<void> {
+    if (!this.findGroup(groupId)) return;
+    const text = await this.readClipboardText();
+    if (!text) return trace.ignored("quiz:add", "clipboard empty or blocked");
+    if (!this.attachGroupStudyPayload(groupId, text)) trace.ignored("quiz:add", "clipboard holds neither a quiz nor flashcards");
+  }
+
+  private attachStudyText(text: string, onQuiz: (q: QuizSeed) => void, onDeck: (d: FlashcardSeed) => void): boolean {
+    const quiz = parseQuiz(text);
+    if (quiz) { onQuiz(quiz); return true; }
+    const deck = parseFlashcards(text);
+    if (deck) { onDeck(deck); return true; }
+    return false;
   }
 
   /**
@@ -5619,11 +6534,35 @@ export class EditorStore {
    * here, so a payload lands in the right strip whichever one was used.
    */
   private attachStudyPayload(nodeId: string, text: string): boolean {
-    const quiz = parseQuiz(text);
-    if (quiz) { this.attachQuiz(nodeId, quiz); return true; }
-    const deck = parseFlashcards(text);
-    if (deck) { this.attachFlashcards(nodeId, deck); return true; }
-    return false;
+    return this.attachStudyText(text, (q) => this.attachQuiz(nodeId, q), (d) => this.attachFlashcards(nodeId, d));
+  }
+
+  private attachGroupStudyPayload(groupId: string, text: string): boolean {
+    return this.attachStudyText(text, (q) => this.attachGroupQuiz(groupId, q), (d) => this.attachGroupFlashcards(groupId, d));
+  }
+
+  /**
+   * A group's study prompt: the outline of the topics it encloses (each
+   * member with its branch; a member inside another member's branch counted
+   * once), plus the quiz or flashcard prompt. What a topic's menu does for
+   * its branch, done for the group's content.
+   */
+  async copyGroupStudyPrompt(groupId: string, kind: "quiz" | "flashcards"): Promise<void> {
+    const group = this.sheet.boundaries.find((g) => g.id === groupId);
+    if (!group) return;
+    this.commitEdit();
+    // Members inside another member's branch (or Tab tree) are written once.
+    const roots = studyRoots(this.sheet, group.memberIds);
+    if (roots.length === 0) return;
+    const text = kind === "quiz"
+      ? quizClipText(studyOutline(this.sheet, roots, "quiz"))
+      : flashcardsClipText(studyOutline(this.sheet, roots, "plain"));
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be blocked; the prompt was still built */
+    }
+    this.toast(kind === "quiz" ? `Copied quiz prompt (${roots.length} topics)` : `Copied flashcards prompt (${roots.length} topics)`);
   }
 
   /** Copy a branch's outline plus the flashcard-generation prompt. The
@@ -5644,12 +6583,20 @@ export class EditorStore {
   attachFlashcards(nodeId: string, seed: FlashcardSeed): void {
     const node = this.model.node(nodeId);
     if (!node) return;
-    const deck: FlashcardDeck = { id: uid("cards"), cards: seed.cards };
-    if (seed.name) deck.name = seed.name;
+    const deck = makeFlashcardDeck(seed);
     const flashcards = [...(node.style.flashcards ?? []), deck];
     this.execOps([
       makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style: { ...node.style, flashcards }, prev: node.style }),
     ]);
+    const n = seed.cards.length;
+    this.toast(`Flashcards added (${n} card${n > 1 ? "s" : ""})`);
+  }
+
+  /** APPEND a deck to a group's flashcard strip — one undoable `setGroup`. */
+  attachGroupFlashcards(groupId: string, seed: FlashcardSeed): void {
+    if (!this.findGroup(groupId)) return;
+    const deck = makeFlashcardDeck(seed);
+    this.updateGroup(groupId, (g) => ({ ...g, flashcards: [...(g.flashcards ?? []), deck] }));
     const n = seed.cards.length;
     this.toast(`Flashcards added (${n} card${n > 1 ? "s" : ""})`);
   }
@@ -5849,6 +6796,10 @@ export class EditorStore {
     // of draw.io itself) becomes boxes and arrows in a freeform canvas.
     if (await this.pasteDrawio(text, destination ?? null)) return;
     if (parseQuiz(text) || parseFlashcards(text)) {
+      if (this.state.groupSel && this.findGroup(this.state.groupSel)) {
+        this.attachGroupStudyPayload(this.state.groupSel, text);
+        return;
+      }
       const target = this.selectionNode ?? (anchorId ? this.model.node(anchorId) : null);
       if (!target) return trace.ignored("paste:quiz", "no topic selected to attach the quiz or flashcards to");
       this.attachStudyPayload(target.id, text);
@@ -6206,8 +7157,35 @@ export class EditorStore {
     const id = uid("grp");
     // The topic selection stays: grouping and then summarizing the same
     // siblings is one workflow.
-    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", { group: { id, memberIds } })]);
+    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", { group: { id, memberIds, label: "Group" } })]);
     this.toast("Group created");
+  }
+
+  /**
+   * A link: a group of the selected topics that is not drawn on the map. It
+   * shows while one of its topics is selected (or with Show links on), and
+   * otherwise works as a group: title, menu, quizzes, flashcards.
+   */
+  createLinkFromSelection(): void {
+    const nodes = this.state.selection.map((id) => this.model.node(id)).filter((n): n is MindNode => !!n);
+    if (nodes.length === 0) {
+      this.toast("Select the topics to link");
+      return;
+    }
+    const id = uid("grp");
+    this.execOps([makeOp<Op & { type: "createGroup" }>("createGroup", {
+      group: { id, memberIds: nodes.map((n) => n.id), label: "Link", link: true, lineStyle: "dotted" },
+    })]);
+    this.toast("Link created: it shows when you select one of its topics");
+  }
+
+  /** Show every link on the map, or only those of the selected topics. */
+  toggleShowLinks(): void {
+    this.state.showLinks = !this.state.showLinks;
+    // A link hidden again cannot stay a selection nobody can see.
+    const g = this.state.groupSel ? this.sheet.boundaries.find((x) => x.id === this.state.groupSel) : undefined;
+    if (!this.state.showLinks && g?.link && !g.memberIds.some((m) => this.state.selection.includes(m))) this.state.groupSel = null;
+    this.notify();
   }
 
   createSummaryFromSelection(): void {
@@ -6235,7 +7213,14 @@ export class EditorStore {
   deleteGroup(id: string): void {
     const g = this.sheet.boundaries.find((x) => x.id === id);
     if (!g) return;
-    this.execOps([makeOp<Op & { type: "deleteGroup" }>("deleteGroup", { id, group: g })]);
+    if (this.state.quizOpen && "groupId" in this.state.quizOpen && this.state.quizOpen.groupId === id) this.closeQuiz();
+    if (this.state.flashcardsOpen && "groupId" in this.state.flashcardsOpen && this.state.flashcardsOpen.groupId === id) this.closeFlashcards();
+    const removedRels = this.sheet.relationships.filter((r) => r.fromId === id || r.toId === id);
+    this.execOps([
+      ...removedRels.map((r) => makeOp<Op & { type: "deleteRelationship" }>("deleteRelationship", { id: r.id, relationship: r })),
+      makeOp<Op & { type: "deleteGroup" }>("deleteGroup", { id, group: g }),
+    ]);
+    if (this.state.relSel && removedRels.some((r) => r.id === this.state.relSel)) this.state.relSel = null;
     this.state.groupSel = null;
     this.notify();
   }
@@ -6575,6 +7560,14 @@ export class EditorStore {
     this.notify();
   }
 
+  openGroupQuiz(groupId: string, quizId: string): void {
+    const group = this.findGroup(groupId);
+    if (!group?.quizzes?.some((q) => q.id === quizId)) return;
+    this.state.quizOpen = { groupId, quizId };
+    trace.mark("ui", "ui:modal", { open: true, quiz: quizId, group: groupId });
+    this.notify();
+  }
+
   /** Open the "Diagram from AI" window for a canvas or topic. */
   openAiDiagram(nodeId: string): void {
     if (!this.model.node(nodeId)) return;
@@ -6637,6 +7630,21 @@ export class EditorStore {
     this.toast("Quiz deleted");
   }
 
+  /** Delete one quiz from a group's strip — undo brings it back with its score. */
+  removeGroupQuiz(groupId: string, quizId: string): void {
+    const group = this.findGroup(groupId);
+    const quizzes = group?.quizzes;
+    if (!group || !quizzes?.some((q) => q.id === quizId)) return;
+    if (this.state.quizOpen?.quizId === quizId) this.closeQuiz();
+    const rest = quizzes.filter((q) => q.id !== quizId);
+    this.updateGroup(groupId, (g) => {
+      const next: Group = { ...g, quizzes: rest };
+      if (rest.length === 0) delete next.quizzes;
+      return next;
+    });
+    this.toast("Quiz deleted");
+  }
+
   /**
    * Record one finished run with its selected answer indices. A numeric score
    * remains accepted for legacy callers. Written through a `setStyle`
@@ -6645,28 +7653,8 @@ export class EditorStore {
    */
   submitQuizScore(nodeId: string, quizId: string, answers: number | readonly number[]): void {
     const node = this.model.node(nodeId);
-    const quizzes = node?.style.quizzes;
-    if (!node || !quizzes) return;
-    const idx = quizzes.findIndex((q) => q.id === quizId);
-    if (idx < 0) return;
-    const quiz = quizzes[idx];
-    const total = quiz.questions.length;
-    if (typeof answers !== "number" && (answers.length !== total || answers.some(a => !Number.isInteger(a) || a < 0 || a > 3))) return;
-    const correct = typeof answers === "number" ? answers : answers.filter((answer,i) => answer === quiz.questions[i].correct).length;
-    if (!Number.isFinite(correct)) return;
-    const clamped = Math.max(0, Math.min(correct, total));
-    const prev = quiz.score;
-    const score = {
-      last: clamped,
-      best: Math.max(prev?.best ?? 0, clamped),
-      attempts: (prev?.attempts ?? 0) + 1,
-    };
-    const nextQuizzes = quizzes.map((q, i) => {
-      if (i !== idx) return q;
-      const next = { ...q, score, lastAnswers: typeof answers === "number" ? undefined : [...answers] };
-      if (next.lastAnswers === undefined) delete next.lastAnswers;
-      return next;
-    });
+    const nextQuizzes = scoredQuizzes(node?.style.quizzes, quizId, answers);
+    if (!node || !nextQuizzes) return;
     this.execOps([
       makeOp<Op & { type: "setStyle" }>("setStyle", {
         id: nodeId,
@@ -6674,6 +7662,14 @@ export class EditorStore {
         prev: node.style,
       }),
     ]);
+    this.notify();
+  }
+
+  submitGroupQuizScore(groupId: string, quizId: string, answers: number | readonly number[]): void {
+    const group = this.findGroup(groupId);
+    const nextQuizzes = scoredQuizzes(group?.quizzes, quizId, answers);
+    if (!group || !nextQuizzes) return;
+    this.updateGroup(groupId, (g) => ({ ...g, quizzes: nextQuizzes }));
     this.notify();
   }
 
@@ -6686,6 +7682,14 @@ export class EditorStore {
     if (!node?.style.flashcards?.some((d) => d.id === deckId)) return;
     this.state.flashcardsOpen = { nodeId, deckId };
     trace.mark("ui", "ui:modal", { open: true, flashcards: deckId });
+    this.notify();
+  }
+
+  openGroupFlashcards(groupId: string, deckId: string): void {
+    const group = this.findGroup(groupId);
+    if (!group?.flashcards?.some((d) => d.id === deckId)) return;
+    this.state.flashcardsOpen = { groupId, deckId };
+    trace.mark("ui", "ui:modal", { open: true, flashcards: deckId, group: groupId });
     this.notify();
   }
 
@@ -6710,18 +7714,37 @@ export class EditorStore {
     this.toast("Flashcards deleted");
   }
 
+  /** Delete one deck from a group's strip — undo brings it back with its ratings. */
+  removeGroupFlashcards(groupId: string, deckId: string): void {
+    const group = this.findGroup(groupId);
+    const decks = group?.flashcards;
+    if (!group || !decks?.some((d) => d.id === deckId)) return;
+    if (this.state.flashcardsOpen?.deckId === deckId) this.closeFlashcards();
+    const rest = decks.filter((d) => d.id !== deckId);
+    this.updateGroup(groupId, (g) => {
+      const next: Group = { ...g, flashcards: rest };
+      if (rest.length === 0) delete next.flashcards;
+      return next;
+    });
+    this.toast("Flashcards deleted");
+  }
+
   /** Rate one card. Written at once, so a run closed halfway keeps what was
    *  rated; each rating is one undo step. */
   rateFlashcard(nodeId: string, deckId: string, cardIndex: number, rating: FlashcardRating): void {
     const node = this.model.node(nodeId);
-    const decks = node?.style.flashcards;
-    const deck = decks?.find((d) => d.id === deckId);
-    if (!node || !decks || !deck || !deck.cards[cardIndex] || deck.cards[cardIndex].rating === rating) return;
-    const cards = deck.cards.map((card, i) => (i === cardIndex ? { ...card, rating } : card));
-    const flashcards = decks.map((d) => (d.id === deckId ? { ...d, cards } : d));
+    const flashcards = ratedDecks(node?.style.flashcards, deckId, cardIndex, rating);
+    if (!node || !flashcards) return;
     this.execOps([
       makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style: { ...node.style, flashcards }, prev: node.style }),
     ]);
+  }
+
+  rateGroupFlashcard(groupId: string, deckId: string, cardIndex: number, rating: FlashcardRating): void {
+    const group = this.findGroup(groupId);
+    const flashcards = ratedDecks(group?.flashcards, deckId, cardIndex, rating);
+    if (!group || !flashcards) return;
+    this.updateGroup(groupId, (g) => ({ ...g, flashcards }));
   }
 
   setQuizMistakesVisible(nodeId: string, visible: boolean): void {
@@ -6730,6 +7753,16 @@ export class EditorStore {
     const style: Style = { ...node.style, showQuizMistakes: visible };
     if (!visible) delete style.showQuizMistakes;
     this.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", { id: nodeId, style, prev: node.style })]);
+  }
+
+  setGroupQuizMistakesVisible(groupId: string, visible: boolean): void {
+    const group = this.findGroup(groupId);
+    if (!group || !!group.showQuizMistakes === visible) return;
+    this.updateGroup(groupId, (g) => {
+      const next: Group = { ...g, showQuizMistakes: visible };
+      if (!visible) delete next.showQuizMistakes;
+      return next;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -7075,15 +8108,28 @@ export class EditorStore {
     return raw ? this.validateImportedDoc(raw) : null;
   }
 
-  newDocument(): void {
+  /**
+   * A fresh unsaved document. The kind is chosen here, once, at creation:
+   * a mind map, or a draw.io-style diagram (its own document type, on pages;
+   * it is not one of a mind map's structures).
+   */
+  newDocument(kind: "map" | "diagram" = "map"): void {
     void this.parkActive();
-    const doc = DocumentModel.blank("Untitled map");
-    doc.settings.theme = "light";
+    const doc = kind === "diagram" ? DocumentModel.blankDiagram("Untitled diagram") : DocumentModel.blank("Untitled map");
+    if (kind !== "diagram") doc.settings.theme = "light";
     this.activate(doc);
+    if (kind === "diagram") {
+      // Centre the view on the first shape, near the top of the page.
+      const sheet0 = doc.sheets[0];
+      const page = sheet0.nodes[sheet0.rootNodeId];
+      const first = sheet0.nodes[page.childrenIds[0]];
+      const at = first?.style.freeformPosition ?? { x: 120, y: 120 };
+      this.state.camera = { scale: 1, x: page.position.x + at.x + 60, y: page.position.y + at.y + 30 + 120 };
+    }
     this.markDirty(doc.documentId); // new doc not persisted until the user saves
     this.upsertEntry(this.activeEntry());
     this.notify();
-    this.toast("New document created");
+    this.toast(kind === "diagram" ? "New diagram created" : "New document created");
   }
 
   /** Create a doc from the roadmap template in the library; returns its id. */

@@ -13,6 +13,13 @@
 
 export const SCHEMA_VERSION = "0.1.0";
 
+/** Main topics and subtopics: Xmind face at 16 px, weight 500. */
+export const TOPIC_FONT_SIZE = 16;
+export const TOPIC_FONT_WEIGHT = 500;
+/** Bumped when the defaults above change; documents older than this are
+ *  migrated on open (EditorStore.validateImportedDoc). */
+export const FONT_DEFAULTS_VERSION = 2;
+
 // ---------------------------------------------------------------------------
 // Core enums
 // ---------------------------------------------------------------------------
@@ -34,7 +41,8 @@ export type StructureType =
   | "fishbone" // Ishikawa
   | "matrix" // rows x columns
   | "treetable" // hierarchical rows + columns
-  | "freeform"; // grid/free canvas
+  | "freeform" // grid/free canvas
+  | "diagram"; // draw.io-like: free shapes, Tab grows a tree of shapes with arrows
 
 export type Orientation = "horizontal" | "vertical";
 
@@ -62,6 +70,20 @@ export type TopicShape =
   | "process"
   | "note"
   | "actor"
+  | "trapezoid"
+  | "manualInput"
+  | "delay"
+  | "offPage"
+  | "internalStorage"
+  | "multiDocument"
+  | "step"
+  | "arrowRight"
+  | "doubleArrow"
+  | "cross"
+  | "star"
+  | "octagon"
+  | "cube"
+  | "callout"
   | "underline"
   | "none";
 
@@ -268,6 +290,9 @@ export interface Style {
   canvasNote?: string;
   /** Position relative to the parent inside a freeform topic. */
   freeformPosition?: { x: number; y: number };
+  /** A diagram item moved by hand: Tab's tree layout leaves it where it is
+   *  (its own children still follow it). */
+  diagramPinned?: boolean;
   /** When true on a freeform item, corner-resizing scales text size proportionally instead of only resizing the box. */
   freeTransform?: boolean;
   /** Non-uniform horizontal/vertical text stretch factor (1 = normal). */
@@ -551,6 +576,12 @@ export interface Relationship {
   waypoints?: RelAnchor[];
   /** Where the label sits, as an offset from the route's midpoint. Absent = on it. */
   labelOffset?: RelAnchor;
+  /**
+   * Drawn by Tab in a diagram: the target is a CHILD of the source in the
+   * diagram's tree, and is laid out beside it (store.diagramTab). The arrow is
+   * otherwise an ordinary, editable arrow.
+   */
+  tree?: boolean;
 }
 
 /** A point on a box border, as fractions of the box's width and height. */
@@ -596,6 +627,19 @@ export interface Group {
    * exactly like the hairline it replaces. Absent = DEFAULT_GROUP_BORDER_WIDTH.
    */
   borderWidth?: number;
+  /** Quizzes attached to this group (opened from the group's right-click menu). */
+  quizzes?: QuizInfo[];
+  /** Show study arrows on missed topics for this group's quizzes. */
+  showQuizMistakes?: boolean;
+  /** Flashcard decks attached to this group (opened from the group's right-click menu). */
+  flashcards?: FlashcardDeck[];
+  /**
+   * A LINK: a group that is invisible on the map. It is drawn only while one
+   * of its topics (or the link itself) is selected, or while "Show links" is
+   * on; it never takes room in the layout and is not exported. Everything
+   * else — title, menu, quizzes, flashcards — is a group's.
+   */
+  link?: boolean;
 }
 
 /**
@@ -737,12 +781,15 @@ export interface RnodeDocument {
   archived: boolean;
   pinned: boolean;
   settings: {
-    theme: "light" | "dark" | "vanilla" | "matte" | "fog";
+    theme: "light" | "dark" | "vanilla" | "matte" | "fog" | "xmind";
     background?: string;
     /** Canvas pattern; unset = the theme's own (lines; none on Matte). */
     grid?: "lines" | "dots" | "graph" | "fine" | "none";
     showOutliner: boolean;
     showInspector: boolean;
+    /** Which topic font defaults the document was written with (see
+     *  FONT_DEFAULTS_VERSION). Absent = the original 14/600 main, 12/400 sub. */
+    fontDefaults?: number;
   };
   themeId: string;
   sheets: Sheet[];

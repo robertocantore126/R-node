@@ -993,8 +993,8 @@ describe("canvas resize drag", () => {
     store.createGroupFromSelection();
     expect(store.sheet.boundaries).toHaveLength(1);
     expect(store.sheet.boundaries[0].memberIds).toEqual(expect.arrayContaining([first.id, second]));
-    // born without the old "group" placeholder title
-    expect(store.sheet.boundaries[0].label).toBeUndefined();
+    // born with a visible default "Group" title tab
+    expect(store.sheet.boundaries[0].label).toBe("Group");
 
     store.undo();
     expect(store.sheet.boundaries).toHaveLength(0);
