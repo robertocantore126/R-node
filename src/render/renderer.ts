@@ -238,8 +238,10 @@ const SHADOW_BLUR = 10;
 const SHADOW_PAD = 15;
 const SHADOW_DY = 3;
 const CONNECTOR_SHADOW_DY = 2.5;
-/** E2 wheel-zoom shortcut (stretched cached scene during active wheel zoom when motionQuality is on). */
-const ZOOM_BLIT = true;
+/** E2 wheel-zoom shortcut (stretched cached scene). Off: it blurred text and
+ *  images while zooming in, and text must look exactly as when still. It never
+ *  acted on zoom-out (the cache cannot cover the newly shown area). */
+const ZOOM_BLIT = false;
 /** Screen-px threshold below which images are painted as a solid average-color rect. */
 const IMAGE_AVG_COLOR_PX = 24;
 /** Screen-px line height below which text is greeked or skipped. */
@@ -319,7 +321,7 @@ export class Renderer {
   private avgColorCanvas: HTMLCanvasElement | null = null;
   private avgColorCtx: CanvasRenderingContext2D | null = null;
   /** Cached relationship routes and spatial obstacle index, keyed by placementKey. */
-  private relRouteCache: { key: string; routes: Map<string, RelRoute>; index: ObstacleIndex } | null = null;
+  private relRouteCache: { key: string; routes: Map<string, { rel: Relationship; a: Rect; b: Rect; route: RelRoute }>; index: ObstacleIndex } | null = null;
   /** Active VisualFlags for the current frame (so drawText/paintSlot/drawRelationship can check flags.lod). */
   private curFlags: VisualFlags = getVisualFlags();
   /** Cache keys drawn (or freshly decoded) in the current frame — never evicted while visible. */
@@ -892,11 +894,9 @@ export class Renderer {
         const s = state.camera.scale;
         const c0 = this.sceneCacheCam;
         const wantFull = !(flags.motionQuality && state.moving);
-        // Wheel zoom: when motionQuality is enabled and the cached scene fully
-        // covers the viewport (zoom-in), stretch-blit for 60 fps responsiveness,
-        // then CanvasView triggers a crisp full repaint once the wheel settles.
-        // Zoom-out exposes areas outside the cached bitmap, so it paints live
-        // instead of flashing an empty gray border.
+        // Wheel zoom (disabled, see ZOOM_BLIT): stretch-blit the cached scene
+        // only when it covers the whole view (zoom-in); zoom-out always paints
+        // live, since the cache has nothing for the newly shown area.
         if (state.zooming && ZOOM_BLIT && flags.motionQuality) {
           const dx = state.viewW / 2 + (c0.x - state.viewW / (2 * c0.scale) - state.camera.x) * s;
           const dy = state.viewH / 2 + (c0.y - state.viewH / (2 * c0.scale) - state.camera.y) * s;
@@ -4322,7 +4322,7 @@ export class Renderer {
   }
 
   /** Cached spatial obstacle index + route map for the current placement revision. */
-  private getRelRouteCache(state: RenderState): { key: string; routes: Map<string, RelRoute>; index: ObstacleIndex } | null {
+  private getRelRouteCache(state: RenderState): { key: string; routes: Map<string, { rel: Relationship; a: Rect; b: Rect; route: RelRoute }>; index: ObstacleIndex } | null {
     const pk = this.placementKey(state);
     if (pk === null) return null;
     if (this.relRouteCache && this.relRouteCache.key === pk) return this.relRouteCache;
@@ -4338,13 +4338,20 @@ export class Renderer {
    */
   private cachedRelRoute(state: RenderState, rel: Relationship, a: Rect, b: Rect): RelRoute {
     const cache = this.getRelRouteCache(state);
-    if (cache && rel.id) {
-      const hit = cache.routes.get(rel.id);
-      if (hit) return hit;
+    // No placement revision (caller opted out): the plain uncached route.
+    if (!cache) {
+      const env = this.relEnv(state, rel);
+      return relationshipRoute(rel, a, b, env.obstacles, env.origin);
     }
+    // A hit needs the SAME inputs, not just the same arrow: within one
+    // revision the ends move (layout tween) and gestures route edited copies
+    // of the arrow (bend drag); each must get its own route.
+    const same = (p: Rect, q: Rect): boolean => p.x === q.x && p.y === q.y && p.w === q.w && p.h === q.h;
+    const hit = rel.id ? cache.routes.get(rel.id) : undefined;
+    if (hit && hit.rel === rel && same(hit.a, a) && same(hit.b, b)) return hit.route;
     const bends = !!rel.waypoints?.length;
     const owner = endpointFreeformOwner(state.sheet, rel.fromId);
-    const origin = owner && cache ? cache.index.canvasOrigins.get(owner) : undefined;
+    const origin = owner ? cache.index.canvasOrigins.get(owner) : undefined;
     const isFarSimple =
       this.curFlags.lod &&
       this.curScale < LOD_BARE &&
@@ -4355,14 +4362,9 @@ export class Renderer {
       // computes the obstacle-avoiding route properly.
       return relationshipRoute(rel, a, b, undefined, origin);
     }
-    const obstacles =
-      rel.connector === "elbow" && !bends
-        ? cache
-          ? queryObstacles(state.sheet, cache.index, rel, a, b)
-          : routeEnv(state.sheet, this.placedNodes(state), rel).obstacles
-        : undefined;
+    const obstacles = rel.connector === "elbow" && !bends ? queryObstacles(state.sheet, cache.index, rel, a, b) : undefined;
     const route = relationshipRoute(rel, a, b, obstacles, origin);
-    if (cache && rel.id) cache.routes.set(rel.id, route);
+    if (rel.id) cache.routes.set(rel.id, { rel, a: { x: a.x, y: a.y, w: a.w, h: a.h }, b: { x: b.x, y: b.y, w: b.w, h: b.h }, route });
     return route;
   }
 

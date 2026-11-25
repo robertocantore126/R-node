@@ -881,16 +881,23 @@ export class EditorStore {
     // its parent's column. Its tree parent is read NOW, while the arrow still
     // exists, so that tree can be laid out again after the batch.
     const pageId = this.diagramPageId();
-    const preTreeIdx = pageId ? this.getDiagramTreeIndex() : null;
-    const lostChildOf = pageId && preTreeIdx
-      ? ops.flatMap((op) => {
-        if (op.type === "deleteNode") {
-          const p = preTreeIdx.parent.get(op.id);
-          return p ? [p] : [];
-        }
-        if (op.type === "deleteRelationship" && op.relationship.tree) return [op.relationship.fromId];
-        return [];
-      })
+    // Every tree arrow INTO a deleted shape counts, wherever its source is
+    // (one pass over the arrows, built only when the batch deletes a node).
+    let treeParentsOf: Map<string, string[]> | null = null;
+    if (pageId && ops.some((op) => op.type === "deleteNode")) {
+      treeParentsOf = new Map();
+      for (const r of this.sheet.relationships) {
+        if (!r.tree) continue;
+        const list = treeParentsOf.get(r.toId);
+        if (list) list.push(r.fromId);
+        else treeParentsOf.set(r.toId, [r.fromId]);
+      }
+    }
+    const lostChildOf = pageId
+      ? ops.flatMap((op) =>
+        op.type === "deleteNode" ? treeParentsOf?.get(op.id) ?? []
+        : op.type === "deleteRelationship" && op.relationship.tree ? [op.relationship.fromId]
+        : [])
       : [];
     // Track incremental diagram dirtiness so adoptIntoDiagramPage and
     // fitDiagramPage inspect only touched nodes instead of scanning the page.
@@ -942,6 +949,19 @@ export class EditorStore {
           break;
         default:
           break;
+      }
+      // Anything else that can change a page shape's size (a picture, an
+      // attachment, a task icon, an item inside a container shape...): the
+      // page child holding the touched node is measured again.
+      const touched = "id" in op ? op.id : "nodeId" in op ? op.nodeId : null;
+      if (typeof touched === "string") {
+        // A deleted node is gone already: start from the parent it left.
+        let cur: MindNode | undefined = this.sheet.nodes[touched]
+          ?? ("parentId" in op && typeof op.parentId === "string" ? this.sheet.nodes[op.parentId] : undefined);
+        for (let hops = 0; cur && hops < 10000; hops++) {
+          if (cur.parentId === pageId) { dirtyBoundsIds.add(cur.id); break; }
+          cur = cur.parentId ? this.sheet.nodes[cur.parentId] : undefined;
+        }
       }
     };
     // All or nothing. applyOp trusts its ids, so an op naming a missing node
@@ -1001,6 +1021,8 @@ export class EditorStore {
     const apply = (op: Op): void => {
       inverses.push(applyWithInverse(this.sheet, op));
       ops.push(op);
+      // A container shape that grows here changes the page's content bounds.
+      trackOp(op);
     };
     // A canvas laid out by the map cannot move its own left/top edge, so when
     // it grows that way its content would jump on screen; the camera follows
@@ -2830,6 +2852,33 @@ export class EditorStore {
     return out;
   }
 
+  /**
+   * Diagram: the look of a shape Tab creates, by its depth in the Tab tree
+   * (the top shape is 0). Children (1) are rectangles, grandchildren and
+   * deeper are plain text, whatever the parent looks like. It is only the
+   * starting look: a shape the user restyles keeps what they chose.
+   */
+  private diagramTabChildStyle(depth: number): Style {
+    if (depth <= 1) {
+      const { w, h } = FREEFORM_SHAPE_SIZES.rect;
+      return { shape: "rect", width: w, height: h, borderWidth: 1.5, align: "center" };
+    }
+    return { shape: "none", align: "left" };
+  }
+
+  /** Diagram: how many Tab arrows lead from the top of its tree down to `id`. */
+  private diagramTreeDepth(id: string): number {
+    const idx = this.getDiagramTreeIndex();
+    if (!idx) return 0;
+    const seen = new Set<string>([id]);
+    let depth = 0;
+    for (let up = idx.parent.get(id); up && !seen.has(up); up = idx.parent.get(up)) {
+      seen.add(up);
+      depth++;
+    }
+    return depth;
+  }
+
   /** The page of the open diagram (its root canvas), or null in a mind map. */
   private diagramPageId(): string | null {
     const id = this.sheet.rootNodeId;
@@ -3173,7 +3222,10 @@ export class EditorStore {
           }
           continue;
         }
-        const b = this.diagramChildBox(cid, 0, resolve);
+        // The index only matters for a shape with no place of its own
+        // (freeformOffset falls back to a grid slot by index).
+        const at = child.style.freeformPosition ? 0 : node.childrenIds.indexOf(cid);
+        const b = this.diagramChildBox(cid, at, resolve);
         if (!b) continue;
         cache.boxes.set(cid, b);
         if (
@@ -3322,7 +3374,7 @@ export class EditorStore {
     if (!page || !parent || parent.parentId !== page) return null;
     const pageNode = this.model.requireNode(page);
     const id = uid("n");
-    const style = this.diagramChildStyle(parent);
+    const style = this.diagramTabChildStyle(this.diagramTreeDepth(parentId) + 1);
     const resolve = imageResolver(this.sheet);
     const sizeOf = (nid: string): { w: number; h: number } => {
       if (nid === id) {
@@ -3958,10 +4010,25 @@ export class EditorStore {
 
   /** Delete nodes (and descendants); central topic is protected. */
   deleteNodes(ids: string[]): void {
+    const ops = this.deleteNodeOps(ids);
+    if (ops.length) {
+      this.execOps(ops);
+      this.closeOrphanStudyWindows();
+      this.setSelectionTarget({ kind: "none" });
+      this.notify();
+    }
+  }
+
+  /**
+   * The ops deleting `ids` with everything that goes with them (subtrees,
+   * arrows, emptied groups and summaries, chart notes). `withFollowers`:
+   * a diagram shape also takes the Tab tree grown from it.
+   */
+  private deleteNodeOps(ids: string[], withFollowers = true): Op[] {
     const picked = [...new Set(ids)].filter((id) => id !== this.sheet.rootNodeId && this.model.node(id));
     // Diagram: a shape takes the tree Tab grew from it along, as a topic takes
     // its branch on a map. (A child kept is dragged onto another shape first.)
-    const asked = [...new Set(picked.flatMap((id) => [id, ...this.diagramFollowers(id)]))];
+    const asked = [...new Set(picked.flatMap((id) => [id, ...(withFollowers ? this.diagramFollowers(id) : [])]))];
     // A chart takes its slot notes with it: they are floating topics, outside
     // its subtree, and would otherwise linger as notes of nothing.
     const notes = asked.flatMap((id) => this.model.subtreeIds(id).flatMap((sid) => chartNoteIds(this.sheet, sid)));
@@ -4037,12 +4104,7 @@ export class EditorStore {
       });
       ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chartId, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
     }
-    if (ops.length) {
-      this.execOps(ops);
-      this.closeOrphanStudyWindows();
-      this.setSelectionTarget({ kind: "none" });
-      this.notify();
-    }
+    return ops;
   }
 
   /**
@@ -5235,6 +5297,41 @@ export class EditorStore {
   }
 
   /**
+   * Can `targetId` take a picture INTO itself (its top slot, above the text)?
+   * Any ordinary shape or topic can; the containers that are not a box with
+   * text — a canvas or the diagram page, a chart or gallery (their own grid),
+   * a code block, a frame, another bare picture — cannot.
+   */
+  canTakePicture(targetId: string, pictureId?: string): boolean {
+    const t = this.model.node(targetId);
+    if (!t || t.id === pictureId) return false;
+    const s = t.style;
+    return !(s.freeform || s.gallery || s.code || s.frame || s.chartNote || isBarePicture(t) || isDiagramPage(this.sheet, t.id));
+  }
+
+  /**
+   * A free picture dropped on a shape: it goes INTO the shape, in the top
+   * slot above the text (replacing a picture already there), and the free
+   * picture is gone — one undo step. Its arrows go with it; a Tab child of
+   * the picture stays where it is, unattached.
+   */
+  dropPictureInto(pictureId: string, targetId: string): boolean {
+    const pic = this.model.node(pictureId);
+    if (!pic || !isBarePicture(pic) || !this.canTakePicture(targetId, pictureId) || !pic.parentId) return false;
+    const target = this.model.requireNode(targetId);
+    const imageId = pic.style.image!;
+    this.execOps([
+      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: targetId, imageId, prevImageId: target.style.image ?? null, position: "top" }),
+      ...this.deleteNodeOps([pictureId], false),
+    ]);
+    this.closeOrphanStudyWindows();
+    this.settleLayoutNow();
+    this.select(targetId);
+    trace.applied("drop:picture-into", { picture: pictureId, target: targetId });
+    return true;
+  }
+
+  /**
    * Delete the SELECTED image (Backspace/Delete with the image selected):
    * removes only that slot's reference from the node, never the node itself.
    * The attachment card stays (it may be shared; collectOrphans is the GC).
@@ -5271,13 +5368,31 @@ export class EditorStore {
    * second one.
    */
   async pasteImageFile(file: Blob & { name?: string }, anchorId?: string | null): Promise<boolean> {
-    const node = this.clipboardTarget(anchorId);
+    const node = this.imagePasteTarget(anchorId);
     if (!node) {
       trace.ignored("paste:image", "no node selected");
+      this.toast("Select a topic to paste the picture into");
       return false;
     }
     const res = await this.attachImageFile(node.id, file);
+    if (!res.ok && res.reason) this.toast(`Could not paste the picture — ${res.reason}`);
     return res.ok;
+  }
+
+  /**
+   * Where a pasted picture goes. Unlike text (clipboardTarget), the selected
+   * item itself, not the canvas holding it: a chart or gallery inside a
+   * canvas takes the picture into its grid, and any other item gets it as a
+   * free picture beside it (attachImageFile). With nothing selected, a
+   * diagram's page takes it — a diagram IS one canvas, so there is always
+   * somewhere to put it.
+   */
+  private imagePasteTarget(anchorId?: string | null): MindNode | undefined {
+    if (anchorId) return this.model.node(anchorId);
+    const selected = this.selectionNode ?? (this.state.imageSel ? this.model.node(this.state.imageSel) : undefined);
+    if (selected) return selected;
+    const page = this.diagramPageId();
+    return page ? this.model.node(page) : undefined;
   }
 
   /**
@@ -5374,13 +5489,29 @@ export class EditorStore {
     if (!res.ok) return { ok: false, reason: res.reason };
     if (this.sheet !== sheet || !this.model.node(nodeId)) return { ok: false, reason: "Target topic is no longer open" };
     const node = this.model.requireNode(nodeId);
-    // Inside a canvas a picture is never put INTO an item: pasted or dropped
-    // on one, it becomes a free picture of the canvas, just past the item.
-    const owner = node.style.freeform ? null : freeformOwner(sheet, nodeId);
+    // Dropped or pasted on a shape inside a canvas, a picture goes INTO the
+    // shape (top slot, above the text), as on a topic of the map. Only an
+    // item that cannot hold one (another picture, a code block...) gets it
+    // as a free picture of the canvas, just past the item.
+    const owner = node.style.freeform || this.canTakePicture(nodeId) ? null : freeformOwner(sheet, nodeId);
     if (node.style.freeform || owner) {
       if (!sheet.attachments.some((a) => a.id === res.card.id)) sheet.attachments.push({ ...res.card });
-      if (owner) this.createFreeformItem(owner, node.position.x + 24, node.position.y + 24, "", res.card.id);
-      else this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
+      // Where the user is looking: just right of the item it was pasted on,
+      // or the middle of the view when it lands on the canvas itself. The
+      // canvas default (its top-left, one step per existing item) put it
+      // thousands of pixels off screen on a big diagram.
+      const PIC_W = 180;
+      const picH = res.card.w > 0 ? Math.round((PIC_W * res.card.h) / res.card.w) : 120;
+      if (owner) {
+        const { w } = measureNode(node, this.measurer, imageResolver(sheet));
+        this.createFreeformItem(owner, node.position.x + w + 24, node.position.y, "", res.card.id);
+      } else {
+        const cam = this.state.camera;
+        const cw = node.style.width ?? 0, ch = node.style.height ?? 0;
+        const inView = cam.x >= node.position.x && cam.x <= node.position.x + cw && cam.y >= node.position.y && cam.y <= node.position.y + ch;
+        if (inView) this.createFreeformItem(nodeId, cam.x - PIC_W / 2, cam.y - picH / 2, "", res.card.id);
+        else this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
+      }
     } else this.attachImage(nodeId, res.card, position);
     trace.applied("drop:image", { bytes: res.card.bytes, w: res.card.w, h: res.card.h });
     return { ok: true };
@@ -5395,6 +5526,9 @@ export class EditorStore {
   private async importToCard(
     file: Blob & { name?: string },
     signal?: AbortSignal,
+    /** Where the decoded levels go. Default: one write per picture. A batch
+     *  import passes a batcher instead (see importFilesBatch). */
+    write?: (id: string, levels: ImportedImage["levels"], meta: AssetMeta) => void,
   ): Promise<{ ok: true; card: AttachmentInfo } | { ok: false; reason: string }> {
     if (signal?.aborted) return { ok: false, reason: "Import cancelled" };
     // A cross-app drag (web browser → app) delivers the picture as a temp file
@@ -5417,10 +5551,12 @@ export class EditorStore {
       trace.ignored("drop", "decode failed", { error: String(err) });
       return { ok: false, reason: String(err) };
     }
-    const assetStore = getAssetStore();
     const fullMeta: AssetMeta = { ...imported.meta, id: imported.id };
-    await assetStore.putUnderId(imported.id, imported.levels, fullMeta);
-    void ensureStoragePersistent();
+    if (write) write(imported.id, imported.levels, fullMeta);
+    else {
+      await getAssetStore().putUnderId(imported.id, imported.levels, fullMeta);
+      void ensureStoragePersistent();
+    }
     return {
       ok: true,
       card: {
@@ -5449,34 +5585,30 @@ export class EditorStore {
     let done = 0;
     let lastProgressAt = 0;
     const assetStore = getAssetStore();
-    const canPutMany = files.length > 1 && typeof assetStore.putMany === "function";
+    // Many pictures: decoded levels are written in IndexedDB transactions of
+    // WRITE_BATCH as they arrive, so at most one batch is held in memory —
+    // never the whole import (thousands of pictures would be gigabytes).
+    const WRITE_BATCH = 16;
+    let pending: { id: string; levels: ImportedImage["levels"]; meta: AssetMeta }[] = [];
+    const writes: Promise<void>[] = [];
+    const flush = (): void => {
+      if (pending.length === 0) return;
+      const chunk = pending;
+      pending = [];
+      const p = assetStore.putMany!(chunk);
+      p.catch(() => { /* reported by the Promise.all below */ });
+      writes.push(p);
+    };
+    const write = files.length > 1 && typeof assetStore.putMany === "function"
+      ? (id: string, levels: ImportedImage["levels"], meta: AssetMeta): void => {
+        pending.push({ id, levels, meta });
+        if (pending.length >= WRITE_BATCH) flush();
+      }
+      : undefined;
     try {
       const results = await Promise.all(
         files.map(async (file) => {
-          if (canPutMany) {
-            if (signal?.aborted) return { ok: false as const, reason: "Import cancelled" };
-            const mime = file.type || mimeFromName(file.name ?? "") || "";
-            const v = validateImageSource(mime, file.size);
-            if (!v.ok) {
-              trace.ignored("drop", v.reason.startsWith("unsupported") ? "unsupported mime" : "too large", { mime, bytes: file.size });
-              return { ok: false as const, reason: v.reason };
-            }
-            let imported: ImportedImage;
-            try {
-              imported = await importImageFile(file, mime, signal);
-            } catch (err) {
-              trace.ignored("drop", "decode failed", { error: String(err) });
-              return { ok: false as const, reason: String(err) };
-            }
-            done++;
-            const now = typeof performance !== "undefined" ? performance.now() : 0;
-            if (showProgress && !signal?.aborted && (done === files.length || now - lastProgressAt >= 100)) {
-              lastProgressAt = now;
-              this.setOpProgress(`Importing ${done} of ${files.length}…`, done / files.length, "import");
-            }
-            return { ok: true as const, imported };
-          }
-          const res = await this.importToCard(file, signal);
+          const res = await this.importToCard(file, signal, write);
           done++;
           const now = typeof performance !== "undefined" ? performance.now() : 0;
           if (showProgress && !signal?.aborted && (done === files.length || now - lastProgressAt >= 100)) {
@@ -5486,39 +5618,18 @@ export class EditorStore {
           return res;
         }),
       );
+      // Every card is returned only once its picture is stored.
+      flush();
+      await Promise.all(writes);
+      if (writes.length > 0) void ensureStoragePersistent();
       const cards: AttachmentInfo[] = [];
       let failed = 0;
       let reason: string | undefined;
-      if (canPutMany) {
-        const toPut: { id: string; levels: ImportedImage["levels"]; meta: AssetMeta }[] = [];
-        for (const res of results) {
-          if (res.ok && "imported" in res) {
-            const imp = res.imported;
-            toPut.push({ id: imp.id, levels: imp.levels, meta: { ...imp.meta, id: imp.id } });
-            cards.push({
-              id: imp.id,
-              mime: imp.meta.mime,
-              w: imp.meta.w,
-              h: imp.meta.h,
-              bytes: imp.meta.bytes,
-              name: imp.meta.name,
-            });
-          } else if (!res.ok) {
-            failed++;
-            if (reason === undefined) reason = res.reason;
-          }
-        }
-        if (toPut.length > 0) {
-          await assetStore.putMany!(toPut);
-          void ensureStoragePersistent();
-        }
-      } else {
-        for (const res of results) {
-          if (res.ok && "card" in res) cards.push(res.card);
-          else if (!res.ok) {
-            failed++;
-            if (reason === undefined) reason = res.reason;
-          }
+      for (const res of results) {
+        if (res.ok) cards.push(res.card);
+        else {
+          failed++;
+          if (reason === undefined) reason = res.reason;
         }
       }
       return { cards, failed, reason, cancelled: signal?.aborted ?? false };
@@ -7055,10 +7166,11 @@ export class EditorStore {
   requestPaste(): void {
     const sheet = this.sheet;
     const anchorId = this.clipboardTarget()?.id;
+    const imageAnchorId = this.imagePasteTarget()?.id;
     const timer = setTimeout(() => {
       this.pendingPastes.delete(timer);
       if (this.sheet !== sheet) return trace.ignored("paste", "document changed before paste");
-      void this.paste(anchorId);
+      void this.paste(anchorId, undefined, imageAnchorId);
     }, 150);
     this.pendingPastes.add(timer);
   }
@@ -7068,7 +7180,7 @@ export class EditorStore {
     if (timer !== undefined) { clearTimeout(timer); this.pendingPastes.delete(timer); }
   }
 
-  async paste(anchorId?: string | null, suppliedText?: string): Promise<void> {
+  async paste(anchorId?: string | null, suppliedText?: string, imageAnchorId?: string | null): Promise<void> {
     const sheet = this.sheet;
     const destination = this.clipboardTarget(anchorId);
     // Prefer the full-fidelity HTML snapshot (or legacy text/rnode), then
@@ -7118,13 +7230,8 @@ export class EditorStore {
       if (imageItem) {
         const type = imageItem.types.find((t) => t.startsWith("image/"))!;
         const blob = await imageItem.getType(type);
-        const node = destination;
         if (this.sheet !== sheet) return trace.ignored("paste", "document changed while reading clipboard");
-        if (node) {
-          await this.attachImageFile(node.id, new File([blob], "pasted-image", { type: blob.type || type }));
-        } else {
-          trace.ignored("paste:image", "no node selected");
-        }
+        await this.pasteImageFile(new File([blob], "pasted-image", { type: blob.type || type }), imageAnchorId ?? anchorId);
         return;
       }
     }

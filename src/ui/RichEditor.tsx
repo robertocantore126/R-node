@@ -32,6 +32,7 @@ import { nodeRuns } from "../core/text";
 import { BLOCK_GAP_FACTOR, BULLET_WIDTH_EM, CHART_SLOT_ALPHA, FONT_STACK, GALLERY_CAPTION_LINE_H, GALLERY_CAPTION_SIZE, imageResolver, LINE_HEIGHT_FACTOR, positionedImageSlots, TEXT_INSET } from "../layout/measure";
 import { getAssetStore } from "../persist/assets";
 import { trace } from "../dev/trace";
+import { firstImageFile } from "../editor/externalImage";
 import { editorStateToRuns, runsToParagraphNodes, setEditorRuns } from "./lexicalRuns";
 import { htmlDropCensus, htmlToRuns, plainTextToRuns, sanitizeHtml } from "./pasteSanitizer";
 
@@ -209,7 +210,7 @@ export function RichEditor({
         </div>
         <ListPlugin />
         <DraftSyncPlugin store={store} node={node} />
-        <PasteSanitizerPlugin />
+        <PasteSanitizerPlugin onImage={(file) => void store.pasteImageFile(file, node.id)} />
         <KeysPlugin store={store} />
       </LexicalComposer>
     </div>
@@ -385,8 +386,10 @@ function DraftSyncPlugin({ store, node }: { store: EditorStore; node: MindNode }
 // Paste sanitization: Word / Google Docs / Draw.io / web.
 // ---------------------------------------------------------------------------
 
-function PasteSanitizerPlugin(): null {
+function PasteSanitizerPlugin({ onImage }: { onImage: (file: File) => void }): null {
   const [editor] = useLexicalComposerContext();
+  const onImageRef = useRef(onImage);
+  onImageRef.current = onImage;
   /**
    * Set by Ctrl+Shift+V, read by the paste handler on the event it triggers.
    *
@@ -413,6 +416,19 @@ function PasteSanitizerPlugin(): null {
         // clipboard defensively.
         const payload = (event ?? {}) as unknown as { clipboardData?: DataTransfer | null };
         if (!payload.clipboardData) return false;
+        // A picture with no text (a screenshot, "Copy image" in a browser,
+        // a file copied in Explorer) is not text to type: it goes to the
+        // topic being edited, as Ctrl+V does when the topic is only selected.
+        // Its HTML, if any, is just an <img> tag the sanitizer would drop,
+        // so before this the picture vanished without a trace.
+        const picture = firstImageFile(payload.clipboardData.files);
+        if (picture && !payload.clipboardData.getData("text/plain").trim()) {
+          event.preventDefault();
+          plainNext.current = false;
+          trace.applied("paste:overlay-image", { bytes: picture.size, mime: picture.type });
+          onImageRef.current(picture);
+          return true;
+        }
         const wantsPlain = plainNext.current;
         plainNext.current = false;
         if (wantsPlain) {

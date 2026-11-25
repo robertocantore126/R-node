@@ -697,12 +697,22 @@ export function slotSizes(
   n: MindNode,
   resolveImage?: ((id: string) => { w: number; h: number } | null) | null,
 ): SlotSizes {
+  // A fixed box of a canvas (a diagram shape: width AND height set) keeps its
+  // width, so a picture put inside it is scaled to fit between the paddings
+  // — otherwise it spilled out of the sides, and the text was measured at
+  // the image's width but drawn at the box's, and lost its last lines.
+  const s = n.style;
+  const fitW = s.width && s.height && s.freeformPosition && !isBarePicture(n)
+    ? Math.max(8, s.width - (s.padding ?? 10) * 2)
+    : Infinity;
   const size = (id: string | undefined): SlotSize | null => {
     if (!id || !resolveImage) return null;
     const att = resolveImage(id);
     if (!att || att.w <= 0) return null;
-    const w = n.style.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
-    return { w, h: n.style.imageHeight ?? (w * att.h) / att.w };
+    const want = s.imageWidth ?? Math.min(att.w, MAX_IMAGE_W);
+    const w = Math.min(want, fitW);
+    const h = s.imageHeight !== undefined ? s.imageHeight * (w / want) : (w * att.h) / att.w;
+    return { w, h };
   };
   return {
     top: size(n.style.image),
@@ -1384,9 +1394,11 @@ function measureTopicUncached(
     // width is the user's and the text wraps inside it; its height is a
     // MINIMUM: text that needs more grows the box downwards instead of
     // spilling out over the shapes below it (a long paste used to). Empty
-    // boxes, pictures, code, canvases and galleries keep their box exactly.
+    // boxes, pictures, code, canvases and galleries keep their box exactly —
+    // but an empty shape holding a picture grows to hold it too.
     const fixed = { w: style.width, h: style.height };
-    if (!n.title.trim() || style.code || style.freeform || style.gallery || isBarePicture(n)) return fixed;
+    const empty = !n.title.trim() && !slots.top && !slots.bottom;
+    if (empty || style.code || style.freeform || style.gallery || isBarePicture(n)) return fixed;
     const natural = measureTopicUncached({ ...n, style: { ...style, height: undefined } }, measurer, resolveImage, slots);
     return { w: style.width, h: Math.max(style.height, Math.ceil(natural.h)) };
   }

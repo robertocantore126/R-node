@@ -1,5 +1,5 @@
 import { topicClipboardFromHtml } from "../editor/topicClipboard";
-import { FREEFORM_HEADER, freeformOwner, isDiagramPage, isFreeTransform } from "../core/freeform";
+import { FREEFORM_HEADER, freeformOwner, isBarePicture, isDiagramPage, isFreeTransform } from "../core/freeform";
 import { appendInkSample, inkStrokeHit, inkStrokes } from "../core/ink";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type MouseEvent as RMouseEvent, type PointerEvent as RPointerEvent } from "react";
 import { useStore } from "../editor/context";
@@ -1636,6 +1636,18 @@ export function CanvasView(): JSX.Element {
     }
     const hit = renderer.hitTest(rs, world.x, world.y, movesWithCursor);
 
+    // A free picture held over a shape goes INTO it on release (top slot,
+    // above the text), never becomes its child. It keeps following the
+    // pointer; the shape shows the drop frame.
+    const draggedNode = store.doc.node(dragging);
+    if (hit && draggedNode && isBarePicture(draggedNode) && store.canTakePicture(hit, dragging)) {
+      store.setDrop({ mode: "child", nodeId: hit });
+      const owner = freeformOwner(store.sheet, dragging)!;
+      const at = snapInCanvas(owner, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+      store.setNodeDragDraft(dragging, at.x, at.y);
+      return;
+    }
+
     // Diagram: a shape held over another shape becomes its Tab child on
     // release (grandparent, sibling, cousin...). It keeps following the
     // pointer; the target shows the drop frame.
@@ -1805,6 +1817,14 @@ export function CanvasView(): JSX.Element {
     // gs is a node drag: every other gesture has returned above.
     const s = store.getSnapshot();
     const drop = s.drop;
+    // A free picture released on a shape: into the shape (see pointermove).
+    const draggedNode = store.doc.node(gs.nodeId);
+    if (drag.moved && drop?.mode === "child" && draggedNode && isBarePicture(draggedNode) && store.canTakePicture(drop.nodeId, gs.nodeId)) {
+      store.cancelNodeDrag();
+      store.dropPictureInto(gs.nodeId, drop.nodeId);
+      store.setDrop(null);
+      return;
+    }
     // Diagram: released on another shape — it becomes that shape's Tab child
     // (the drag preview is undone first; the tree layout places it).
     if (drag.moved && drop?.mode === "child" && store.canDiagramReparent(gs.nodeId, drop.nodeId)) {
