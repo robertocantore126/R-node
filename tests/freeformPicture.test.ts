@@ -2,7 +2,7 @@ import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import { isBarePicture, isFreeTransform } from "../src/core/freeform";
 import { EditorStore } from "../src/editor/store";
-import { positionedImageSlots } from "../src/layout/measure";
+import { createCanvasTextMeasurer, imageResolver, measureNode, positionedImageSlots, slotSizes } from "../src/layout/measure";
 
 /** A canvas holding one pasted picture (400×600 original, shown 180 wide). */
 function setup() {
@@ -54,7 +54,7 @@ describe("a picture in a canvas is the picture itself", () => {
     expect([store.itemGeometry(id)!.w, store.itemGeometry(id)!.h]).toEqual([g.w, g.h]);
   });
 
-  it("a picture pasted onto a canvas item becomes a new free picture, not part of the item", async () => {
+  it("a picture pasted onto a canvas item goes into the item, above its text", async () => {
     const { store, board } = setup();
     const text = store.createFreeformItem(board.id, board.position.x + 300, board.position.y + 100, "Note")!;
     store.cancelEdit?.();
@@ -63,10 +63,47 @@ describe("a picture in a canvas is the picture itself", () => {
     (store as unknown as { importToCard: () => Promise<unknown> }).importToCard = async () => ({ ok: true, card: { id: "img", mime: "image/png", w: 400, h: 600, bytes: 1 } });
     const res = await store.attachImageFile(text, new Blob([]));
     expect(res.ok).toBe(true);
-    expect(store.doc.requireNode(text).style.image).toBeUndefined();
+    expect(store.doc.requireNode(text).style.image).toBe("img");
+    expect(store.doc.requireNode(board.id).childrenIds.length).toBe(before);
+  });
+
+  it("a picture pasted onto another picture becomes a new free picture beside it", async () => {
+    const { store, board, id } = setup();
+    const before = store.doc.requireNode(board.id).childrenIds.length;
+    (store as unknown as { importToCard: () => Promise<unknown> }).importToCard = async () => ({ ok: true, card: { id: "img2", mime: "image/png", w: 400, h: 600, bytes: 1 } });
+    expect((await store.attachImageFile(id, new Blob([]))).ok).toBe(true);
     const kids = store.doc.requireNode(board.id).childrenIds;
     expect(kids.length).toBe(before + 1);
     expect(isBarePicture(store.doc.requireNode(kids[kids.length - 1]))).toBe(true);
+  });
+
+  it("a picture inside a fixed-size shape is scaled to fit between its paddings", () => {
+    const { store, board, id } = setup();
+    const shape = store.createFreeformItem(board.id, board.position.x + 300, board.position.y + 100, "", undefined, "rect")!;
+    store.cancelEdit?.();
+    store.dropPictureInto(id, shape);
+    const n = store.doc.requireNode(shape);
+    const slots = slotSizes(n, imageResolver(store.sheet));
+    // 120-wide rect, 10 px padding each side: 100 wide, aspect kept (400x600).
+    expect(slots.top).toEqual({ w: 100, h: 150 });
+    const box = measureNode(n, createCanvasTextMeasurer(), imageResolver(store.sheet));
+    expect(box.w).toBe(120);
+    expect(box.h).toBeGreaterThanOrEqual(150 + 20);
+  });
+
+  it("a free picture dropped on an item goes into it and is gone as a free picture — one undo", () => {
+    const { store, board, id } = setup();
+    const text = store.createFreeformItem(board.id, board.position.x + 300, board.position.y + 100, "Note")!;
+    store.cancelEdit?.();
+    const imageId = store.doc.requireNode(id).style.image;
+    expect(store.canTakePicture(text, id)).toBe(true);
+    expect(store.canTakePicture(board.id, id)).toBe(false);
+    expect(store.dropPictureInto(id, text)).toBe(true);
+    expect(store.doc.requireNode(text).style.image).toBe(imageId);
+    expect(store.doc.node(id)).toBeUndefined();
+    store.undo();
+    expect(store.doc.requireNode(text).style.image).toBeUndefined();
+    expect(isBarePicture(store.doc.requireNode(id))).toBe(true);
   });
 
   it("a picture with a title is a normal item again", () => {

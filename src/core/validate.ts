@@ -64,7 +64,12 @@ export function validateSheet(sheet: Sheet): void {
   }
 
   // --- parent/children coherence, in both directions -------------------------
+  // Count occurrences per (parentId, childId) in O(N) instead of scanning
+  // parent.childrenIds for every node (which is O(N²) on a flat diagram page).
+  const childCounts = new Map<string, Map<string, number>>();
   for (const node of all) {
+    if (node.childrenIds.length === 0) continue;
+    const counts = new Map<string, number>();
     for (const childId of node.childrenIds) {
       const child = nodes[childId];
       if (child.parentId !== node.id) {
@@ -72,11 +77,14 @@ export function validateSheet(sheet: Sheet): void {
           `node '${childId}' appears in childrenIds of '${node.id}' but its parentId is '${child.parentId}'`,
         );
       }
+      counts.set(childId, (counts.get(childId) ?? 0) + 1);
     }
+    childCounts.set(node.id, counts);
+  }
+  for (const node of all) {
     if (node.parentId !== null) {
       const parent = nodes[node.parentId];
-      let times = 0;
-      for (const id of parent.childrenIds) if (id === node.id) times++;
+      const times = childCounts.get(parent.id)?.get(node.id) ?? 0;
       if (times !== 1) {
         throw new InvariantViolation(
           `node '${node.id}' has parentId '${parent.id}' but appears ${times} times in its childrenIds, expected exactly once`,

@@ -27,7 +27,7 @@ import { History } from "../core/history";
 import { applyOp, applyWithInverse, makeOp, nodeImageIds, slotKey, type Op } from "../core/ops";
 import { validateSheet } from "../core/validate";
 import { trace } from "../dev/trace";
-import { INK_DEFAULT_WIDTH, inkStrokes } from "../core/ink";
+import { INK_DEFAULT_WIDTH, inkBounds, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
 import { Machine, registerInspectable } from "./machine";
 import { LongOps, SAVE_FLOW_TABLE, saveRerunAllowed, selectionFields, selectionTargetOf, type LongOpKind, type LongOpView, type SaveFlow, type SaveOutcome, type SelectionTarget } from "./editorMachines";
@@ -410,6 +410,24 @@ export class EditorStore {
   private importDeclined = false;
   private layoutTimer: ReturnType<typeof setTimeout> | null = null;
   private msgTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Incrementally-maintained Tab-tree index for the active diagram page. */
+  private diagramTreeIdx: {
+    sheet: Sheet;
+    pageId: string;
+    children: Map<string, string[]>;
+    parent: Map<string, string>;
+    inTree: Set<string>;
+  } | null = null;
+  /** Incrementally-maintained child bounding boxes for fitDiagramPage. */
+  private diagramBoundsCache: {
+    sheet: Sheet;
+    pageId: string;
+    boxes: Map<string, { minX: number; minY: number; maxX: number; maxY: number }>;
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  } | null = null;
   /**
    * One-position save queue (T21-B): a save is in flight, and a request
    * arrived while it was running. The request is NEVER dropped — dropping it
@@ -691,13 +709,15 @@ export class EditorStore {
       // write the sample map over the document that failed to load.
       if (this.adapter instanceof TauriStorageAdapter) this.adapter.setRoot(null);
       this.docFilePaths.clear();
-      this.model = new DocumentModel(DocumentModel.sample());
+      const doc = DocumentModel.blankDiagram("Untitled diagram");
+      this.model = new DocumentModel(doc);
       this.normalizeBranchColors(this.model.sheet);
       this.dropGroupPlaceholders(this.model.sheet);
       this.state = this.makeState();
+      this.centerDiagramCamera(doc);
       this.state.sync = "dirty";
       this.scheduleLayout(false);
-      this.toast(`Could not load your document, showing a sample map — ${why}`);
+      this.toast(`Could not load your document, showing a blank diagram — ${why}`);
     }
   }
 
@@ -765,9 +785,9 @@ export class EditorStore {
         this.docFilePaths.set(docs[0].documentId, this.adapter.currentPath);
       }
     } else {
-      // First run: start from the sample map. Nothing is persisted until the
-      // user presses Save / Ctrl+S — the sample acts as an in-memory draft.
-      this.model = new DocumentModel(DocumentModel.sample());
+      // First run: start in diagram mode. Nothing is persisted until the
+      // user presses Save / Ctrl+S — the blank diagram acts as an in-memory draft.
+      this.model = new DocumentModel(DocumentModel.blankDiagram("Untitled diagram"));
       trace.mark("err", "err:recovery", { what: "init", reason: "first-run" });
     }
     this.normalizeBranchColors(this.model.sheet);
@@ -792,7 +812,8 @@ export class EditorStore {
     // Loading a document must respect positions explicitly placed by the
     // user. Forced layout is reserved for the explicit "Auto layout" command.
     this.scheduleLayout(false);
-    this.focusRoot();
+    if (this.model.sheet.structure.structureType === "diagram") this.centerDiagramCamera(this.model.doc);
+    else this.focusRoot();
     this.notify();
   }
 
@@ -859,12 +880,90 @@ export class EditorStore {
     // Diagram: a shape (or a Tab arrow) about to be deleted leaves a gap in
     // its parent's column. Its tree parent is read NOW, while the arrow still
     // exists, so that tree can be laid out again after the batch.
-    const lostChildOf = this.diagramPageId()
+    const pageId = this.diagramPageId();
+    // Every tree arrow INTO a deleted shape counts, wherever its source is
+    // (one pass over the arrows, built only when the batch deletes a node).
+    let treeParentsOf: Map<string, string[]> | null = null;
+    if (pageId && ops.some((op) => op.type === "deleteNode")) {
+      treeParentsOf = new Map();
+      for (const r of this.sheet.relationships) {
+        if (!r.tree) continue;
+        const list = treeParentsOf.get(r.toId);
+        if (list) list.push(r.fromId);
+        else treeParentsOf.set(r.toId, [r.fromId]);
+      }
+    }
+    const lostChildOf = pageId
       ? ops.flatMap((op) =>
-        op.type === "deleteNode" ? this.sheet.relationships.filter((r) => r.tree && r.toId === op.id).map((r) => r.fromId)
+        op.type === "deleteNode" ? treeParentsOf?.get(op.id) ?? []
         : op.type === "deleteRelationship" && op.relationship.tree ? [op.relationship.fromId]
         : [])
       : [];
+    // Track incremental diagram dirtiness so adoptIntoDiagramPage and
+    // fitDiagramPage inspect only touched nodes instead of scanning the page.
+    const adoptCandidates = new Set<string>();
+    const noPosCandidates = new Set<string>();
+    const dirtyBoundsIds = new Set<string>();
+    let pageBoundsInvalid = false;
+    const trackOp = (op: Op): void => {
+      if (!pageId) return;
+      this.applyOpToDiagramTreeIndex(op);
+      switch (op.type) {
+        case "createNode":
+          if (op.parentId === pageId) {
+            dirtyBoundsIds.add(op.id);
+            if (!op.style?.freeformPosition) noPosCandidates.add(op.id);
+            adoptCandidates.add(op.id);
+          } else if (op.parentId) {
+            adoptCandidates.add(op.parentId);
+          }
+          break;
+        case "deleteNode":
+          if (op.id === pageId) pageBoundsInvalid = true;
+          else dirtyBoundsIds.add(op.id);
+          break;
+        case "moveNode":
+          if (op.fromParentId === pageId) dirtyBoundsIds.add(op.id);
+          if (op.toParentId === pageId) {
+            dirtyBoundsIds.add(op.id);
+            noPosCandidates.add(op.id);
+            adoptCandidates.add(op.id);
+          } else if (op.toParentId) {
+            adoptCandidates.add(op.toParentId);
+          }
+          break;
+        case "setTitle":
+        case "setCollapsed":
+          if (this.sheet.nodes[op.id]?.parentId === pageId) dirtyBoundsIds.add(op.id);
+          break;
+        case "setStyle":
+          if (op.id === pageId) pageBoundsInvalid = true;
+          else if (this.sheet.nodes[op.id]?.parentId === pageId) {
+            dirtyBoundsIds.add(op.id);
+            if (!op.style.freeformPosition) noPosCandidates.add(op.id);
+          }
+          break;
+        case "setPosition":
+          if (op.id === pageId) pageBoundsInvalid = true;
+          else if (this.sheet.nodes[op.id]?.parentId === pageId) dirtyBoundsIds.add(op.id);
+          break;
+        default:
+          break;
+      }
+      // Anything else that can change a page shape's size (a picture, an
+      // attachment, a task icon, an item inside a container shape...): the
+      // page child holding the touched node is measured again.
+      const touched = "id" in op ? op.id : "nodeId" in op ? op.nodeId : null;
+      if (typeof touched === "string") {
+        // A deleted node is gone already: start from the parent it left.
+        let cur: MindNode | undefined = this.sheet.nodes[touched]
+          ?? ("parentId" in op && typeof op.parentId === "string" ? this.sheet.nodes[op.parentId] : undefined);
+        for (let hops = 0; cur && hops < 10000; hops++) {
+          if (cur.parentId === pageId) { dirtyBoundsIds.add(cur.id); break; }
+          cur = cur.parentId ? this.sheet.nodes[cur.parentId] : undefined;
+        }
+      }
+    };
     // All or nothing. applyOp trusts its ids, so an op naming a missing node
     // throws — and a throw half-way through a batch left the earlier ops
     // applied with no history entry to undo them. Roll back what was applied.
@@ -873,10 +972,12 @@ export class EditorStore {
         const id = "id" in op ? op.id : "nodeId" in op ? op.nodeId : null;
         if (id) collect(id);
         inverses.push(applyWithInverse(this.sheet, op));
+        trackOp(op);
         if (id) collect(id);
       }
     } catch (e) {
       for (const inv of [...inverses].reverse().flat()) applyOp(this.sheet, inv);
+      this.invalidateDiagramCaches();
       trace.error("execOps", `batch rolled back: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
@@ -906,9 +1007,10 @@ export class EditorStore {
     this.adoptIntoDiagramPage((op) => {
       inverses.push(applyWithInverse(this.sheet, op));
       ops.push(op);
+      trackOp(op);
       const id = "id" in op ? op.id : null;
       if (id) collect(id);
-    }, retitled);
+    }, retitled, adoptCandidates, noPosCandidates);
     // Inner canvases grow before their enclosing canvas is measured.
     const depth = (id: string): number => {
       let n = this.model.node(id), count = 0;
@@ -919,6 +1021,8 @@ export class EditorStore {
     const apply = (op: Op): void => {
       inverses.push(applyWithInverse(this.sheet, op));
       ops.push(op);
+      // A container shape that grows here changes the page's content bounds.
+      trackOp(op);
     };
     // A canvas laid out by the map cannot move its own left/top edge, so when
     // it grows that way its content would jump on screen; the camera follows
@@ -971,7 +1075,7 @@ export class EditorStore {
     // Diagram: the page is exactly the whole pages its shapes cover, on the
     // grid of the first page, which always stays (draw.io: an emptied page
     // goes away).
-    if (this.diagramPageId()) this.fitDiagramPage(apply);
+    if (pageId) this.fitDiagramPage(apply, dirtyBoundsIds, pageBoundsInvalid);
     if (follow.length) {
       applyLayout(this.sheet, false, this.measurer);
       const f = follow[0];
@@ -1006,6 +1110,7 @@ export class EditorStore {
     // otherwise the state→persist gap detector would not see it as a change.
     trace.mark("state", "state:mutated", { types: ops.map((o) => o.type).join(","), via: "undo" });
     for (const op of ops) applyWithInverse(this.sheet, op);
+    this.invalidateDiagramCaches();
     this.clearSelection();
     if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
     this.touch();
@@ -1017,6 +1122,7 @@ export class EditorStore {
     trace.mark("ui", "ui:undo-redo", { action: "redo" });
     trace.mark("state", "state:mutated", { types: ops.map((o) => o.type).join(","), via: "redo" });
     for (const op of ops) applyWithInverse(this.sheet, op);
+    this.invalidateDiagramCaches();
     this.clearSelection();
     if (import.meta.env?.DEV ?? true) validateSheet(this.sheet);
     this.touch();
@@ -1642,15 +1748,28 @@ export class EditorStore {
     const target = await this.portableTarget(this.docRnodeName(), pickerType, "rnode");
     if (target === null) return false;
     const signal = this.beginLongOp("Saving document…", true);
+    let lastProgressAt = 0;
     try {
       const { bytes, skipped } = await buildRnodeFile(this.model.doc, this.sheet, getAssetStore(), {
         signal,
-        onProgress: (f) => this.setOpProgress("Writing images…", 0.05 + f * 0.85),
+        onProgress: (f) => {
+          const now = typeof performance !== "undefined" ? performance.now() : 0;
+          if (f >= 1 || now - lastProgressAt >= 100) {
+            lastProgressAt = now;
+            this.setOpProgress("Writing images…", 0.05 + f * 0.85);
+          }
+        },
       });
       this.lastSaveSkipped = skipped;
       this.setOpProgress("Writing document…", 0.95);
+      // db.export() already returns a standalone Uint8Array; avoid duplicating
+      // the whole multi-hundred-MB buffer with bytes.slice().
+      const blobPart: BlobPart =
+        bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+          ? bytes.buffer
+          : bytes.slice().buffer;
       return this.writePortableBytes(
-        new Blob([bytes.slice().buffer], { type: "application/vnd.sqlite3" }),
+        new Blob([blobPart], { type: "application/vnd.sqlite3" }),
         this.docRnodeName(),
         pickerType,
         "rnode",
@@ -2733,6 +2852,33 @@ export class EditorStore {
     return out;
   }
 
+  /**
+   * Diagram: the look of a shape Tab creates, by its depth in the Tab tree
+   * (the top shape is 0). Children (1) are rectangles, grandchildren and
+   * deeper are plain text, whatever the parent looks like. It is only the
+   * starting look: a shape the user restyles keeps what they chose.
+   */
+  private diagramTabChildStyle(depth: number): Style {
+    if (depth <= 1) {
+      const { w, h } = FREEFORM_SHAPE_SIZES.rect;
+      return { shape: "rect", width: w, height: h, borderWidth: 1.5, align: "center" };
+    }
+    return { shape: "none", align: "left" };
+  }
+
+  /** Diagram: how many Tab arrows lead from the top of its tree down to `id`. */
+  private diagramTreeDepth(id: string): number {
+    const idx = this.getDiagramTreeIndex();
+    if (!idx) return 0;
+    const seen = new Set<string>([id]);
+    let depth = 0;
+    for (let up = idx.parent.get(id); up && !seen.has(up); up = idx.parent.get(up)) {
+      seen.add(up);
+      depth++;
+    }
+    return depth;
+  }
+
   /** The page of the open diagram (its root canvas), or null in a mind map. */
   private diagramPageId(): string | null {
     const id = this.sheet.rootNodeId;
@@ -2757,18 +2903,91 @@ export class EditorStore {
    * each level is one column centred on its parent, DIAGRAM_LEVEL apart, the
    * siblings DIAGRAM_SIBLING apart. `extra` adds a shape not created yet (Tab).
    */
+  private invalidateDiagramCaches(): void {
+    this.diagramTreeIdx = null;
+    this.diagramBoundsCache = null;
+  }
+
+  /** Lazily built, incrementally maintained Tab-tree adjacency index for the diagram page. */
+  private getDiagramTreeIndex(): {
+    sheet: Sheet;
+    pageId: string;
+    children: Map<string, string[]>;
+    parent: Map<string, string>;
+    inTree: Set<string>;
+  } | null {
+    const page = this.diagramPageId();
+    if (!page) return null;
+    if (this.diagramTreeIdx && this.diagramTreeIdx.sheet === this.sheet && this.diagramTreeIdx.pageId === page) {
+      return this.diagramTreeIdx;
+    }
+    const children = new Map<string, string[]>();
+    const parent = new Map<string, string>();
+    const inTree = new Set<string>();
+    for (const r of this.sheet.relationships) {
+      if (!r.tree) continue;
+      inTree.add(r.fromId);
+      inTree.add(r.toId);
+      if (this.sheet.nodes[r.toId]?.parentId === page) {
+        let list = children.get(r.fromId);
+        if (!list) {
+          list = [];
+          children.set(r.fromId, list);
+        }
+        list.push(r.toId);
+      }
+      if (this.sheet.nodes[r.fromId]?.parentId === page && !parent.has(r.toId)) {
+        parent.set(r.toId, r.fromId);
+      }
+    }
+    this.diagramTreeIdx = { sheet: this.sheet, pageId: page, children, parent, inTree };
+    return this.diagramTreeIdx;
+  }
+
+  /** Incrementally update diagramTreeIdx when an op mutates tree relationships or page membership. */
+  private applyOpToDiagramTreeIndex(op: Op): void {
+    const idx = this.diagramTreeIdx;
+    if (!idx || idx.sheet !== this.sheet) return;
+    if (op.type === "createRelationship") {
+      if (!op.relationship.tree) return;
+      const r = op.relationship;
+      idx.inTree.add(r.fromId);
+      idx.inTree.add(r.toId);
+      if (this.sheet.nodes[r.toId]?.parentId === idx.pageId) {
+        let list = idx.children.get(r.fromId);
+        if (!list) {
+          list = [];
+          idx.children.set(r.fromId, list);
+        }
+        list.push(r.toId);
+      }
+      if (this.sheet.nodes[r.fromId]?.parentId === idx.pageId && !idx.parent.has(r.toId)) {
+        idx.parent.set(r.toId, r.fromId);
+      }
+    } else if (op.type === "deleteRelationship") {
+      if (!op.relationship.tree) return;
+      // Rebuild lazily on next access so inTree/duplicate-parent edge cases stay exact.
+      this.diagramTreeIdx = null;
+    } else if (op.type === "setRelationship") {
+      if (op.relationship.tree || op.prev.tree) this.diagramTreeIdx = null;
+    } else if (op.type === "deleteNode") {
+      if (idx.inTree.has(op.id)) this.diagramTreeIdx = null;
+    } else if (op.type === "moveNode") {
+      if (idx.inTree.has(op.id) && (op.fromParentId === idx.pageId || op.toParentId === idx.pageId)) {
+        this.diagramTreeIdx = null;
+      }
+    }
+  }
+
   private diagramTreePositions(
     rootId: string,
     extra?: { id: string; size: { w: number; h: number }; kids: (id: string) => string[] },
   ): Map<string, { x: number; y: number }> {
-    const page = this.diagramPageId();
     const resolve = imageResolver(this.sheet);
     const sizeOf = (nid: string): { w: number; h: number } =>
       extra && nid === extra.id ? extra.size : measureNode(this.model.requireNode(nid), this.measurer, resolve);
-    const kidsOf = extra?.kids ?? ((nid: string): string[] =>
-      this.sheet.relationships
-        .filter((r) => r.tree && r.fromId === nid && this.sheet.nodes[r.toId]?.parentId === page)
-        .map((r) => r.toId));
+    const idx = extra?.kids ? null : this.getDiagramTreeIndex();
+    const kidsOf = extra?.kids ?? ((nid: string): string[] => idx?.children.get(nid) ?? []);
     const posOf = new Map<string, { x: number; y: number }>();
     const local = (nid: string): { x: number; y: number } =>
       posOf.get(nid) ?? this.model.node(nid)?.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
@@ -2828,11 +3047,12 @@ export class EditorStore {
    * where it closes).
    */
   private diagramTreeTop(id: string): string {
-    const page = this.diagramPageId();
+    const idx = this.getDiagramTreeIndex();
+    if (!idx) return id;
     const seen = new Set<string>([id]);
     let cur = id;
     for (;;) {
-      const up = this.sheet.relationships.find((r) => r.tree && r.toId === cur && this.sheet.nodes[r.fromId]?.parentId === page)?.fromId;
+      const up = idx.parent.get(cur);
       if (!up || seen.has(up)) return cur;
       seen.add(up);
       cur = up;
@@ -2847,56 +3067,89 @@ export class EditorStore {
    * can make a shape taller); page shapes with no position get the view's
    * centre.
    */
-  private adoptIntoDiagramPage(apply: (op: Op) => void, retitled: string[] = []): void {
+  private adoptIntoDiagramPage(
+    apply: (op: Op) => void,
+    retitled: string[] = [],
+    adoptCandidates?: Set<string>,
+    noPosCandidates?: Set<string>,
+  ): void {
     const page = this.diagramPageId();
     if (!page) return;
-    const inTree = (id: string): boolean => this.sheet.relationships.some((r) => r.tree && (r.fromId === id || r.toId === id));
-    const touched: string[] = retitled.filter((id) => this.sheet.nodes[id]?.parentId === page && inTree(id));
-    for (let guard = 0; guard < 10000; guard++) {
-      const pageNode = this.model.requireNode(page);
-      let parent: MindNode | undefined;
-      for (const cid of pageNode.childrenIds) {
-        const c = this.model.node(cid);
-        if (c && !c.style.freeform && c.childrenIds.length > 0) { parent = c; break; }
+    const idx = this.getDiagramTreeIndex();
+    const touchedSet = new Set<string>();
+    const touched: string[] = [];
+    const markTouched = (id: string): void => {
+      if (!touchedSet.has(id)) {
+        touchedSet.add(id);
+        touched.push(id);
       }
-      if (!parent) break;
-      const childId = parent.childrenIds[0];
-      const child = this.model.requireNode(childId);
-      const pAt = parent.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
-      apply(makeOp<Op & { type: "moveNode" }>("moveNode", {
-        id: childId, fromParentId: parent.id, fromIndex: 0, toParentId: page, toIndex: pageNode.childrenIds.length,
-      }));
-      const moved = this.model.requireNode(childId);
-      apply(makeOp<Op & { type: "setStyle" }>("setStyle", {
-        id: childId,
-        style: { ...moved.style, freeformPosition: { x: pAt.x + measureNode(parent, this.measurer).w + DIAGRAM_LEVEL, y: pAt.y } },
-        prev: moved.style,
-      }));
-      apply(makeOp<Op & { type: "createRelationship" }>("createRelationship", {
-        relationship: {
-          id: uid("rel"), fromId: parent.id, toId: child.id, tree: true,
-          connector: "elbow", lineStyle: "solid", endArrow: "triangle",
-          fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 },
-        },
-      }));
-      if (!touched.includes(parent.id)) touched.push(parent.id);
+    };
+    for (const id of retitled) {
+      if (this.sheet.nodes[id]?.parentId === page && idx?.inTree.has(id)) markTouched(id);
+    }
+    const pageNode0 = this.model.requireNode(page);
+    const queue: string[] = [];
+    if (adoptCandidates) {
+      for (const cid of adoptCandidates) {
+        const c = this.model.node(cid);
+        if (c && c.parentId === page && !c.style.freeform && c.childrenIds.length > 0) queue.push(cid);
+      }
+    } else {
+      for (const cid of pageNode0.childrenIds) {
+        const c = this.model.node(cid);
+        if (c && !c.style.freeform && c.childrenIds.length > 0) queue.push(cid);
+      }
+    }
+    let guard = 0;
+    while (queue.length > 0 && guard < 10000) {
+      const parentId = queue.shift()!;
+      const parent = this.model.node(parentId);
+      if (!parent || parent.parentId !== page || parent.style.freeform || parent.childrenIds.length === 0) continue;
+      while (parent.childrenIds.length > 0 && guard < 10000) {
+        guard++;
+        const pageNode = this.model.requireNode(page);
+        const childId = parent.childrenIds[0];
+        const child = this.model.requireNode(childId);
+        const pAt = parent.style.freeformPosition ?? { x: FREEFORM_PADDING, y: FREEFORM_HEADER + FREEFORM_PADDING };
+        apply(makeOp<Op & { type: "moveNode" }>("moveNode", {
+          id: childId, fromParentId: parent.id, fromIndex: 0, toParentId: page, toIndex: pageNode.childrenIds.length,
+        }));
+        const moved = this.model.requireNode(childId);
+        apply(makeOp<Op & { type: "setStyle" }>("setStyle", {
+          id: childId,
+          style: { ...moved.style, freeformPosition: { x: pAt.x + measureNode(parent, this.measurer).w + DIAGRAM_LEVEL, y: pAt.y } },
+          prev: moved.style,
+        }));
+        apply(makeOp<Op & { type: "createRelationship" }>("createRelationship", {
+          relationship: {
+            id: uid("rel"), fromId: parent.id, toId: child.id, tree: true,
+            connector: "elbow", lineStyle: "solid", endArrow: "triangle",
+            fromAnchor: { x: 1, y: 0.5 }, toAnchor: { x: 0, y: 0.5 },
+          },
+        }));
+        markTouched(parent.id);
+        if (!moved.style.freeform && moved.childrenIds.length > 0) queue.push(childId);
+      }
     }
     // Lay out each touched tree once, from its top: a branch that grew must
     // push its siblings' branches apart, all the way up.
-    const tops = [...new Set(touched.map((t) => this.diagramTreeTop(t)))];
-    for (const top of tops) {
-      for (const [nid, at] of this.diagramTreePositions(top)) {
-        const n = this.model.requireNode(nid);
-        const cur = n.style.freeformPosition;
-        if (cur && cur.x === at.x && cur.y === at.y) continue;
-        apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: nid, style: { ...n.style, freeformPosition: at }, prev: n.style }));
+    if (touched.length > 0) {
+      const tops = [...new Set(touched.map((t) => this.diagramTreeTop(t)))];
+      for (const top of tops) {
+        for (const [nid, at] of this.diagramTreePositions(top)) {
+          const n = this.model.requireNode(nid);
+          const cur = n.style.freeformPosition;
+          if (cur && cur.x === at.x && cur.y === at.y) continue;
+          apply(makeOp<Op & { type: "setStyle" }>("setStyle", { id: nid, style: { ...n.style, freeformPosition: at }, prev: n.style }));
+        }
       }
     }
     // Shapes on the page with no place of their own: the middle of the view.
     const pageNode = this.model.requireNode(page);
-    for (const cid of pageNode.childrenIds) {
+    const toCheckPos: Iterable<string> = noPosCandidates ?? pageNode.childrenIds;
+    for (const cid of toCheckPos) {
       const c = this.model.node(cid);
-      if (!c || c.style.freeformPosition) continue;
+      if (!c || c.parentId !== page || c.style.freeformPosition) continue;
       const sz = measureNode(c, this.measurer);
       const cam = this.state.camera;
       apply(makeOp<Op & { type: "setStyle" }>("setStyle", {
@@ -2907,18 +3160,128 @@ export class EditorStore {
     }
   }
 
+  /** Compute the page-local box of one direct child of the diagram page (including any non-freeform descendants). */
+  private diagramChildBox(
+    childId: string,
+    index: number,
+    resolve: ReturnType<typeof imageResolver>,
+  ): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    const child = this.sheet.nodes[childId];
+    if (!child) return null;
+    const off = freeformOffset(child, index);
+    const sz = measureNode(child, this.measurer, resolve);
+    let minX = off.x, minY = off.y, maxX = off.x + sz.w, maxY = off.y + sz.h;
+    if (!child.style.freeform && child.childrenIds.length > 0) {
+      const sub = freeformContentBounds(this.sheet, childId, (n) => measureNode(n, this.measurer, resolve), true);
+      if (Number.isFinite(sub.minX)) {
+        minX = Math.min(minX, off.x + sub.minX);
+        minY = Math.min(minY, off.y + sub.minY);
+        maxX = Math.max(maxX, off.x + sub.maxX);
+        maxY = Math.max(maxY, off.y + sub.maxY);
+      }
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  /** Incrementally maintained content bounds of the diagram page. */
+  private diagramContentBounds(
+    page: string,
+    dirtyIds?: Set<string>,
+    forceRebuild = false,
+  ): { minX: number; minY: number; maxX: number; maxY: number } {
+    const node = this.model.requireNode(page);
+    const resolve = imageResolver(this.sheet);
+    let cache = this.diagramBoundsCache;
+    if (!cache || cache.sheet !== this.sheet || cache.pageId !== page || forceRebuild || !dirtyIds) {
+      const boxes = new Map<string, { minX: number; minY: number; maxX: number; maxY: number }>();
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      node.childrenIds.forEach((cid, index) => {
+        const b = this.diagramChildBox(cid, index, resolve);
+        if (!b) return;
+        boxes.set(cid, b);
+        if (b.minX < minX) minX = b.minX;
+        if (b.minY < minY) minY = b.minY;
+        if (b.maxX > maxX) maxX = b.maxX;
+        if (b.maxY > maxY) maxY = b.maxY;
+      });
+      cache = { sheet: this.sheet, pageId: page, boxes, minX, minY, maxX, maxY };
+      this.diagramBoundsCache = cache;
+    } else if (dirtyIds.size > 0) {
+      let needRecompute = false;
+      for (const cid of dirtyIds) {
+        const prev = cache.boxes.get(cid);
+        const child = this.sheet.nodes[cid];
+        const onPage = !!child && child.parentId === page;
+        const wasExtreme =
+          !!prev &&
+          (prev.minX === cache.minX || prev.minY === cache.minY || prev.maxX === cache.maxX || prev.maxY === cache.maxY);
+        if (!onPage) {
+          if (prev) {
+            cache.boxes.delete(cid);
+            if (wasExtreme) needRecompute = true;
+          }
+          continue;
+        }
+        // The index only matters for a shape with no place of its own
+        // (freeformOffset falls back to a grid slot by index).
+        const at = child.style.freeformPosition ? 0 : node.childrenIds.indexOf(cid);
+        const b = this.diagramChildBox(cid, at, resolve);
+        if (!b) continue;
+        cache.boxes.set(cid, b);
+        if (
+          wasExtreme &&
+          ((prev!.minX === cache.minX && b.minX > prev!.minX) ||
+            (prev!.minY === cache.minY && b.minY > prev!.minY) ||
+            (prev!.maxX === cache.maxX && b.maxX < prev!.maxX) ||
+            (prev!.maxY === cache.maxY && b.maxY < prev!.maxY))
+        ) {
+          needRecompute = true;
+        } else {
+          if (b.minX < cache.minX) cache.minX = b.minX;
+          if (b.minY < cache.minY) cache.minY = b.minY;
+          if (b.maxX > cache.maxX) cache.maxX = b.maxX;
+          if (b.maxY > cache.maxY) cache.maxY = b.maxY;
+        }
+      }
+      if (needRecompute) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const b of cache.boxes.values()) {
+          if (b.minX < minX) minX = b.minX;
+          if (b.minY < minY) minY = b.minY;
+          if (b.maxX > maxX) maxX = b.maxX;
+          if (b.maxY > maxY) maxY = b.maxY;
+        }
+        cache.minX = minX;
+        cache.minY = minY;
+        cache.maxX = maxX;
+        cache.maxY = maxY;
+      }
+    }
+    let { minX, minY, maxX, maxY } = cache;
+    const strokes = inkStrokes(node.style);
+    if (strokes.length > 0) {
+      for (const stroke of strokes) {
+        const b = inkBounds(stroke);
+        if (b.minX < minX) minX = b.minX;
+        if (b.minY < minY) minY = b.minY;
+        if (b.maxX > maxX) maxX = b.maxX;
+        if (b.maxY > maxY) maxY = b.maxY;
+      }
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
   /**
    * Diagram: size the page to the whole pages (DIAGRAM_PAGE, on the grid of
    * the first page at the world origin) that its content covers, the first
    * page always included. Grows past any edge and shrinks back when the
    * shapes leave a page (draw.io). The items keep their place in the world.
    */
-  private fitDiagramPage(apply: (op: Op) => void): void {
+  private fitDiagramPage(apply: (op: Op) => void, dirtyIds?: Set<string>, forceRebuild = false): void {
     const page = this.diagramPageId();
     if (!page) return;
     const node = this.model.requireNode(page);
-    const resolve = imageResolver(this.sheet);
-    const tight = freeformContentBounds(this.sheet, page, (n) => measureNode(n, this.measurer, resolve), true);
+    const tight = this.diagramContentBounds(page, dirtyIds, forceRebuild);
     const ox = node.position.x, oy = node.position.y;
     const W = DIAGRAM_PAGE_SIZE.w, H = DIAGRAM_PAGE_SIZE.h;
     let c0 = 0, c1 = 0, r0 = 0, r1 = 0;
@@ -2941,6 +3304,7 @@ export class EditorStore {
       });
       apply(makeOp<Op & { type: "setPosition" }>("setPosition", { id: page, x: nx, y: ny, manual: true, prev: { ...node.position } }));
       this.shiftCanvasWaypoints(page, dx, dy, apply);
+      this.diagramBoundsCache = null;
     }
     const cur = this.model.requireNode(page);
     const style: Style = { ...cur.style, width: nw, height: nh };
@@ -2960,10 +3324,10 @@ export class EditorStore {
    * own descendants (that would make a loop).
    */
   canDiagramReparent(childId: string, parentId: string): boolean {
-    const page = this.diagramPageId();
-    if (!page || childId === parentId) return false;
-    if (this.model.node(childId)?.parentId !== page || this.model.node(parentId)?.parentId !== page) return false;
-    if (this.sheet.relationships.some((r) => r.tree && r.fromId === parentId && r.toId === childId)) return false;
+    const idx = this.getDiagramTreeIndex();
+    if (!idx || childId === parentId) return false;
+    if (this.model.node(childId)?.parentId !== idx.pageId || this.model.node(parentId)?.parentId !== idx.pageId) return false;
+    if (idx.children.get(parentId)?.includes(childId)) return false;
     return !this.diagramFollowers(childId).includes(parentId);
   }
 
@@ -3010,7 +3374,7 @@ export class EditorStore {
     if (!page || !parent || parent.parentId !== page) return null;
     const pageNode = this.model.requireNode(page);
     const id = uid("n");
-    const style = this.diagramChildStyle(parent);
+    const style = this.diagramTabChildStyle(this.diagramTreeDepth(parentId) + 1);
     const resolve = imageResolver(this.sheet);
     const sizeOf = (nid: string): { w: number; h: number } => {
       if (nid === id) {
@@ -3020,10 +3384,9 @@ export class EditorStore {
       return measureNode(this.model.requireNode(nid), this.measurer, resolve);
     };
     // The tree: Tab arrows from each shape, in creation order, plus the new one.
+    const idx = this.getDiagramTreeIndex();
     const kidsOf = (nid: string): string[] => {
-      const kids = this.sheet.relationships
-        .filter((r) => r.tree && r.fromId === nid && this.sheet.nodes[r.toId]?.parentId === page)
-        .map((r) => r.toId);
+      const kids = idx?.children.get(nid) ?? [];
       return nid === parentId ? [...kids, id] : kids;
     };
     // From the top of the tree, not from the parent: the parent's column may
@@ -3647,10 +4010,25 @@ export class EditorStore {
 
   /** Delete nodes (and descendants); central topic is protected. */
   deleteNodes(ids: string[]): void {
+    const ops = this.deleteNodeOps(ids);
+    if (ops.length) {
+      this.execOps(ops);
+      this.closeOrphanStudyWindows();
+      this.setSelectionTarget({ kind: "none" });
+      this.notify();
+    }
+  }
+
+  /**
+   * The ops deleting `ids` with everything that goes with them (subtrees,
+   * arrows, emptied groups and summaries, chart notes). `withFollowers`:
+   * a diagram shape also takes the Tab tree grown from it.
+   */
+  private deleteNodeOps(ids: string[], withFollowers = true): Op[] {
     const picked = [...new Set(ids)].filter((id) => id !== this.sheet.rootNodeId && this.model.node(id));
     // Diagram: a shape takes the tree Tab grew from it along, as a topic takes
     // its branch on a map. (A child kept is dragged onto another shape first.)
-    const asked = [...new Set(picked.flatMap((id) => [id, ...this.diagramFollowers(id)]))];
+    const asked = [...new Set(picked.flatMap((id) => [id, ...(withFollowers ? this.diagramFollowers(id) : [])]))];
     // A chart takes its slot notes with it: they are floating topics, outside
     // its subtree, and would otherwise linger as notes of nothing.
     const notes = asked.flatMap((id) => this.model.subtreeIds(id).flatMap((sid) => chartNoteIds(this.sheet, sid)));
@@ -3726,12 +4104,7 @@ export class EditorStore {
       });
       ops.push(makeOp<Op & { type: "setStyle" }>("setStyle", { id: chartId, style: { ...chart.style, gallery: { ...g, items } }, prev: chart.style }));
     }
-    if (ops.length) {
-      this.execOps(ops);
-      this.closeOrphanStudyWindows();
-      this.setSelectionTarget({ kind: "none" });
-      this.notify();
-    }
+    return ops;
   }
 
   /**
@@ -4023,19 +4396,20 @@ export class EditorStore {
    * `tree` arrows), on the same page. They ride along when `id` is moved.
    */
   private diagramFollowers(id: string): string[] {
-    const page = this.diagramPageId();
-    if (!page || this.model.node(id)?.parentId !== page) return [];
+    const idx = this.getDiagramTreeIndex();
+    if (!idx || this.model.node(id)?.parentId !== idx.pageId) return [];
     const out: string[] = [];
     const seen = new Set<string>([id]);
     const queue = [id];
     while (queue.length > 0) {
       const from = queue.shift()!;
-      for (const r of this.sheet.relationships) {
-        if (!r.tree || r.fromId !== from || seen.has(r.toId)) continue;
-        if (this.sheet.nodes[r.toId]?.parentId !== page) continue;
-        seen.add(r.toId);
-        out.push(r.toId);
-        queue.push(r.toId);
+      const kids = idx.children.get(from);
+      if (!kids) continue;
+      for (const toId of kids) {
+        if (seen.has(toId)) continue;
+        seen.add(toId);
+        out.push(toId);
+        queue.push(toId);
       }
     }
     return out;
@@ -4923,6 +5297,41 @@ export class EditorStore {
   }
 
   /**
+   * Can `targetId` take a picture INTO itself (its top slot, above the text)?
+   * Any ordinary shape or topic can; the containers that are not a box with
+   * text — a canvas or the diagram page, a chart or gallery (their own grid),
+   * a code block, a frame, another bare picture — cannot.
+   */
+  canTakePicture(targetId: string, pictureId?: string): boolean {
+    const t = this.model.node(targetId);
+    if (!t || t.id === pictureId) return false;
+    const s = t.style;
+    return !(s.freeform || s.gallery || s.code || s.frame || s.chartNote || isBarePicture(t) || isDiagramPage(this.sheet, t.id));
+  }
+
+  /**
+   * A free picture dropped on a shape: it goes INTO the shape, in the top
+   * slot above the text (replacing a picture already there), and the free
+   * picture is gone — one undo step. Its arrows go with it; a Tab child of
+   * the picture stays where it is, unattached.
+   */
+  dropPictureInto(pictureId: string, targetId: string): boolean {
+    const pic = this.model.node(pictureId);
+    if (!pic || !isBarePicture(pic) || !this.canTakePicture(targetId, pictureId) || !pic.parentId) return false;
+    const target = this.model.requireNode(targetId);
+    const imageId = pic.style.image!;
+    this.execOps([
+      makeOp<Op & { type: "setNodeImage" }>("setNodeImage", { nodeId: targetId, imageId, prevImageId: target.style.image ?? null, position: "top" }),
+      ...this.deleteNodeOps([pictureId], false),
+    ]);
+    this.closeOrphanStudyWindows();
+    this.settleLayoutNow();
+    this.select(targetId);
+    trace.applied("drop:picture-into", { picture: pictureId, target: targetId });
+    return true;
+  }
+
+  /**
    * Delete the SELECTED image (Backspace/Delete with the image selected):
    * removes only that slot's reference from the node, never the node itself.
    * The attachment card stays (it may be shared; collectOrphans is the GC).
@@ -4959,13 +5368,31 @@ export class EditorStore {
    * second one.
    */
   async pasteImageFile(file: Blob & { name?: string }, anchorId?: string | null): Promise<boolean> {
-    const node = this.clipboardTarget(anchorId);
+    const node = this.imagePasteTarget(anchorId);
     if (!node) {
       trace.ignored("paste:image", "no node selected");
+      this.toast("Select a topic to paste the picture into");
       return false;
     }
     const res = await this.attachImageFile(node.id, file);
+    if (!res.ok && res.reason) this.toast(`Could not paste the picture — ${res.reason}`);
     return res.ok;
+  }
+
+  /**
+   * Where a pasted picture goes. Unlike text (clipboardTarget), the selected
+   * item itself, not the canvas holding it: a chart or gallery inside a
+   * canvas takes the picture into its grid, and any other item gets it as a
+   * free picture beside it (attachImageFile). With nothing selected, a
+   * diagram's page takes it — a diagram IS one canvas, so there is always
+   * somewhere to put it.
+   */
+  private imagePasteTarget(anchorId?: string | null): MindNode | undefined {
+    if (anchorId) return this.model.node(anchorId);
+    const selected = this.selectionNode ?? (this.state.imageSel ? this.model.node(this.state.imageSel) : undefined);
+    if (selected) return selected;
+    const page = this.diagramPageId();
+    return page ? this.model.node(page) : undefined;
   }
 
   /**
@@ -5062,13 +5489,29 @@ export class EditorStore {
     if (!res.ok) return { ok: false, reason: res.reason };
     if (this.sheet !== sheet || !this.model.node(nodeId)) return { ok: false, reason: "Target topic is no longer open" };
     const node = this.model.requireNode(nodeId);
-    // Inside a canvas a picture is never put INTO an item: pasted or dropped
-    // on one, it becomes a free picture of the canvas, just past the item.
-    const owner = node.style.freeform ? null : freeformOwner(sheet, nodeId);
+    // Dropped or pasted on a shape inside a canvas, a picture goes INTO the
+    // shape (top slot, above the text), as on a topic of the map. Only an
+    // item that cannot hold one (another picture, a code block...) gets it
+    // as a free picture of the canvas, just past the item.
+    const owner = node.style.freeform || this.canTakePicture(nodeId) ? null : freeformOwner(sheet, nodeId);
     if (node.style.freeform || owner) {
       if (!sheet.attachments.some((a) => a.id === res.card.id)) sheet.attachments.push({ ...res.card });
-      if (owner) this.createFreeformItem(owner, node.position.x + 24, node.position.y + 24, "", res.card.id);
-      else this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
+      // Where the user is looking: just right of the item it was pasted on,
+      // or the middle of the view when it lands on the canvas itself. The
+      // canvas default (its top-left, one step per existing item) put it
+      // thousands of pixels off screen on a big diagram.
+      const PIC_W = 180;
+      const picH = res.card.w > 0 ? Math.round((PIC_W * res.card.h) / res.card.w) : 120;
+      if (owner) {
+        const { w } = measureNode(node, this.measurer, imageResolver(sheet));
+        this.createFreeformItem(owner, node.position.x + w + 24, node.position.y, "", res.card.id);
+      } else {
+        const cam = this.state.camera;
+        const cw = node.style.width ?? 0, ch = node.style.height ?? 0;
+        const inView = cam.x >= node.position.x && cam.x <= node.position.x + cw && cam.y >= node.position.y && cam.y <= node.position.y + ch;
+        if (inView) this.createFreeformItem(nodeId, cam.x - PIC_W / 2, cam.y - picH / 2, "", res.card.id);
+        else this.createFreeformItem(nodeId, undefined, undefined, "", res.card.id);
+      }
     } else this.attachImage(nodeId, res.card, position);
     trace.applied("drop:image", { bytes: res.card.bytes, w: res.card.w, h: res.card.h });
     return { ok: true };
@@ -5083,6 +5526,9 @@ export class EditorStore {
   private async importToCard(
     file: Blob & { name?: string },
     signal?: AbortSignal,
+    /** Where the decoded levels go. Default: one write per picture. A batch
+     *  import passes a batcher instead (see importFilesBatch). */
+    write?: (id: string, levels: ImportedImage["levels"], meta: AssetMeta) => void,
   ): Promise<{ ok: true; card: AttachmentInfo } | { ok: false; reason: string }> {
     if (signal?.aborted) return { ok: false, reason: "Import cancelled" };
     // A cross-app drag (web browser → app) delivers the picture as a temp file
@@ -5105,10 +5551,12 @@ export class EditorStore {
       trace.ignored("drop", "decode failed", { error: String(err) });
       return { ok: false, reason: String(err) };
     }
-    const assetStore = getAssetStore();
     const fullMeta: AssetMeta = { ...imported.meta, id: imported.id };
-    await assetStore.putUnderId(imported.id, imported.levels, fullMeta);
-    void ensureStoragePersistent();
+    if (write) write(imported.id, imported.levels, fullMeta);
+    else {
+      await getAssetStore().putUnderId(imported.id, imported.levels, fullMeta);
+      void ensureStoragePersistent();
+    }
     return {
       ok: true,
       card: {
@@ -5135,17 +5583,45 @@ export class EditorStore {
     const showProgress = files.length > 1;
     const signal = showProgress ? this.beginLongOp(`Importing 0 of ${files.length}…`, true, "import") : undefined;
     let done = 0;
+    let lastProgressAt = 0;
+    const assetStore = getAssetStore();
+    // Many pictures: decoded levels are written in IndexedDB transactions of
+    // WRITE_BATCH as they arrive, so at most one batch is held in memory —
+    // never the whole import (thousands of pictures would be gigabytes).
+    const WRITE_BATCH = 16;
+    let pending: { id: string; levels: ImportedImage["levels"]; meta: AssetMeta }[] = [];
+    const writes: Promise<void>[] = [];
+    const flush = (): void => {
+      if (pending.length === 0) return;
+      const chunk = pending;
+      pending = [];
+      const p = assetStore.putMany!(chunk);
+      p.catch(() => { /* reported by the Promise.all below */ });
+      writes.push(p);
+    };
+    const write = files.length > 1 && typeof assetStore.putMany === "function"
+      ? (id: string, levels: ImportedImage["levels"], meta: AssetMeta): void => {
+        pending.push({ id, levels, meta });
+        if (pending.length >= WRITE_BATCH) flush();
+      }
+      : undefined;
     try {
       const results = await Promise.all(
         files.map(async (file) => {
-          const res = await this.importToCard(file, signal);
+          const res = await this.importToCard(file, signal, write);
           done++;
-          if (showProgress && !signal?.aborted) {
+          const now = typeof performance !== "undefined" ? performance.now() : 0;
+          if (showProgress && !signal?.aborted && (done === files.length || now - lastProgressAt >= 100)) {
+            lastProgressAt = now;
             this.setOpProgress(`Importing ${done} of ${files.length}…`, done / files.length, "import");
           }
           return res;
         }),
       );
+      // Every card is returned only once its picture is stored.
+      flush();
+      await Promise.all(writes);
+      if (writes.length > 0) void ensureStoragePersistent();
       const cards: AttachmentInfo[] = [];
       let failed = 0;
       let reason: string | undefined;
@@ -6690,10 +7166,11 @@ export class EditorStore {
   requestPaste(): void {
     const sheet = this.sheet;
     const anchorId = this.clipboardTarget()?.id;
+    const imageAnchorId = this.imagePasteTarget()?.id;
     const timer = setTimeout(() => {
       this.pendingPastes.delete(timer);
       if (this.sheet !== sheet) return trace.ignored("paste", "document changed before paste");
-      void this.paste(anchorId);
+      void this.paste(anchorId, undefined, imageAnchorId);
     }, 150);
     this.pendingPastes.add(timer);
   }
@@ -6703,7 +7180,7 @@ export class EditorStore {
     if (timer !== undefined) { clearTimeout(timer); this.pendingPastes.delete(timer); }
   }
 
-  async paste(anchorId?: string | null, suppliedText?: string): Promise<void> {
+  async paste(anchorId?: string | null, suppliedText?: string, imageAnchorId?: string | null): Promise<void> {
     const sheet = this.sheet;
     const destination = this.clipboardTarget(anchorId);
     // Prefer the full-fidelity HTML snapshot (or legacy text/rnode), then
@@ -6753,13 +7230,8 @@ export class EditorStore {
       if (imageItem) {
         const type = imageItem.types.find((t) => t.startsWith("image/"))!;
         const blob = await imageItem.getType(type);
-        const node = destination;
         if (this.sheet !== sheet) return trace.ignored("paste", "document changed while reading clipboard");
-        if (node) {
-          await this.attachImageFile(node.id, new File([blob], "pasted-image", { type: blob.type || type }));
-        } else {
-          trace.ignored("paste:image", "no node selected");
-        }
+        await this.pasteImageFile(new File([blob], "pasted-image", { type: blob.type || type }), imageAnchorId ?? anchorId);
         return;
       }
     }
@@ -8113,19 +8585,22 @@ export class EditorStore {
    * a mind map, or a draw.io-style diagram (its own document type, on pages;
    * it is not one of a mind map's structures).
    */
-  newDocument(kind: "map" | "diagram" = "map"): void {
+  /** Centre the view on the first shape of a fresh diagram, near the top of the page. */
+  private centerDiagramCamera(doc: RnodeDocument): void {
+    const sheet0 = doc.sheets[0];
+    const page = sheet0?.nodes[sheet0.rootNodeId];
+    if (!page) return;
+    const first = sheet0.nodes[page.childrenIds[0]];
+    const at = first?.style.freeformPosition ?? { x: 120, y: 120 };
+    this.state.camera = { scale: 1, x: page.position.x + at.x + 60, y: page.position.y + at.y + 30 + 120 };
+  }
+
+  newDocument(kind: "map" | "diagram" = "diagram"): void {
     void this.parkActive();
     const doc = kind === "diagram" ? DocumentModel.blankDiagram("Untitled diagram") : DocumentModel.blank("Untitled map");
     if (kind !== "diagram") doc.settings.theme = "light";
     this.activate(doc);
-    if (kind === "diagram") {
-      // Centre the view on the first shape, near the top of the page.
-      const sheet0 = doc.sheets[0];
-      const page = sheet0.nodes[sheet0.rootNodeId];
-      const first = sheet0.nodes[page.childrenIds[0]];
-      const at = first?.style.freeformPosition ?? { x: 120, y: 120 };
-      this.state.camera = { scale: 1, x: page.position.x + at.x + 60, y: page.position.y + at.y + 30 + 120 };
-    }
+    if (kind === "diagram") this.centerDiagramCamera(doc);
     this.markDirty(doc.documentId); // new doc not persisted until the user saves
     this.upsertEntry(this.activeEntry());
     this.notify();
@@ -8247,9 +8722,11 @@ export class EditorStore {
         this.activate(next);
         if (nextEntry?.unsaved && !this.isDocDirty(next.documentId)) this.markDirty(next.documentId);
       } else {
-        this.model = new DocumentModel(DocumentModel.blank());
+        const doc = DocumentModel.blankDiagram("Untitled diagram");
+        this.model = new DocumentModel(doc);
         const library = this.state.library;
         this.state = this.makeState();
+        this.centerDiagramCamera(doc);
         this.state.library = library;
         this.upsertEntry(this.activeEntry());
         // The replacement blank belongs to NO file: the adapter must not keep

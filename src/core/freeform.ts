@@ -77,10 +77,13 @@ export const FREEFORM_SHAPE_SIZES: Record<FreeformShape, { w: number; h: number 
  * A picture item of a freeform canvas: one image, no text, no grid. It is the
  * picture itself — no padding, no frame — so its box IS the image, and its
  * handles transform the image directly instead of a node holding it.
+ * A drawn shape (a diagram rect, ellipse...) holding a picture is not one,
+ * even with no text yet: it keeps its outline with the picture inside.
  */
 export function isBarePicture(node: MindNode): boolean {
   const s = node.style;
   return !!s.image && !!s.freeformPosition && !s.imageBottom && !s.imageLeft && !s.imageRight
+    && (s.shape === undefined || s.shape === "none")
     && !s.gallery && !s.code && !s.freeform && !s.chartNote && node.title.trim() === "";
 }
 

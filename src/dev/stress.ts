@@ -57,7 +57,7 @@ const WORDS =
     " "
   );
 
-function words(rnd: () => number, n: number): string {
+export function words(rnd: () => number, n: number): string {
   let out = "";
   for (let i = 0; i < n; i++) out += (i ? " " : "") + WORDS[Math.floor(rnd() * WORDS.length)];
   return out;
@@ -69,7 +69,7 @@ function words(rnd: () => number, n: number): string {
  * `wrapRunLines` than one long line does — so a corpus of uniform labels would
  * flatter the layout and tell us nothing.
  */
-function makeTitle(rnd: () => number, i: number): { title: string; runs: TextRun[] } {
+export function makeTitle(rnd: () => number, i: number): { title: string; runs: TextRun[] } {
   const roll = rnd();
   if (roll < 0.4) {
     const t = `${words(rnd, 2 + Math.floor(rnd() * 3))} ${i}`;
@@ -117,7 +117,7 @@ function makeTitle(rnd: () => number, i: number): { title: string; runs: TextRun
  * — storage, save time, transfer. High-frequency noise defeats the DCT and
  * lands in the megabyte range, where real pictures live.
  */
-async function encodeScene(rnd: () => number, longSide: number, noise: number): Promise<Uint8Array<ArrayBuffer>> {
+export async function encodeScene(rnd: () => number, longSide: number, noise: number): Promise<Uint8Array<ArrayBuffer>> {
   const w = longSide;
   const h = Math.round(longSide * (0.6 + rnd() * 0.15));
   const canvas =
@@ -192,7 +192,7 @@ async function encodeScene(rnd: () => number, longSide: number, noise: number): 
  * one scene would be stored as a single image, and the whole test would
  * measure nothing while appearing to pass.
  */
-function variantOf(scene: Uint8Array<ArrayBuffer>, seq: number): Blob {
+export function variantOf(scene: Uint8Array<ArrayBuffer>, seq: number): Blob {
   const tail = new Uint8Array(16);
   for (let i = 0; i < 16; i++) tail[i] = (Math.random() * 256) | 0;
   tail[0] = seq & 0xff;
@@ -203,7 +203,7 @@ function variantOf(scene: Uint8Array<ArrayBuffer>, seq: number): Blob {
 // --------------------------------------------------------------------------
 
 /** Deterministic PRNG (mulberry32), so two runs produce the same map. */
-function seeded(seed: number): () => number {
+export function seeded(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;

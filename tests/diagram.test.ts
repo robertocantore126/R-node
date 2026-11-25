@@ -146,18 +146,51 @@ describe("special topics in a diagram", () => {
     expect(store.sheet.nodes[c].style.freeformPosition).toEqual(moved);
   });
 
-  it("Tab under a canvas, chart or code block makes a plain shape, not a copy of it", () => {
+  it("Tab under a canvas, chart or code block makes plain text, not a copy of it", () => {
     const { store, page, first } = newDiagram();
     store.createFreeformTopic(first);
     store.createChartTopic(first);
     store.createCodeTopic(first);
     const nodes = store.sheet.nodes;
     for (const special of store.sheet.nodes[page].childrenIds.slice(1)) {
+      // The special topics are Tab children of the first shape, so theirs
+      // are grandchildren: text.
       const child = nodes[store.diagramTab(special)!];
-      expect(child.style.shape).toBe("rounded");
-      expect([child.style.width, child.style.height]).toEqual([120, 60]);
+      expect(child.style.shape).toBe("none");
       expect(child.style.freeform || child.style.gallery || child.style.code).toBeFalsy();
     }
+  });
+
+  it("Tab makes rectangle children and text grandchildren, whatever the parent looks like", () => {
+    const { store, first } = newDiagram();
+    store.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", {
+      id: first, style: { ...store.sheet.nodes[first].style, shape: "diamond", fill: "#ff0000" }, prev: store.sheet.nodes[first].style,
+    })]);
+    const child = store.diagramTab(first)!;
+    const grandchild = store.diagramTab(child)!;
+    const great = store.diagramTab(grandchild)!;
+    const nodes = store.sheet.nodes;
+    expect(nodes[child].style.shape).toBe("rect");
+    expect([nodes[child].style.width, nodes[child].style.height]).toEqual([120, 60]);
+    expect(nodes[child].style.fill).toBeUndefined();
+    expect(nodes[grandchild].style.shape).toBe("none");
+    expect(nodes[great].style.shape).toBe("none");
+    // Enter on a child adds a sibling: also a rectangle.
+    store.select(child);
+    store.createSibling();
+    const sibling = store.sheet.relationships.filter((r) => r.tree && r.fromId === first).map((r) => r.toId).find((id) => id !== child)!;
+    expect(nodes[sibling].style.shape).toBe("rect");
+  });
+
+  it("a shape restyled by hand keeps its look when its tree grows", () => {
+    const { store, first } = newDiagram();
+    const child = store.diagramTab(first)!;
+    store.execOps([makeOp<Op & { type: "setStyle" }>("setStyle", {
+      id: child, style: { ...store.sheet.nodes[child].style, shape: "ellipse" }, prev: store.sheet.nodes[child].style,
+    })]);
+    store.diagramTab(first);
+    store.diagramTab(child);
+    expect(store.sheet.nodes[child].style.shape).toBe("ellipse");
   });
 
 });

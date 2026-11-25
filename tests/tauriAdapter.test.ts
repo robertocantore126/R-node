@@ -275,7 +275,7 @@ describe("desktop save flow", () => {
     // title as the suggested file name — the filesystem dialog already knows it.
     const pick = calls.find((c) => c.cmd === "pick_document_file");
     expect(pick?.args.mode).toBe("save");
-    expect(pick?.args.suggestedName).toBe("R-node — Roadmap");
+    expect(pick?.args.suggestedName).toBe("Untitled diagram");
   });
 
   it("save reports how many referenced images could not be copied", async () => {

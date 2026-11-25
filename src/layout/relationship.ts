@@ -625,6 +625,87 @@ export function routeEnv(
 }
 
 /**
+ * Spatial index of every item that can be an obstacle (items of any canvas,
+ * as routeObstacles picks them), built once per placement revision so an
+ * elbow arrow reads only the cells around its two ends instead of every node.
+ * queryObstacles returns exactly what routeObstacles + routeAround's "near"
+ * filter would, in the same order (ties between equal routes depend on it).
+ */
+export interface ObstacleIndex {
+  cells: Map<string, { order: number; id: string; rect: Rect }[]>;
+  /** Canvas top-left world positions, for O(1) waypointOrigin lookup. */
+  canvasOrigins: Map<string, Pt>;
+}
+
+const OBSTACLE_CELL = 256;
+/** routeAround only weighs boxes this close to the two ends' bounding box. */
+const OBSTACLE_NEAR = 200;
+
+export function buildObstacleIndex(
+  sheet: Sheet,
+  placed: readonly { node: MindNode; x: number; y: number; w: number; h: number }[],
+): ObstacleIndex {
+  const cells = new Map<string, { order: number; id: string; rect: Rect }[]>();
+  const canvasOrigins = new Map<string, Pt>();
+  placed.forEach((p, order) => {
+    const n = p.node;
+    if (n.style.freeform) {
+      canvasOrigins.set(n.id, { x: p.x, y: p.y });
+      return;
+    }
+    if (n.style.frame || !freeformOwner(sheet, n.id)) return;
+    const entry = { order, id: n.id, rect: { x: p.x, y: p.y, w: p.w, h: p.h } };
+    const cx1 = Math.floor((p.x + p.w) / OBSTACLE_CELL), cy1 = Math.floor((p.y + p.h) / OBSTACLE_CELL);
+    for (let cx = Math.floor(p.x / OBSTACLE_CELL); cx <= cx1; cx++) {
+      for (let cy = Math.floor(p.y / OBSTACLE_CELL); cy <= cy1; cy++) {
+        const key = `${cx},${cy}`;
+        const list = cells.get(key);
+        if (list) list.push(entry);
+        else cells.set(key, [entry]);
+      }
+    }
+  });
+  return { cells, canvasOrigins };
+}
+
+/** routeObstacles near boxes `a` and `b`, read from a prebuilt index. */
+export function queryObstacles(
+  sheet: Sheet,
+  index: ObstacleIndex,
+  rel: Pick<Relationship, "fromId" | "toId">,
+  a: Rect,
+  b: Rect,
+): Rect[] {
+  if (!endpointFreeformOwner(sheet, rel.fromId) || endpointFreeformOwner(sheet, rel.toId) === null) return [];
+  const holders = new Set<string>([rel.fromId, rel.toId]);
+  for (const id of [rel.fromId, rel.toId]) {
+    let p = sheet.nodes[id]?.parentId;
+    while (p) { holders.add(p); p = sheet.nodes[p]?.parentId ?? null; }
+    const g = sheet.boundaries.find((bd) => bd.id === id);
+    if (g) for (const mid of g.memberIds) holders.add(mid);
+  }
+  const minX = Math.min(a.x, b.x) - OBSTACLE_NEAR, maxX = Math.max(a.x + a.w, b.x + b.w) + OBSTACLE_NEAR;
+  const minY = Math.min(a.y, b.y) - OBSTACLE_NEAR, maxY = Math.max(a.y + a.h, b.y + b.h) + OBSTACLE_NEAR;
+  const seen = new Set<string>();
+  const hits: { order: number; rect: Rect }[] = [];
+  const cx1 = Math.floor(maxX / OBSTACLE_CELL), cy1 = Math.floor(maxY / OBSTACLE_CELL);
+  for (let cx = Math.floor(minX / OBSTACLE_CELL); cx <= cx1; cx++) {
+    for (let cy = Math.floor(minY / OBSTACLE_CELL); cy <= cy1; cy++) {
+      const list = index.cells.get(`${cx},${cy}`);
+      if (!list) continue;
+      for (const item of list) {
+        if (seen.has(item.id) || holders.has(item.id)) continue;
+        seen.add(item.id);
+        const r = item.rect;
+        if (r.x < maxX && r.x + r.w > minX && r.y < maxY && r.y + r.h > minY) hits.push(item);
+      }
+    }
+  }
+  hits.sort((p, q) => p.order - q.order);
+  return hits.map((h) => h.rect);
+}
+
+/**
  * The boxes an elbow arrow should go around: the other items of the canvas
  * its ends live in. Canvases, containers and frames are backgrounds (an arrow
  * crosses them freely), and so are the ends themselves and what holds them.
