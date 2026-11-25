@@ -1244,9 +1244,9 @@ describe("focusRoot — the view starts on the root node", () => {
     return { x: root.position.x + m.w / 2, y: root.position.y + m.h / 2 };
   };
 
-  it("centers the camera on the root when a new document is created", () => {
+  it("centers the camera on the root when a new mind map is created", () => {
     const store = new EditorStore(memoryAdapter);
-    store.newDocument();
+    store.newDocument("map");
     const cam = store.getSnapshot().camera;
     const c = rootCenter(store);
     expect(cam.x).toBeCloseTo(c.x, 5);
@@ -1254,6 +1254,13 @@ describe("focusRoot — the view starts on the root node", () => {
     // Fitted but never too far out, never zoomed past the fit cap.
     expect(cam.scale).toBeGreaterThanOrEqual(0.4);
     expect(cam.scale).toBeLessThanOrEqual(1.25);
+  });
+
+  it("opens in diagram mode by default on first run", async () => {
+    const store = new EditorStore(memoryAdapter);
+    await store.init();
+    expect(store.sheet.structure.structureType).toBe("diagram");
+    expect(store.doc.doc.title).toBe("Untitled diagram");
   });
 
   it("centers on the root when the app boots with a saved document", async () => {

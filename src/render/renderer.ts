@@ -14,7 +14,7 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
  * of the node being edited so the overlay doesn't double-paint.
  */
 import type { Group, ImageSlot, MindNode, RelAnchor, Relationship, ResolvedBorder, Sheet, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
-import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, routeEnv, bendHandles, boxesMid, worldWaypoints, type RouteEnv, type HeadShape, type Rect, type RelRoute, type BendHandle } from "../layout/relationship";
+import { buildObstacleIndex, connectHandles, headLen, headShape, queryObstacles, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, routeEnv, bendHandles, boxesMid, worldWaypoints, type ObstacleIndex, type RouteEnv, type HeadShape, type Rect, type RelRoute, type BendHandle } from "../layout/relationship";
 import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
 import { groupBoxes, groupRadius, groupShown, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
@@ -54,6 +54,29 @@ export function diagramPages(placed: readonly { x: number; y: number; w: number;
 export interface DropIndicator {
   mode: "child" | "before" | "after" | "floating" | "none";
   nodeId: string;
+}
+
+export interface FrameProfile {
+  scale: number;
+  totalMs: number;
+  placedMs: number;
+  pagesGridMs: number;
+  shadowsMs: number;
+  nodesShapeMs: number;
+  nodesTextMs: number;
+  nodesImgMs: number;
+  arrowsRouteMs: number;
+  arrowsDrawMs: number;
+  otherMs: number;
+  nodes: number;
+  visible: number;
+  relsDrawn: number;
+  imgSlotsDrawn: number;
+  imgRectsDrawn: number;
+  textVector: number;
+  textCached: number;
+  textGreeked: number;
+  nodesSkippedTiny: number;
 }
 
 export interface RenderState {
@@ -215,8 +238,16 @@ const SHADOW_BLUR = 10;
 const SHADOW_PAD = 15;
 const SHADOW_DY = 3;
 const CONNECTOR_SHADOW_DY = 2.5;
-/** E2 wheel-zoom shortcut (stretched cached scene). Off: it blurred text and images. */
-const ZOOM_BLIT = false;
+/** E2 wheel-zoom shortcut (stretched cached scene during active wheel zoom when motionQuality is on). */
+const ZOOM_BLIT = true;
+/** Screen-px threshold below which images are painted as a solid average-color rect. */
+const IMAGE_AVG_COLOR_PX = 24;
+/** Screen-px line height below which text is greeked or skipped. */
+const TEXT_GREEK_LINE_PX = 2.5;
+/** Screen-px box size below which tiny nodes are skipped at far zoom. */
+const TINY_NODE_SKIP_PX = 1.5;
+/** Screen-px natural arrowhead length below which arrowheads are skipped at far zoom. */
+const ARROW_HEAD_SKIP_PX = 2;
 const RING_W_SELECTED = 2.5;
 const RING_W_HOVER = 1.5;
 
@@ -283,6 +314,14 @@ export class Renderer {
   private imageBytes = 0;
   /** Per-image index of cached bucket widths for O(buckets) fallback lookup. */
   private imageBuckets = new Map<string, Set<number>>();
+  /** Cached average CSS color per imageId (computed once from a 1×1 sample). */
+  private imageAvgColors = new Map<string, string>();
+  private avgColorCanvas: HTMLCanvasElement | null = null;
+  private avgColorCtx: CanvasRenderingContext2D | null = null;
+  /** Cached relationship routes and spatial obstacle index, keyed by placementKey. */
+  private relRouteCache: { key: string; routes: Map<string, RelRoute>; index: ObstacleIndex } | null = null;
+  /** Active VisualFlags for the current frame (so drawText/paintSlot/drawRelationship can check flags.lod). */
+  private curFlags: VisualFlags = getVisualFlags();
   /** Cache keys drawn (or freshly decoded) in the current frame — never evicted while visible. */
   private frameKeys = new Set<string>();
   /** Images with any bucket >= 1448 drawn this frame; their largest original-derived bitmap stays protected. */
@@ -316,6 +355,8 @@ export class Renderer {
   private shadowSprites = new Map<string, HTMLCanvasElement>();
   /** E6: Count of topics drawn as greeking bars this frame. */
   private greekedCount = 0;
+  /** Optional per-frame breakdown profiler (null during normal frames). */
+  private activeProfile: FrameProfile | null = null;
   /**
    * The on-screen canvas is opaque (`alpha: false`). Chrome only gives canvas
    * text subpixel (ClearType) antialiasing on an opaque context; on a
@@ -720,6 +761,66 @@ export class Renderer {
     if (useOverlay) this.renderOverlay(state, flags);
   }
 
+  /** Profile a single full scene pass (bypassing scene cache) and return a breakdown by category. */
+  profileFrame(state: RenderState): FrameProfile {
+    const prof: FrameProfile = {
+      scale: state.camera.scale,
+      totalMs: 0,
+      placedMs: 0,
+      pagesGridMs: 0,
+      shadowsMs: 0,
+      nodesShapeMs: 0,
+      nodesTextMs: 0,
+      nodesImgMs: 0,
+      arrowsRouteMs: 0,
+      arrowsDrawMs: 0,
+      otherMs: 0,
+      nodes: 0,
+      visible: 0,
+      relsDrawn: 0,
+      imgSlotsDrawn: 0,
+      imgRectsDrawn: 0,
+      textVector: 0,
+      textCached: 0,
+      textGreeked: 0,
+      nodesSkippedTiny: 0,
+    };
+    this.activeProfile = prof;
+    const t0 = typeof performance !== "undefined" ? performance.now() : 0;
+    try {
+      const stats = this.paintScenePass(state, getVisualFlags(), false);
+      prof.nodes = stats.nodes;
+      prof.visible = stats.visible;
+      prof.relsDrawn = stats.relsDrawn;
+      prof.textGreeked = this.greekedCount;
+    } finally {
+      this.activeProfile = null;
+    }
+    prof.totalMs = (typeof performance !== "undefined" ? performance.now() : 0) - t0;
+    const accounted =
+      prof.placedMs +
+      prof.pagesGridMs +
+      prof.shadowsMs +
+      prof.nodesShapeMs +
+      prof.nodesTextMs +
+      prof.nodesImgMs +
+      prof.arrowsRouteMs +
+      prof.arrowsDrawMs;
+    prof.otherMs = Math.max(0, prof.totalMs - accounted);
+    const r = (v: number): number => Math.round(v * 100) / 100;
+    prof.totalMs = r(prof.totalMs);
+    prof.placedMs = r(prof.placedMs);
+    prof.pagesGridMs = r(prof.pagesGridMs);
+    prof.shadowsMs = r(prof.shadowsMs);
+    prof.nodesShapeMs = r(prof.nodesShapeMs);
+    prof.nodesTextMs = r(prof.nodesTextMs);
+    prof.nodesImgMs = r(prof.nodesImgMs);
+    prof.arrowsRouteMs = r(prof.arrowsRouteMs);
+    prof.arrowsDrawMs = r(prof.arrowsDrawMs);
+    prof.otherMs = r(prof.otherMs);
+    return prof;
+  }
+
   renderOverlayOnly(state: RenderState): void {
     const flags = getVisualFlags();
     if (!flags.overlayLayer || !this.overlayCtx) {
@@ -791,49 +892,52 @@ export class Renderer {
         const s = state.camera.scale;
         const c0 = this.sceneCacheCam;
         const wantFull = !(flags.motionQuality && state.moving);
-        // Wheel zoom used to blit the cached scene stretched, which blurred
-        // every text and picture until the gesture ended. Text and images must
-        // look exactly as before E2, so each zoom frame is painted for real;
-        // the stretched blit stays off. Only pan reuses the cache (pixel copy).
-        if (state.zooming && ZOOM_BLIT) {
-          const ctx = this.ctx;
-          const baseTheme = THEMES[state.themeName];
-          const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
-          const transparentVignette = !this.opaqueCanvas && flags.vignette && !state.opaque && !state.background && !state.grid;
-          ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-          ctx.clearRect(0, 0, state.viewW, state.viewH);
-          if (!transparentVignette) {
-            ctx.fillStyle = theme.background;
-            ctx.fillRect(0, 0, state.viewW, state.viewH);
-          }
+        // Wheel zoom: when motionQuality is enabled and the cached scene fully
+        // covers the viewport (zoom-in), stretch-blit for 60 fps responsiveness,
+        // then CanvasView triggers a crisp full repaint once the wheel settles.
+        // Zoom-out exposes areas outside the cached bitmap, so it paints live
+        // instead of flashing an empty gray border.
+        if (state.zooming && ZOOM_BLIT && flags.motionQuality) {
           const dx = state.viewW / 2 + (c0.x - state.viewW / (2 * c0.scale) - state.camera.x) * s;
           const dy = state.viewH / 2 + (c0.y - state.viewH / (2 * c0.scale) - state.camera.y) * s;
           const dw = state.viewW * (s / c0.scale);
           const dh = state.viewH * (s / c0.scale);
-          ctx.drawImage(cache.main, dx, dy, dw, dh);
-          trace.render(
-            {
-              scale: s,
-              nodes: 0,
-              visible: 0,
-              rels: 0,
-              relsDrawn: 0,
-              links: 0,
-              linksDrawn: 0,
-              textHits: 0,
-              textMisses: 0,
-              imgVisible: 0,
-              imgCached: this.imageCache.size,
-              imgBytes: this.imageBytes,
-              imgInflight: this.inflightCount,
-              overlayOnly: false,
-              sceneBlit: "zoom",
-              pathBatches: 0,
-              greeked: 0,
-            },
-            (typeof performance !== "undefined" ? performance.now() : 0) - tStart
-          );
-          return;
+          if (dx <= 0.5 && dy <= 0.5 && dx + dw >= state.viewW - 0.5 && dy + dh >= state.viewH - 0.5) {
+            const ctx = this.ctx;
+            const baseTheme = THEMES[state.themeName];
+            const theme = state.background ? { ...baseTheme, background: state.background } : baseTheme;
+            const transparentVignette = !this.opaqueCanvas && flags.vignette && !state.opaque && !state.background && !state.grid;
+            ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+            ctx.clearRect(0, 0, state.viewW, state.viewH);
+            if (!transparentVignette) {
+              ctx.fillStyle = theme.background;
+              ctx.fillRect(0, 0, state.viewW, state.viewH);
+            }
+            ctx.drawImage(cache.main, dx, dy, dw, dh);
+            trace.render(
+              {
+                scale: s,
+                nodes: 0,
+                visible: 0,
+                rels: 0,
+                relsDrawn: 0,
+                links: 0,
+                linksDrawn: 0,
+                textHits: 0,
+                textMisses: 0,
+                imgVisible: 0,
+                imgCached: this.imageCache.size,
+                imgBytes: this.imageBytes,
+                imgInflight: this.inflightCount,
+                overlayOnly: false,
+                sceneBlit: "zoom",
+                pathBatches: 0,
+                greeked: 0,
+              },
+              (typeof performance !== "undefined" ? performance.now() : 0) - tStart
+            );
+            return;
+          }
         }
         if (c0.scale === s && !(wantFull && this.sceneCacheQuality === "moving")) {
           const shiftDx = Math.round((c0.x - state.camera.x) * s * this.dpr);
@@ -955,7 +1059,7 @@ export class Renderer {
     }
 
     const stats = this.paintScenePass(state, flags, skipOverlays);
-    if (canCache && !state.zooming) {
+    if (canCache) {
       const cache = this.ensureSceneCache(devW, devH);
       const cacheCtx = cache?.main.getContext("2d");
       if (cache && cacheCtx) {
@@ -1036,6 +1140,7 @@ export class Renderer {
 
     const s = state.camera.scale;
     this.curScale = s;
+    this.curFlags = flags;
     this.curDiagram = state.sheet.structure.structureType === "diagram";
     this.curCamX = state.camera.x;
     this.curCamY = state.camera.y;
@@ -1048,8 +1153,11 @@ export class Renderer {
     const oy = state.viewH / 2 - state.camera.y * s;
     ctx.setTransform(this.dpr * s, 0, 0, this.dpr * s, this.dpr * ox, this.dpr * oy);
 
+    const prof = this.activeProfile;
+    const tPages = prof ? performance.now() : 0;
     if (state.sheet.structure.structureType === "diagram") this.drawDiagramPages(theme, state);
     else this.drawGrid(theme, state);
+    if (prof) prof.pagesGridMs += performance.now() - tPages;
 
     this.textHits = 0;
     this.textMisses = 0;
@@ -1058,9 +1166,11 @@ export class Renderer {
     const pk = this.placementKey(state);
     this.curBranchCacheKey = flags.batchedPaths && pk !== null ? `${theme.name}|${pk}` : null;
 
+    const tPlaced = prof ? performance.now() : 0;
     const basePlaced = this.placedNodes(state);
     const baseVisiblePlaced = this.visiblePlacedList(state);
     const baseById = this.placedById(state);
+    if (prof) prof.placedMs += performance.now() - tPlaced;
 
     let placed = basePlaced;
     let visiblePlaced = baseVisiblePlaced;
@@ -1117,12 +1227,14 @@ export class Renderer {
     // pre-blurred sprite (see drawShadowSprite): no shadowBlur per node.
     const shadowsOn = flags.flatShadow && !(flags.lod && s < LOD_BARE);
     if (shadowsOn) {
+      const tSh = prof ? performance.now() : 0;
       for (const p of visiblePlaced) {
         const sh = this.spriteShadowOf(p, state.sheet, flags);
         if (sh === null) continue;
         const alpha = (p.node.style.opacity ?? 1) * (state.tween?.get(p.node.id)?.alpha ?? 1);
         if (alpha > 0.01) this.drawShadowSprite(ctx, theme.shadow, p, sh, alpha);
       }
+      if (prof) prof.shadowsMs += performance.now() - tSh;
     }
 
     for (const p of visiblePlaced) if (p.node.style.freeform) this.drawFreeform(theme, p, state);
@@ -1363,7 +1475,28 @@ export class Renderer {
         }
         noteLinks.length = 0;
       }
-      this.drawNode(theme, p, state, false, flags, byId, !skipOverlays);
+      if (
+        lodBare &&
+        !p.node.style.freeform &&
+        p.w * s < TINY_NODE_SKIP_PX &&
+        p.h * s < TINY_NODE_SKIP_PX &&
+        !state.selection.has(p.node.id) &&
+        state.hoverId !== p.node.id &&
+        state.editingId !== p.node.id
+      ) {
+        if (prof) prof.nodesSkippedTiny++;
+        continue;
+      }
+      if (prof) {
+        const tNode = performance.now();
+        const imgBefore = prof.nodesImgMs;
+        const txtBefore = prof.nodesTextMs;
+        this.drawNode(theme, p, state, false, flags, byId, !skipOverlays);
+        const dt = performance.now() - tNode - (prof.nodesImgMs - imgBefore) - (prof.nodesTextMs - txtBefore);
+        prof.nodesShapeMs += Math.max(0, dt);
+      } else {
+        this.drawNode(theme, p, state, false, flags, byId, !skipOverlays);
+      }
     }
     for (const [a, b, rel] of overRels) this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn);
     // Handwriting goes over the items on its canvas, to annotate them.
@@ -2864,15 +2997,21 @@ export class Renderer {
     // images between shape and text (ADR-001 §12); skipped while editing —
     // the HTML overlay owns it, no double-render (same rule as the text).
     if (!editing) {
+      const prof = this.activeProfile;
       if (isCode) {
         // A code block paints its own chrome and tokenized lines; the images
         // and the rich-text path are skipped because code has neither, and
         // staying off the rich-text path keeps this out of the §3 parity
         // contract entirely (T22).
+        const t0 = prof ? performance.now() : 0;
         this.drawCodeBlock(theme, p);
+        if (prof) prof.nodesTextMs += performance.now() - t0;
       } else {
+        const tImg = prof ? performance.now() : 0;
         this.drawImage(p);
         this.drawGallery(theme, p, state.sheet);
+        if (prof) prof.nodesImgMs += performance.now() - tImg;
+        const tTxt = prof ? performance.now() : 0;
         const sx = n.style.textScaleX ?? 1;
         const sy = n.style.textScaleY ?? 1;
         // Free-transform text is painted as vectors, never from the bitmap
@@ -2894,6 +3033,7 @@ export class Renderer {
           if (n.style.titleAt) this.drawOwnLabel(p, textColor);
           else this.drawText(theme, p, textColor, vector);
         }
+        if (prof) prof.nodesTextMs += performance.now() - tTxt;
       }
     }
 
@@ -3035,13 +3175,26 @@ export class Renderer {
    *  are few, so shadowBlur is affordable here; it is skipped while moving. */
   private drawRelationshipShadowed(theme: RenderTheme, a: Box, b: Box, rel: Relationship, state: RenderState, shadow: boolean): void {
     const ctx = this.ctx;
+    const prof = this.activeProfile;
+    const tEnv = prof ? performance.now() : 0;
+    const route = this.cachedRelRoute(state, rel, a, b);
+    if (prof) prof.arrowsRouteMs += performance.now() - tEnv;
     if (shadow) {
       const k = state.camera.scale * this.dpr; // shadow* ignore the transform
       ctx.shadowColor = theme.shadow;
       ctx.shadowBlur = Math.min(24, 8 * k);
       ctx.shadowOffsetY = CONNECTOR_SHADOW_DY * k;
     }
-    this.drawRelationship(theme, a, b, rel, rel.color ?? (rel.tree || state.sheet.structure.structureType === "diagram" ? theme.text : theme.selection), state.relSel === rel.id, this.relEnv(state, rel));
+    this.drawRelationship(
+      theme,
+      a,
+      b,
+      rel,
+      rel.color ?? (rel.tree || state.sheet.structure.structureType === "diagram" ? theme.text : theme.selection),
+      state.relSel === rel.id,
+      {},
+      route,
+    );
     if (shadow) {
       ctx.shadowColor = "transparent";
       ctx.shadowBlur = 0;
@@ -3251,6 +3404,10 @@ export class Renderer {
     const n = p.node, ctx = this.ctx;
     if (!n.title.trim()) return;
     const size = n.style.fontSize ?? 14;
+    if (this.curFlags.lod && size * LINE_HEIGHT_FACTOR * this.curScale < TEXT_GREEK_LINE_PX) {
+      this.greekedCount++;
+      return;
+    }
     ctx.save();
     ctx.font = `${n.style.italic ? "italic " : ""}${n.style.fontWeight ?? 400} ${size}px ${FONT_STACK}`;
     ctx.fillStyle = color;
@@ -3277,6 +3434,37 @@ export class Renderer {
       return;
     }
     const pad = n.style.padding ?? 10;
+    const fontSize = n.style.fontSize ?? 14;
+    if (this.curFlags.lod) {
+      const lineScreenPx = fontSize * LINE_HEIGHT_FACTOR * this.curScale;
+      if (lineScreenPx < TEXT_GREEK_LINE_PX) {
+        this.greekedCount++;
+        const screenW = p.w * this.curScale;
+        const screenH = p.h * this.curScale;
+        if (lineScreenPx >= 0.7 && screenW >= 6 && screenH >= 4) {
+          const innerW = Math.max(0, p.w - pad * 2);
+          const innerH = Math.max(0, p.h - pad * 2);
+          if (innerW > 2 && innerH > 2) {
+            const barH = Math.max(1 / this.curScale, fontSize * 0.55);
+            const gap = barH * 1.4;
+            const maxBars = Math.min(3, Math.max(1, Math.floor(innerH / Math.max(1, barH + gap))));
+            const totalH = maxBars * barH + (maxBars - 1) * gap;
+            const y0 = p.y + (p.h - totalH) / 2;
+            const ctx = this.ctx;
+            const prevAlpha = ctx.globalAlpha;
+            ctx.fillStyle = color;
+            ctx.globalAlpha = prevAlpha * 0.28;
+            for (let i = 0; i < maxBars; i++) {
+              const frac = i === maxBars - 1 && maxBars > 1 ? 0.65 : 0.88;
+              const bw = innerW * frac;
+              ctx.fillRect(p.x + pad + (innerW - bw) * 0.5, y0 + i * (barH + gap), bw, barH);
+            }
+            ctx.globalAlpha = prevAlpha;
+          }
+        }
+        return;
+      }
+    }
     // Side images reserve their columns; the wrap width shrinks by the same
     // amount measureTopic uses, so the bitmap (keyed on this width) is
     // invalidated exactly when a side image appears or disappears.
@@ -3296,6 +3484,7 @@ export class Renderer {
     // read soft (at DPR 1 everything below 100% was a 1× bitmap shrunk). Below
     // 50% — where a whole map can be visible — the bitmap cache stays.
     if (vector || this.curScale >= VECTOR_TEXT_MIN_SCALE) {
+      if (this.activeProfile) this.activeProfile.textVector++;
       const size = n.style.fontSize ?? 14;
       const lines = wrapRunLines(nodeRuns(n.title, n.titleRuns), maxW, this.measurer, n.style);
       let totalH = 0;
@@ -3311,6 +3500,7 @@ export class Renderer {
     // Resolution bucket: re-render the bitmap only when the zoom crosses a
     // power-of-two boundary; between boundaries pan/zoom just blits.
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
+    if (this.activeProfile) this.activeProfile.textCached++;
     const key = this.textCacheKey(n, color, maxW, res);
     let entry = this.textCache.get(key);
     if (entry) {
@@ -3405,6 +3595,7 @@ export class Renderer {
       }
     }
     if (gallery.captionH <= 0) return;
+    if (this.curFlags.lod && GALLERY_CAPTION_SIZE * this.curScale < TEXT_GREEK_LINE_PX) return;
     ctx.save();
     ctx.fillStyle = theme.textMuted;
     ctx.font = `${GALLERY_CAPTION_SIZE}px ${FONT_STACK}`;
@@ -3442,8 +3633,37 @@ export class Renderer {
     return slots;
   }
 
+  /** Compute and cache the average CSS rgb() color of a decoded bitmap (1×1 downsample). */
+  private recordImageAvgColor(imageId: string, bitmap: ImageBitmap): string | null {
+    const existing = this.imageAvgColors.get(imageId);
+    if (existing) return existing;
+    if (typeof document === "undefined") return null;
+    try {
+      if (!this.avgColorCanvas) {
+        this.avgColorCanvas = document.createElement("canvas");
+        this.avgColorCanvas.width = 1;
+        this.avgColorCanvas.height = 1;
+        this.avgColorCtx = this.avgColorCanvas.getContext("2d", { willReadFrequently: true });
+      }
+      const actx = this.avgColorCtx;
+      if (!actx || typeof actx.getImageData !== "function") return null;
+      actx.clearRect(0, 0, 1, 1);
+      actx.drawImage(bitmap, 0, 0, 1, 1);
+      const data = actx.getImageData(0, 0, 1, 1)?.data;
+      if (!data || data.length < 4) return null;
+      const color = data[3] < 250
+        ? `rgba(${data[0]},${data[1]},${data[2]},${(data[3] / 255).toFixed(2)})`
+        : `rgb(${data[0]},${data[1]},${data[2]})`;
+      this.imageAvgColors.set(imageId, color);
+      return color;
+    } catch {
+      return null;
+    }
+  }
+
   /** Record a decoded bitmap in the cache and its per-image bucket index. */
   private cacheImageBitmap(key: string, imageId: string, bucket: number, bitmap: ImageBitmap): number {
+    this.recordImageAvgColor(imageId, bitmap);
     const existing = this.imageCache.get(key);
     if (existing) {
       this.imageCache.delete(key);
@@ -3549,10 +3769,28 @@ export class Renderer {
     crop?: { sx: number; sy: number; sw: number; sh: number } | null,
   ): void {
     if (!this.resolveImage) return;
+    const screenW = imgW * this.curScale;
+    const screenH = imgH * this.curScale;
+    if (this.curFlags.lod && Math.max(screenW, screenH) < IMAGE_AVG_COLOR_PX) {
+      let avg = this.imageAvgColors.get(imageId) ?? null;
+      if (!avg) {
+        const fb = this.findFallbackBitmap(imageId, this.IMAGE_BUCKET_MIN);
+        if (fb) avg = this.recordImageAvgColor(imageId, fb.entry.bitmap);
+      }
+      if (this.activeProfile) this.activeProfile.imgRectsDrawn++;
+      this.ctx.fillStyle = avg ?? "#cbd5e1";
+      this.ctx.fillRect(x, y, imgW, imgH);
+      if (!avg) {
+        const key = `${imageId}@${this.IMAGE_BUCKET_MIN}`;
+        this.enqueueDecode(key, imageId, p.node.id, "small", this.IMAGE_BUCKET_MIN, this.slotPriority(x, y, imgW, imgH, true));
+      }
+      return;
+    }
     // Decode at the size THIS image is painted at, not at the size it happens
     // to be stored at. Driving the choice from the global zoom alone put every
     // bitmap on the 1024px level above zoom 0.5 on a retina screen — 3MB each,
     // so fifty visible image nodes blew the budget and the cache thrashed.
+    if (this.activeProfile) this.activeProfile.imgSlotsDrawn++;
     const neededPx = (imgW * this.curScale * this.dpr) / (crop && crop.sw > 0 ? crop.sw : 1);
     // Quantised (imageDecodeSize): an exact size would mint a new cache key on
     // every micro-change of zoom and nothing would ever hit. Pictures shown
@@ -3983,6 +4221,10 @@ export class Renderer {
    *  tokenizer's own cache is keyed on the same id). */
   private drawCodeBlock(theme: RenderTheme, p: Placed): void {
     const n = p.node;
+    if (this.curFlags.lod && (n.style.fontSize ?? 14) * LINE_HEIGHT_FACTOR * this.curScale < TEXT_GREEK_LINE_PX) {
+      this.greekedCount++;
+      return;
+    }
     const lang = asCodeLang(n.style.code?.lang);
     // From 50% up, vectors (see drawText): no rescaled bitmap.
     if (this.curScale >= VECTOR_TEXT_MIN_SCALE) {
@@ -3993,6 +4235,7 @@ export class Renderer {
       return;
     }
     const res = Math.max(1, Math.min(4, Math.ceil(this.curScale * this.dpr)));
+    if (this.activeProfile) this.activeProfile.textCached++;
     const key = `code:${n.id}|${JSON.stringify(n.titleRuns ?? n.title)}|${lang}|${theme.code.id}|${p.w}|${p.h}|${res}|${n.style.fontSize ?? 14}|${n.style.padding ?? 10}`;
     let entry = this.textCache.get(key);
     if (entry) {
@@ -4078,6 +4321,51 @@ export class Renderer {
     }
   }
 
+  /** Cached spatial obstacle index + route map for the current placement revision. */
+  private getRelRouteCache(state: RenderState): { key: string; routes: Map<string, RelRoute>; index: ObstacleIndex } | null {
+    const pk = this.placementKey(state);
+    if (pk === null) return null;
+    if (this.relRouteCache && this.relRouteCache.key === pk) return this.relRouteCache;
+    const index = buildObstacleIndex(state.sheet, this.placedNodes(state));
+    this.relRouteCache = { key: pk, routes: new Map(), index };
+    return this.relRouteCache;
+  }
+
+  /**
+   * Compute or retrieve the cached route of a relationship.
+   * At far zoom (LOD_BARE) when not yet cached, elbow arrows without waypoints
+   * use the simple polyline without obstacle avoidance so cold far frames stay fast.
+   */
+  private cachedRelRoute(state: RenderState, rel: Relationship, a: Rect, b: Rect): RelRoute {
+    const cache = this.getRelRouteCache(state);
+    if (cache && rel.id) {
+      const hit = cache.routes.get(rel.id);
+      if (hit) return hit;
+    }
+    const bends = !!rel.waypoints?.length;
+    const owner = endpointFreeformOwner(state.sheet, rel.fromId);
+    const origin = owner && cache ? cache.index.canvasOrigins.get(owner) : undefined;
+    const isFarSimple =
+      this.curFlags.lod &&
+      this.curScale < LOD_BARE &&
+      rel.connector === "elbow" &&
+      !bends;
+    if (isFarSimple) {
+      // Do not cache the simplified fallback in `cache.routes` so zooming in
+      // computes the obstacle-avoiding route properly.
+      return relationshipRoute(rel, a, b, undefined, origin);
+    }
+    const obstacles =
+      rel.connector === "elbow" && !bends
+        ? cache
+          ? queryObstacles(state.sheet, cache.index, rel, a, b)
+          : routeEnv(state.sheet, this.placedNodes(state), rel).obstacles
+        : undefined;
+    const route = relationshipRoute(rel, a, b, obstacles, origin);
+    if (cache && rel.id) cache.routes.set(rel.id, route);
+    return route;
+  }
+
   /** The boxes an elbow arrow routes around (none for the other line styles). */
   private relEnv(state: RenderState, rel: Relationship): RouteEnv {
     return routeEnv(state.sheet, this.placedNodes(state), rel);
@@ -4106,15 +4394,18 @@ export class Renderer {
 
   /** The drawn route of a relationship, as every painter and hit test sees it. */
   relRoute(state: RenderState, rel: Relationship, a: Rect, b: Rect): RelRoute {
-    const env = this.relEnv(state, rel);
-    return relationshipRoute(rel, a, b, env.obstacles, env.origin);
+    return this.cachedRelRoute(state, rel, a, b);
   }
 
-  private drawRelationship(theme: RenderTheme, a: Box, b: Box, rel: Relationship, color: string, selected?: boolean, env: RouteEnv = {}): void {
+  private drawRelationship(theme: RenderTheme, a: Box, b: Box, rel: Relationship, color: string, selected?: boolean, env: RouteEnv = {}, precomputed?: RelRoute): void {
     const ctx = this.ctx;
+    const prof = this.activeProfile;
+    const tR = prof ? performance.now() : 0;
     // The route (curve or polyline, cut at the borders or pinned to anchors)
     // is shared with both exports — see layout/relationship.ts.
-    const route = relationshipRoute(rel, a, b, env.obstacles, env.origin);
+    const route = precomputed ?? relationshipRoute(rel, a, b, env.obstacles, env.origin);
+    const tD = prof ? performance.now() : 0;
+    if (prof) prof.arrowsRouteMs += tD - tR;
     const style = rel.lineStyle ?? "dashed";
     const width = relWidth(rel);
     ctx.strokeStyle = color;
@@ -4127,12 +4418,17 @@ export class Renderer {
     // Heads: the tip sits on the border and the angle is the line's real
     // direction there. Scale-compensated, like the groups and the drop
     // indicator: the head keeps its screen size at any zoom.
-    const heads = relHeads(rel);
-    const len = headLen(width) / this.curScale;
-    this.drawHead(headShape(heads.end, route.end.from, route.end.tip, len), color, width);
-    this.drawHead(headShape(heads.start, route.start.from, route.start.tip, len), color, width);
+    // At far zoom, skip arrowheads when their natural screen size drops below 2 px.
+    const lodFar = this.curFlags.lod && this.curScale < LOD_BARE;
+    const skipHeads = lodFar && headLen(width) * this.curScale < ARROW_HEAD_SKIP_PX;
+    if (!skipHeads) {
+      const heads = relHeads(rel);
+      const len = headLen(width) / this.curScale;
+      this.drawHead(headShape(heads.end, route.end.from, route.end.tip, len), color, width);
+      this.drawHead(headShape(heads.start, route.start.from, route.start.tip, len), color, width);
+    }
     const label = rel.label;
-    if (label) {
+    if (label && !(this.curFlags.lod && 12 * this.curScale < TEXT_GREEK_LINE_PX)) {
       const mx = route.mid.x, my = route.mid.y;
       ctx.font = `600 12px system-ui, sans-serif`;
       ctx.textAlign = "center";
@@ -4144,6 +4440,7 @@ export class Renderer {
       ctx.fillStyle = color;
       ctx.fillText(label, mx, my + 0.5);
     }
+    if (prof) prof.arrowsDrawMs += performance.now() - tD;
   }
 
   /**

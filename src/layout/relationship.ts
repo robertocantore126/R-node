@@ -625,6 +625,116 @@ export function routeEnv(
 }
 
 /**
+ * Spatial index of canvas obstacles, built once per layout/placement revision.
+ * Avoids scanning every node on the canvas for every elbow arrow.
+ */
+export interface ObstacleIndex {
+  /** Pre-grouped obstacle entries per freeform canvas id. */
+  byCanvas: Map<string, { cellSize: number; cells: Map<string, { id: string; rect: Rect }[]> }>;
+  /** Canvas top-left world positions, for O(1) waypointOrigin lookup. */
+  canvasOrigins: Map<string, Pt>;
+}
+
+const OBSTACLE_CELL = 256;
+
+export function buildObstacleIndex(
+  sheet: Sheet,
+  placed: readonly { node: MindNode; x: number; y: number; w: number; h: number }[],
+): ObstacleIndex {
+  const byCanvas = new Map<string, { cellSize: number; cells: Map<string, { id: string; rect: Rect }[]> }>();
+  const canvasOrigins = new Map<string, Pt>();
+  const ownerCache = new Map<string, string | null>();
+  const getOwner = (id: string): string | null => {
+    let hit = ownerCache.get(id);
+    if (hit !== undefined) return hit;
+    hit = freeformOwner(sheet, id);
+    ownerCache.set(id, hit);
+    return hit;
+  };
+  for (const p of placed) {
+    const n = p.node;
+    if (n.style.freeform) {
+      canvasOrigins.set(n.id, { x: p.x, y: p.y });
+      continue;
+    }
+    if (n.style.frame) continue;
+    const owner = getOwner(n.id);
+    if (!owner) continue;
+    let grid = byCanvas.get(owner);
+    if (!grid) {
+      grid = { cellSize: OBSTACLE_CELL, cells: new Map() };
+      byCanvas.set(owner, grid);
+    }
+    const rect: Rect = { x: p.x, y: p.y, w: p.w, h: p.h };
+    const entry = { id: n.id, rect };
+    const cx0 = Math.floor(p.x / OBSTACLE_CELL);
+    const cx1 = Math.floor((p.x + p.w) / OBSTACLE_CELL);
+    const cy0 = Math.floor(p.y / OBSTACLE_CELL);
+    const cy1 = Math.floor((p.y + p.h) / OBSTACLE_CELL);
+    for (let cx = cx0; cx <= cx1; cx++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const key = `${cx},${cy}`;
+        let list = grid.cells.get(key);
+        if (!list) {
+          list = [];
+          grid.cells.set(key, list);
+        }
+        list.push(entry);
+      }
+    }
+  }
+  return { byCanvas, canvasOrigins };
+}
+
+/** Query obstacles near boxes `a` and `b` from a prebuilt spatial index. */
+export function queryObstacles(
+  sheet: Sheet,
+  index: ObstacleIndex,
+  rel: Pick<Relationship, "fromId" | "toId">,
+  a: Rect,
+  b: Rect,
+): Rect[] {
+  const owner = endpointFreeformOwner(sheet, rel.fromId);
+  if (!owner || endpointFreeformOwner(sheet, rel.toId) === null) return [];
+  const grid = index.byCanvas.get(owner);
+  if (!grid) return [];
+  const holders = new Set<string>([rel.fromId, rel.toId]);
+  for (const id of [rel.fromId, rel.toId]) {
+    let p = sheet.nodes[id]?.parentId;
+    while (p) { holders.add(p); p = sheet.nodes[p]?.parentId ?? null; }
+    if (sheet.boundaries.length > 0) {
+      const g = sheet.boundaries.find((bd) => bd.id === id);
+      if (g) for (const mid of g.memberIds) holders.add(mid);
+    }
+  }
+  const minX = Math.min(a.x, b.x) - 200;
+  const maxX = Math.max(a.x + a.w, b.x + b.w) + 200;
+  const minY = Math.min(a.y, b.y) - 200;
+  const maxY = Math.max(a.y + a.h, b.y + b.h) + 200;
+  const cx0 = Math.floor(minX / grid.cellSize);
+  const cx1 = Math.floor(maxX / grid.cellSize);
+  const cy0 = Math.floor(minY / grid.cellSize);
+  const cy1 = Math.floor(maxY / grid.cellSize);
+  const seen = new Set<string>();
+  const out: Rect[] = [];
+  for (let cx = cx0; cx <= cx1; cx++) {
+    for (let cy = cy0; cy <= cy1; cy++) {
+      const list = grid.cells.get(`${cx},${cy}`);
+      if (!list) continue;
+      for (const item of list) {
+        if (seen.has(item.id) || holders.has(item.id)) continue;
+        seen.add(item.id);
+        const r = item.rect;
+        if (r.x < maxX && r.x + r.w > minX && r.y < maxY && r.y + r.h > minY) {
+          out.push(r);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * The boxes an elbow arrow should go around: the other items of the canvas
  * its ends live in. Canvases, containers and frames are backgrounds (an arrow
  * crosses them freely), and so are the ends themselves and what holds them.

@@ -125,6 +125,7 @@ export async function buildRnodeFile(
   const SQL = hooks.sql ?? (await loadSql());
   const db = new SQL.Database();
   try {
+    db.exec("PRAGMA journal_mode = MEMORY; PRAGMA synchronous = OFF;");
     db.exec(SCHEMA);
     db.run("INSERT OR IGNORE INTO meta (key, value) VALUES ('app', ?), ('schemaVersion', ?)", [APP_NAME, SCHEMA_VERSION]);
     db.run("INSERT INTO document (id, json) VALUES (1, ?)", [JSON.stringify(doc)]);
@@ -133,8 +134,13 @@ export async function buildRnodeFile(
     const insert = db.prepare("INSERT OR IGNORE INTO assets (id, level, bytes) VALUES (?, ?, ?)");
     let skipped = 0;
     const enc = new TextEncoder();
-    const BATCH = 16;
+    const BATCH = 32;
+    let inTx = false;
     try {
+      if (ids.length > 0) {
+        db.exec("BEGIN");
+        inTx = true;
+      }
       for (let start = 0; start < ids.length; start += BATCH) {
         throwIfAborted(hooks.signal);
         const chunk = ids.slice(start, start + BATCH);
@@ -156,6 +162,15 @@ export async function buildRnodeFile(
         }
         hooks.onProgress?.(Math.min(1, (start + chunk.length) / ids.length));
       }
+      if (inTx) {
+        db.exec("COMMIT");
+        inTx = false;
+      }
+    } catch (e) {
+      if (inTx) {
+        try { db.exec("ROLLBACK"); } catch { /* ignore */ }
+      }
+      throw e;
     } finally {
       insert.free();
     }
@@ -212,8 +227,12 @@ export async function readRnodeFile(
 
     const ids = [...referencedAssetIds(sheet)];
     const select = db.prepare("SELECT level, bytes FROM assets WHERE id = ?");
+    const dec = new TextDecoder();
+    const BATCH = 32;
+    const canPutMany = typeof store.putMany === "function";
     let skipped = 0;
     try {
+      let pending: { id: string; levels: Record<AssetLevel, AssetBlob>; meta: AssetMeta }[] = [];
       for (let i = 0; i < ids.length; i++) {
         throwIfAborted(hooks.signal);
         const id = ids[i];
@@ -229,7 +248,7 @@ export async function readRnodeFile(
         // A damaged meta row costs that one picture, not the whole open.
         let meta: AssetMeta | null = null;
         try {
-          meta = metaBytes ? (JSON.parse(new TextDecoder().decode(metaBytes)) as AssetMeta) : null;
+          meta = metaBytes ? (JSON.parse(dec.decode(metaBytes)) as AssetMeta) : null;
         } catch {
           meta = null;
         }
@@ -240,9 +259,24 @@ export async function readRnodeFile(
           for (const l of LEVELS) {
             levels[l] = { blob: new Blob([found.get(l)!.slice().buffer], { type: meta.mime }), ...levelSize(meta, l) };
           }
-          await store.putUnderId(id, levels, { ...meta, id });
+          if (canPutMany) {
+            pending.push({ id, levels, meta: { ...meta, id } });
+            if (pending.length >= BATCH) {
+              await store.putMany!(pending);
+              pending = [];
+              hooks.onProgress?.((i + 1) / ids.length);
+            }
+          } else {
+            await store.putUnderId(id, levels, { ...meta, id });
+            hooks.onProgress?.((i + 1) / ids.length);
+          }
         }
-        hooks.onProgress?.((i + 1) / ids.length);
+      }
+      if (pending.length > 0) {
+        await store.putMany!(pending);
+        hooks.onProgress?.(1);
+      } else if (canPutMany && ids.length > 0) {
+        hooks.onProgress?.(1);
       }
     } finally {
       select.free();

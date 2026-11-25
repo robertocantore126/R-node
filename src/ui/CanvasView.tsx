@@ -689,6 +689,31 @@ export function CanvasView(): JSX.Element {
 
     const unsub = store.subscribe(schedule);
     const uninstallTrace = installTrace();
+    const rnodeGlobal = (window as unknown as { __rnode?: Record<string, unknown> }).__rnode;
+    if (rnodeGlobal) {
+      rnodeGlobal.profileFrame = (scale?: number) => {
+        const s = store.getSnapshot();
+        const page = store.sheet.nodes[store.sheet.rootNodeId];
+        const mid = page && page.style.freeform
+          ? { x: page.position.x + (page.style.width ?? 0) / 2, y: page.position.y + (page.style.height ?? 0) / 2 }
+          : { x: s.camera.x, y: s.camera.y };
+        const cam = scale !== undefined ? { x: mid.x, y: mid.y, scale } : s.camera;
+        return renderer.profileFrame({
+          sheet: store.sheet,
+          rev: store.revision,
+          camera: cam,
+          selection: new Set(s.selection),
+          editingId: s.editingId,
+          hoverId: s.hoverId,
+          drop: s.drop,
+          themeName: s.theme,
+          background: s.background,
+          grid: s.grid,
+          viewW: sizeRef.current.w,
+          viewH: sizeRef.current.h,
+        });
+      };
+    }
 
     // wheel must be non-passive to preventDefault
     const onWheel = (e: WheelEvent): void => {
