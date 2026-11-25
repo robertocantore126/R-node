@@ -48,8 +48,33 @@ export function studyChildren(sheet: Sheet, n: MindNode): string[] {
   const page = diagramPage(sheet);
   if (!page) return n.childrenIds;
   if (n.id === page) {
-    const reached = new Set(sheet.relationships.filter((r) => isTreeArrow(sheet, r)).map((r) => r.toId));
-    return n.childrenIds.filter((id) => !reached.has(id));
+    const tab = sheet.relationships.filter((r) => isTreeArrow(sheet, r));
+    const reached = new Set(tab.map((r) => r.toId));
+    const tops = n.childrenIds.filter((id) => !reached.has(id));
+    // Shapes in a closed loop of Tab arrows (reconnected by hand) are all
+    // "reached", yet no top leads to them: they become tops too, or the
+    // outline would silently drop them. The first of a loop brings the rest.
+    const visited = new Set<string>();
+    const stack = [...tops];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      for (const r of tab) if (r.fromId === id) stack.push(r.toId);
+    }
+    const loops: string[] = [];
+    for (const id of n.childrenIds) {
+      if (visited.has(id)) continue;
+      loops.push(id);
+      const more = [id];
+      while (more.length) {
+        const cur = more.pop()!;
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        for (const r of tab) if (r.fromId === cur) more.push(r.toId);
+      }
+    }
+    return [...tops, ...loops];
   }
   if (n.parentId !== page) return n.childrenIds;
   const tab = sheet.relationships.filter((r) => r.fromId === n.id && isTreeArrow(sheet, r)).map((r) => r.toId);

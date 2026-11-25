@@ -189,6 +189,13 @@ export function CanvasView(): JSX.Element {
   // Inline title field for a group's tab (double-click on its line/tab or
   // "Rename group" from the group menu).
   const [groupTitleEdit, setGroupTitleEdit] = useState<string | null>(null);
+  // A group deleted (shortcut, its last topic deleted...) while its menu or
+  // title field is up: both close for good, so an undo does not pop them back.
+  useEffect(() => {
+    const exists = (id: string): boolean => store.sheet.boundaries.some((g) => g.id === id);
+    if (groupMenu && !exists(groupMenu.groupId)) setGroupMenu(null);
+    if (groupTitleEdit && !exists(groupTitleEdit)) setGroupTitleEdit(null);
+  }, [state, groupMenu, groupTitleEdit, store]);
   // Ghost preview of an image being dragged to another node (internal
   // reassignment): world coords of the cursor + the image to draw. Read by
   // paint/currentRenderState on every frame; the renderer draws the cached

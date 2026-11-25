@@ -1,4 +1,4 @@
-import { endpointFreeformOwner, FREEFORM_HEADER, freeformOwner, isBarePicture } from "../core/freeform";
+import { endpointFreeformOwner, FREEFORM_HEADER, freeformOwner, isBarePicture, isDiagramPage } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, svgPathData } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { connectorRibbon } from "../layout/connectorRibbon";
@@ -508,6 +508,8 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
 
   for (const p of placed) {
     if (!p.node.style.freeform) continue;
+    // A diagram's page is the paper, not a canvas box: no frame, no "Freeform".
+    if (isDiagramPage(sheet, p.node.id)) continue;
     const box = p.node.style.container;
     if (box) {
       // A diagram container, as on screen: header band, centred title, no grid.

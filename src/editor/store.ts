@@ -3728,9 +3728,22 @@ export class EditorStore {
     }
     if (ops.length) {
       this.execOps(ops);
+      this.closeOrphanStudyWindows();
       this.setSelectionTarget({ kind: "none" });
       this.notify();
     }
+  }
+
+  /**
+   * A quiz or flashcard window whose owner is gone — a deleted topic, or a
+   * group deleted because all its topics were — closes, as deleteGroup does.
+   * Left open it pointed at nothing, and an undo brought it back on screen.
+   */
+  private closeOrphanStudyWindows(): void {
+    const gone = (o: { nodeId: string } | { groupId: string }): boolean =>
+      "groupId" in o ? !this.sheet.boundaries.some((g) => g.id === o.groupId) : !this.model.node(o.nodeId);
+    if (this.state.quizOpen && gone(this.state.quizOpen)) this.closeQuiz();
+    if (this.state.flashcardsOpen && gone(this.state.flashcardsOpen)) this.closeFlashcards();
   }
 
   private isDescendant(ancestorId: string, id: string): boolean {

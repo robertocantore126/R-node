@@ -1,5 +1,5 @@
 import { phoneMapPages } from "./pdfPhone";
-import { endpointFreeformOwner, FREEFORM_HEADER, isBarePicture } from "../core/freeform";
+import { endpointFreeformOwner, FREEFORM_HEADER, isBarePicture, isDiagramPage } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, pdfPathOps } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
@@ -735,6 +735,9 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   };
 
   const drawFreeform = (cmds: string[], p: Placed, fr: Frame): void => {
+    // A diagram's page is the paper, not a canvas box: no frame, no "Freeform",
+    // no "Double-click to add..." hint.
+    if (isDiagramPage(sheet, p.node.id)) return;
     const fill=p.node.style.fill??theme.freeformFill??theme.background;
     const box=p.node.style.container;
     if (box) {

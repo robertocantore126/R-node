@@ -122,6 +122,60 @@ describe("study outline (quiz / flashcards JSON source) in a diagram", () => {
   });
 });
 
+describe("study outline: a closed loop of Tab arrows", () => {
+  it("from the page, shapes in a loop no top reaches are still written, once", () => {
+    const { store, page, A, B, C, D } = tree();
+    // Reconnect by hand into a loop: C -> D -> C, cut off from A.
+    for (const r of store.sheet.relationships.filter((x) => x.tree && (x.toId === C || x.toId === D))) {
+      store.execOps([{ opId: `d${r.id}`, actorId: "t", ts: "", type: "deleteRelationship", id: r.id, relationship: r }]);
+    }
+    const loop = (from: string, to: string) => ({ opId: `c${from}${to}`, actorId: "t", ts: "", type: "createRelationship" as const,
+      relationship: { id: `rel-${from}-${to}`, fromId: from, toId: to, tree: true } });
+    store.execOps([loop(C, D), loop(D, C)]);
+    const ids = studyBranchIds(store.sheet, page);
+    for (const id of [A, B, C, D]) expect(ids.has(id)).toBe(true);
+    const out = studyOutline(store.sheet, [page], "plain");
+    expect(out.match(/Aristotele/g)).toHaveLength(1);
+    expect(out.match(/Imperativo categorico/g)).toHaveLength(1);
+  });
+});
+
+describe("closing study windows whose owner was deleted", () => {
+  const quiz = JSON.stringify({ app: "r-node", kind: "quiz", questions: [{ q: "Chi?", answers: ["a", "b", "c", "d"], correct: 1 }] });
+
+  it("deleting every topic of a group closes the group's open quiz; undo does not reopen it", async () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.rootNodeId;
+    store.select(root); store.createChild();
+    const kid = store.sheet.nodes[root].childrenIds.at(-1)!;
+    store.select(kid);
+    store.createGroupFromSelection();
+    const g = store.sheet.boundaries.at(-1)!;
+    (store as unknown as { state: { groupSel: string | null } }).state.groupSel = g.id;
+    await store.paste(null, quiz);
+    const quizId = store.sheet.boundaries.find((x) => x.id === g.id)!.quizzes![0].id;
+    store.openGroupQuiz(g.id, quizId);
+    expect(store.getSnapshot().quizOpen).not.toBe(null);
+    store.deleteNodes([kid]);
+    expect(store.sheet.boundaries.some((x) => x.id === g.id)).toBe(false);
+    expect(store.getSnapshot().quizOpen).toBe(null);
+    store.undo();
+    expect(store.getSnapshot().quizOpen).toBe(null);
+  });
+
+  it("deleting a topic closes its own open quiz", async () => {
+    const store = new EditorStore(memoryAdapter);
+    const root = store.sheet.rootNodeId;
+    store.select(root); store.createChild();
+    const kid = store.sheet.nodes[root].childrenIds.at(-1)!;
+    store.select(kid);
+    await store.paste(kid, quiz);
+    store.openQuiz(kid, store.sheet.nodes[kid].style.quizzes![0].id);
+    store.deleteNodes([kid]);
+    expect(store.getSnapshot().quizOpen).toBe(null);
+  });
+});
+
 describe("study outline: groups and links", () => {
   it("a link is written as [link], a group as [group]", () => {
     const store = new EditorStore(memoryAdapter);
