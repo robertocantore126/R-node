@@ -102,9 +102,9 @@ describe("canvas resize from every corner", () => {
     const beforeFont = store.doc.requireNode(textId).style.fontSize ?? 14;
     expect(beforeFont).toBe(14);
 
-    // Drag SE corner outward with Shift (keepRatio=true) -> ~1.5x proportional fontSize scale
+    // Drag SE corner outward with Shift + Ctrl (keepRatio=true, freeTransform=true) -> ~1.5x proportional fontSize scale
     store.beginItemResize(textId, "se");
-    store.setItemResizeDraft(beforeGeo.w * 0.5, beforeGeo.h * 0.5, true);
+    store.setItemResizeDraft(beforeGeo.w * 0.5, beforeGeo.h * 0.5, true, 0, true);
     store.commitItemResize();
 
     const after = store.doc.requireNode(textId);
@@ -114,17 +114,18 @@ describe("canvas resize from every corner", () => {
     expect(afterGeo.y).toBe(beforeGeo.y);
     expect(afterGeo.w).toBeGreaterThan(beforeGeo.w);
 
-    // Drag NW corner outward with Shift -> SE corner stays anchored
+    // Drag NW corner outward with Shift + Ctrl -> SE corner stays anchored
     const seX = afterGeo.x + afterGeo.w;
     const seY = afterGeo.y + afterGeo.h;
     store.beginItemResize(textId, "nw");
-    store.setItemResizeDraft(-afterGeo.w * 0.5, -afterGeo.h * 0.5, true);
+    store.setItemResizeDraft(-afterGeo.w * 0.5, -afterGeo.h * 0.5, true, 0, true);
     store.commitItemResize();
 
-    const afterNw = store.itemGeometry(textId)!;
-    expect(store.doc.requireNode(textId).style.fontSize).toBe(31.5);
-    expect(Math.abs(afterNw.x + afterNw.w - seX)).toBeLessThanOrEqual(2);
-    expect(Math.abs(afterNw.y + afterNw.h - seY)).toBeLessThanOrEqual(2);
+    const afterNw = store.doc.requireNode(textId);
+    const afterNwGeo = store.itemGeometry(textId)!;
+    expect(afterNw.style.fontSize).toBe(31.5);
+    expect(Math.abs(afterNwGeo.x + afterNwGeo.w - seX)).toBeLessThanOrEqual(2);
+    expect(Math.abs(afterNwGeo.y + afterNwGeo.h - seY)).toBeLessThanOrEqual(2);
 
     // Undo restores previous size & position in one step
     store.undo();
@@ -133,7 +134,7 @@ describe("canvas resize from every corner", () => {
 
     // Cancel restores pre-drag state
     store.beginItemResize(textId, "se");
-    store.setItemResizeDraft(100, 100);
+    store.setItemResizeDraft(100, 100, false, 0, true);
     store.cancelItemResize();
     expect(store.doc.requireNode(textId).style.fontSize).toBe(21);
   });
@@ -147,14 +148,14 @@ describe("canvas resize from every corner", () => {
     store.setNodeStyle(id, { width: 150 });
     const g0 = store.itemGeometry(id)!;
     store.beginItemResize(id, "e");
-    store.setItemResizeDraft(g0.w, 0);
+    store.setItemResizeDraft(g0.w, 0, false, 0, true);
     store.commitItemResize();
     expect(store.doc.requireNode(id).style.textScaleX).toBe(2);
     expect(store.doc.requireNode(id).style.width).toBe(150); // the unstretched width
     expect(store.itemGeometry(id)!.w).toBe(300);
     // Shift-scaling a stretched box keeps the stretch applied once too.
     store.beginItemResize(id, "se");
-    store.setItemResizeDraft(150, 0, true);
+    store.setItemResizeDraft(150, 0, true, 0, true);
     store.commitItemResize();
     expect(store.doc.requireNode(id).style.width).toBe(225);
     expect(Math.abs(store.itemGeometry(id)!.w - 450)).toBeLessThanOrEqual(2);
@@ -168,7 +169,7 @@ describe("canvas resize from every corner", () => {
     store.cancelEdit?.();
     const g0 = store.itemGeometry(id)!;
     store.beginItemResize(id, "e");
-    store.setItemResizeDraft(37, 0, false, 10);
+    store.setItemResizeDraft(37, 0, false, 10, true);
     store.commitItemResize();
     const g1 = store.itemGeometry(id)!;
     const right = g1.x + g1.w;
@@ -186,9 +187,9 @@ describe("canvas resize from every corner", () => {
     store.setSelectionStyle({ freeTransform: true }, [textId]);
 
     const beforeGeo = store.itemGeometry(textId)!;
-    // Drag east edge outward by 100% of width -> textScaleX ≈ 2, fontSize unchanged
+    // Drag east edge outward by 100% of width (Ctrl) -> textScaleX ≈ 2, fontSize unchanged
     store.beginItemResize(textId, "e");
-    store.setItemResizeDraft(beforeGeo.w, 0);
+    store.setItemResizeDraft(beforeGeo.w, 0, false, 0, true);
     store.commitItemResize();
 
     const stretched = store.doc.requireNode(textId);
@@ -196,12 +197,12 @@ describe("canvas resize from every corner", () => {
     expect(stretched.style.textScaleX).toBe(2);
     expect(store.itemGeometry(textId)!.w).toBeGreaterThanOrEqual(beforeGeo.w * 2 - 2);
 
-    // Drag north edge upward by 50% of height -> 2× wide, 1.5× tall: the even
+    // Drag north edge upward by 50% of height (Ctrl) -> 2× wide, 1.5× tall: the even
     // 1.5 goes into the font, the rest stays a stretch; bottom stays anchored.
     const geoBeforeN = store.itemGeometry(textId)!;
     const bottomY = geoBeforeN.y + geoBeforeN.h;
     store.beginItemResize(textId, "n");
-    store.setItemResizeDraft(0, -geoBeforeN.h * 0.5);
+    store.setItemResizeDraft(0, -geoBeforeN.h * 0.5, false, 0, true);
     store.commitItemResize();
 
     expect(store.doc.requireNode(textId).style.fontSize).toBe(21);
@@ -225,7 +226,7 @@ describe("canvas resize from every corner", () => {
     store.cancelItemRotate();
     expect(store.doc.requireNode(textId).style.rotation).toBeUndefined();
 
-    // Drag SE corner without Shift -> changes width and height independently (no ratio lock)
+    // Drag SE corner without Shift (with Ctrl) -> changes width and height independently (no ratio lock)
     // (compared as total scale per axis: font size × stretch).
     const total = (): [number, number] => {
       const s = store.doc.requireNode(textId).style, f = (s.fontSize ?? 14) / 14;
@@ -234,7 +235,7 @@ describe("canvas resize from every corner", () => {
     const curGeo = store.itemGeometry(textId)!;
     const [cx0, cy0] = total();
     store.beginItemResize(textId, "se");
-    store.setItemResizeDraft(curGeo.w * 0.5, curGeo.h * 0.25, false);
+    store.setItemResizeDraft(curGeo.w * 0.5, curGeo.h * 0.25, false, 0, true);
     store.commitItemResize();
     const [cx1, cy1] = total();
     expect(cx1).toBeCloseTo(cx0 * 1.5, 1);
@@ -250,7 +251,7 @@ describe("canvas resize from every corner", () => {
     return { store, id };
   };
 
-  it("keeps its line breaks when scaled far up or down (no re-wrap at 280 px)", () => {
+  it("keeps its line breaks when scaled far up or down with Ctrl (no re-wrap at 280 px)", () => {
     const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
     store.createFreeformTopic(store.sheet.rootNodeId);
     const board = store.doc.requireNode(store.getSnapshot().selection[0]);
@@ -261,7 +262,7 @@ describe("canvas resize from every corner", () => {
       for (const k of [4, 0.5]) {
         const g0 = store.itemGeometry(id)!;
         store.beginItemResize(id, "se");
-        store.setItemResizeDraft(g0.w * (k - 1), g0.h * (k - 1), true);
+        store.setItemResizeDraft(g0.w * (k - 1), g0.h * (k - 1), true, 0, true);
         store.commitItemResize();
         const g1 = store.itemGeometry(id)!;
         // Same lines: the height scales with the font. A re-wrap adds or
@@ -273,12 +274,12 @@ describe("canvas resize from every corner", () => {
     }
   });
 
-  it("folds the even part of a stretch into the font size, with no 5× cap", () => {
+  it("folds the even part of a stretch into the font size with Ctrl, with no 5× cap", () => {
     const { store, id } = freshItem();
     const g = store.itemGeometry(id)!;
-    // Corner without Shift to 6× wide, 3× tall: font 3×, stretch 2× in X.
+    // Corner without Shift (with Ctrl) to 6× wide, 3× tall: font 3×, stretch 2× in X.
     store.beginItemResize(id, "se");
-    store.setItemResizeDraft(g.w * 5, g.h * 2);
+    store.setItemResizeDraft(g.w * 5, g.h * 2, false, 0, true);
     store.commitItemResize();
     const s = store.doc.requireNode(id).style;
     expect(s.fontSize).toBe(42);
@@ -287,28 +288,77 @@ describe("canvas resize from every corner", () => {
     // An edge alone goes past the old 5× limit.
     const g1 = store.itemGeometry(id)!;
     store.beginItemResize(id, "e");
-    store.setItemResizeDraft(g1.w * 7, 0);
+    store.setItemResizeDraft(g1.w * 7, 0, false, 0, true);
     store.commitItemResize();
     expect(store.doc.requireNode(id).style.textScaleX).toBeCloseTo(16, 1);
     expect(Math.abs(store.itemGeometry(id)!.w - g1.w * 8)).toBeLessThanOrEqual(8);
   });
 
-  it("scales the text of a shape in a canvas with its box", () => {
+  it("scales the text of a shape in a canvas with Ctrl, and normal drag resizes box without changing font", () => {
     const { store, id } = freshItem("rect");
     const g = store.itemGeometry(id)!;
     store.beginItemResize(id, "se");
-    store.setItemResizeDraft(g.w, g.h, true);
+    store.setItemResizeDraft(g.w, g.h, true, 0, true);
     store.commitItemResize();
     const s = store.doc.requireNode(id).style;
     expect(s.fontSize).toBe(28);
     expect([s.width, s.height]).toEqual([g.w * 2, g.h * 2]);
-    // Opting out restores the plain box resize: the text keeps its size.
-    store.setSelectionStyle({ freeTransform: false }, [id]);
+    // Normal drag (without Ctrl) keeps fontSize and updates width/height.
     store.beginItemResize(id, "se");
     store.setItemResizeDraft(g.w, 0);
     store.commitItemResize();
     expect(store.doc.requireNode(id).style.fontSize).toBe(28);
     expect(store.doc.requireNode(id).style.width).toBe(g.w * 3);
+  });
+
+  it("normal drag without Ctrl resizes width/height and reflows wrapped text without scaling font", () => {
+    const store = new EditorStore({ label: "test", async load() { return []; }, async save() {} });
+    store.createFreeformTopic(store.sheet.rootNodeId);
+    const board = store.doc.requireNode(store.getSnapshot().selection[0]);
+    const id = store.createFreeformItem(board.id, board.position.x + 120, board.position.y + 120, "One long sentence that wraps into multiple lines when narrowed")!;
+    store.cancelEdit?.();
+    store.startEdit(id);
+    store.setEditingDraftRuns([
+      { text: "One long sentence that ", fontSize: 16 },
+      { text: "wraps into multiple lines when narrowed", fontSize: 14 },
+    ]);
+    store.commitEdit();
+
+    const g0 = store.itemGeometry(id)!;
+    // Narrowing with an east edge drag sets width, leaves height undefined so
+    // wrapped text increases box height, and leaves font sizes/stretches alone.
+    store.beginItemResize(id, "e");
+    store.setItemResizeDraft(-(g0.w - 90), 0);
+    store.commitItemResize();
+
+    const afterEdge = store.doc.requireNode(id);
+    const gEdge = store.itemGeometry(id)!;
+    expect(afterEdge.style.width).toBe(90);
+    expect(afterEdge.style.height).toBeUndefined();
+    expect(afterEdge.style.fontSize).toBeUndefined();
+    expect(afterEdge.style.textScaleX).toBeUndefined();
+    expect(afterEdge.style.textScaleY).toBeUndefined();
+    expect(afterEdge.titleRuns?.map((r) => r.fontSize)).toEqual([16, 14]);
+    expect(gEdge.h).toBeGreaterThan(g0.h);
+
+    // Corner drag sets both width and height, still without changing font size.
+    store.beginItemResize(id, "se");
+    store.setItemResizeDraft(40, 30);
+    store.commitItemResize();
+    const afterCorner = store.doc.requireNode(id);
+    expect(afterCorner.style.width).toBe(gEdge.w + 40);
+    expect(afterCorner.style.height).toBe(gEdge.h + 30);
+    expect(afterCorner.style.fontSize).toBeUndefined();
+
+    // Toggling Ctrl on then off mid-drag restores original fontSize & titleRuns.
+    store.beginItemResize(id, "se");
+    store.setItemResizeDraft(80, 80, false, 0, true);
+    expect(store.doc.requireNode(id).style.fontSize).toBeGreaterThan(14);
+    store.setItemResizeDraft(20, 20, false, 0, false);
+    store.commitItemResize();
+    const afterToggle = store.doc.requireNode(id);
+    expect(afterToggle.style.fontSize).toBeUndefined();
+    expect(afterToggle.titleRuns?.map((r) => r.fontSize)).toEqual([16, 14]);
   });
 
   it("only items of a canvas use free transform", () => {

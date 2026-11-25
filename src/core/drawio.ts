@@ -206,6 +206,37 @@ export function shapeFor(kind: string, s: Record<string, string>): TopicShape {
       return "hexagon";
     case "cloud":
       return "cloud";
+    case "trapezoid":
+    case "manual_operation":
+      return "trapezoid";
+    case "manualInput":
+      return "manualInput";
+    case "off-page_reference":
+    case "offPageConnector":
+      return "offPage";
+    case "internalStorage":
+    case "internal_storage":
+      return "internalStorage";
+    case "step":
+    case "process2":
+      return "step";
+    case "singleArrow":
+    case "arrow":
+      return "arrowRight";
+    case "doubleArrow":
+      return "doubleArrow";
+    case "cross":
+    case "plus":
+      return "cross";
+    case "star":
+      return "star";
+    case "octagon":
+    case "loop_limit":
+      return "octagon";
+    case "cube":
+      return "cube";
+    case "callout":
+      return "callout";
     case "cylinder":
     case "cylinder2":
     case "cylinder3":
@@ -214,8 +245,9 @@ export function shapeFor(kind: string, s: Record<string, string>): TopicShape {
     case "stored_data":
     case "direct_data":
       return "cylinder";
-    case "document":
     case "multi-Document":
+      return "multiDocument";
+    case "document":
     case "tape":
       return "document";
     case "parallelogram":
@@ -237,8 +269,9 @@ export function shapeFor(kind: string, s: Record<string, string>): TopicShape {
     case "actor":
     case "person":
       return "actor";
-    case "terminator":
     case "delay":
+      return "delay";
+    case "terminator":
     case "display":
       return "capsule";
     case "text":

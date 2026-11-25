@@ -1,4 +1,4 @@
-import { freeformOwner, FREEFORM_HEADER, isBarePicture, isDiagramPage, isFreeTransform } from "../core/freeform";
+import { endpointFreeformOwner, freeformOwner, FREEFORM_HEADER, isBarePicture, isDiagramPage, isFreeTransform } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, tracePath } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import type { InkStroke } from "../core/types";
@@ -16,7 +16,7 @@ import { displayedMistakeNodes, drawQuizMistakeArrow } from "./quizMarkers";
 import type { Group, ImageSlot, MindNode, RelAnchor, Relationship, ResolvedBorder, Sheet, ShapePart, StructureType, Orientation, Summary, TextRun } from "../core/types";
 import { connectHandles, headLen, headShape, REL_END_R, relationshipRoute, relHeads, relWidth, routeDistance, routeEnv, bendHandles, boxesMid, worldWaypoints, type RouteEnv, type HeadShape, type Rect, type RelRoute, type BendHandle } from "../layout/relationship";
 import { borderDash, BRANCH_STROKE, DEFAULT_GROUP_BORDER_WIDTH, DEFAULT_NODE_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel } from "../core/types";
-import { groupBoxes, groupRadius, wavePoints, type Box, type GroupBox } from "../layout/groups";
+import { groupBoxes, groupRadius, groupShown, wavePoints, type Box, type GroupBox } from "../layout/groups";
 import { nodeImageIds } from "../core/ops";
 import { nodeRuns, OWN_LABEL_LINE, OWN_LABEL_PAD, wrapPlainLines } from "../core/text";
 import { resolvePaint } from "../core/shapeArt";
@@ -73,6 +73,8 @@ export interface RenderState {
   relSel?: string | null;
   groupSel?: string | null;
   summarySel?: string | null;
+  /** Draw every link (Group.link), not only those of the selection. */
+  showLinks?: boolean;
   /** Node whose image is selected (mutually exclusive with node selection). */
   imageSel?: string | null;
   /** Which slot of `imageSel` was clicked (defaults to "top"). */
@@ -1103,7 +1105,7 @@ export class Renderer {
      * Requiring both is what made a connector vanish as soon as its parent
      * scrolled off, while the child was still in view.
      */
-    const linkVisible = (a: Placed, b: Placed): boolean =>
+    const linkVisible = (a: Box, b: Box): boolean =>
       state.showHidden === true ||
       (Math.max(a.x + a.w, b.x + b.w) >= viewMinX &&
         Math.min(a.x, b.x) <= viewMaxX &&
@@ -1134,15 +1136,16 @@ export class Renderer {
     // arrow inside it. Arrows on the map stay under the topics, as always.
     let rels = 0;
     let relsDrawn = 0;
-    const overRels: [Placed, Placed, Relationship][] = [];
+    const overRels: [Box, Box, Relationship][] = [];
+    const relGeo = state.sheet.boundaries.length > 0 ? this.groupGeometry(state, byId) : undefined;
     for (const rel of state.sheet.relationships) {
       rels++;
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
+      const a = this.relEndBox(state, rel.fromId, byId, relGeo);
+      const b = this.relEndBox(state, rel.toId, byId, relGeo);
       if (state.relDraft?.replaces === rel.id) continue;
       if (a && b && linkVisible(a, b)) {
         relsDrawn++;
-        if (freeformOwner(state.sheet, rel.fromId) && freeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
+        if (endpointFreeformOwner(state.sheet, rel.fromId) && endpointFreeformOwner(state.sheet, rel.toId)) overRels.push([a, b, rel]);
         else this.drawRelationshipShadowed(theme, a, b, rel, state, shadowsOn);
       }
     }
@@ -3030,7 +3033,7 @@ export class Renderer {
 
   /** A relationship arrow, with a real blurred shadow when V3 is on. Arrows
    *  are few, so shadowBlur is affordable here; it is skipped while moving. */
-  private drawRelationshipShadowed(theme: RenderTheme, a: Placed, b: Placed, rel: Relationship, state: RenderState, shadow: boolean): void {
+  private drawRelationshipShadowed(theme: RenderTheme, a: Box, b: Box, rel: Relationship, state: RenderState, shadow: boolean): void {
     const ctx = this.ctx;
     if (shadow) {
       const k = state.camera.scale * this.dpr; // shadow* ignore the transform
@@ -4080,11 +4083,24 @@ export class Renderer {
     return routeEnv(state.sheet, this.placedNodes(state), rel);
   }
 
+  /** Resolve a relationship endpoint box (either a topic or a group boundary). */
+  private relEndBox(state: RenderState, id: string, byId: Map<string, Placed>, geo?: Map<string, GroupBox>): Box | null {
+    const nodeBox = byId.get(id);
+    if (nodeBox) return nodeBox;
+    if (state.sheet.boundaries.length === 0) return null;
+    return (geo ?? this.groupGeometry(state, byId)).get(id)?.box ?? null;
+  }
+
+  /** World-space box of a relationship endpoint (topic or group). */
+  relEndWorldRect(state: RenderState, id: string): Box | null {
+    return this.relEndBox(state, id, this.placedById(state));
+  }
+
   /** The world point a relationship's waypoints are measured from. */
   relOrigin(state: RenderState, rel: Relationship): { x: number; y: number } {
     const o = this.relEnv(state, rel).origin;
     if (o) return o;
-    const a = this.nodeWorldRect(state, rel.fromId), b = this.nodeWorldRect(state, rel.toId);
+    const a = this.relEndWorldRect(state, rel.fromId), b = this.relEndWorldRect(state, rel.toId);
     return a && b ? boxesMid(a, b) : { x: 0, y: 0 };
   }
 
@@ -4142,9 +4158,9 @@ export class Renderer {
     const draft = state.relDraft;
     if (draft) {
       const pt = { x: draft.pointer.x, y: draft.pointer.y, w: 0, h: 0 };
-      const a = draft.rel.fromId ? byId.get(draft.rel.fromId) : undefined;
-      const b = draft.rel.toId ? byId.get(draft.rel.toId) : undefined;
-      const target = draft.target ? byId.get(draft.target) : undefined;
+      const a = draft.rel.fromId ? this.relEndBox(state, draft.rel.fromId, byId) : null;
+      const b = draft.rel.toId ? this.relEndBox(state, draft.rel.toId, byId) : null;
+      const target = draft.target ? this.relEndBox(state, draft.target, byId) : null;
       if (target) {
         ctx.strokeStyle = theme.selection;
         ctx.lineWidth = 2 * k;
@@ -4155,8 +4171,8 @@ export class Renderer {
     }
     if (state.relSel) {
       const rel = state.sheet.relationships.find((r) => r.id === state.relSel);
-      const a = rel && byId.get(rel.fromId);
-      const b = rel && byId.get(rel.toId);
+      const a = rel && this.relEndBox(state, rel.fromId, byId);
+      const b = rel && this.relEndBox(state, rel.toId, byId);
       if (rel && a && b) {
         const route = this.relRoute(state, rel, a, b);
         for (const p of [route.start.tip, route.end.tip]) {
@@ -4188,11 +4204,16 @@ export class Renderer {
       }
       return;
     }
-    if (state.selection.size !== 1 || state.editingId) return;
-    const [id] = state.selection;
-    const p = byId.get(id);
-    if (!p || !freeformOwner(state.sheet, id)) return;
-    for (const h of connectHandles(p, this.curScale)) {
+    if (state.editingId) return;
+    let connectBox: Box | null = null;
+    if (state.selection.size === 1) {
+      const [id] = state.selection;
+      if (freeformOwner(state.sheet, id)) connectBox = byId.get(id) ?? null;
+    } else if (state.groupSel && endpointFreeformOwner(state.sheet, state.groupSel)) {
+      connectBox = this.relEndBox(state, state.groupSel, byId);
+    }
+    if (!connectBox) return;
+    for (const h of connectHandles(connectBox, this.curScale)) {
       ctx.beginPath();
       ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2);
       ctx.fillStyle = theme.selection;
@@ -4352,6 +4373,23 @@ export class Renderer {
     return { x: box.x + GROUP_LABEL_INSET, y: box.y - GROUP_LABEL_H / 2, w, h: GROUP_LABEL_H, text };
   }
 
+  /** World-space bounds of a group's title tab (or where a new title tab sits). */
+  groupTabWorldRect(state: RenderState, groupId: string): Box | null {
+    const g = state.sheet.boundaries.find((b) => b.id === groupId);
+    if (!g) return null;
+    const gb = groupBoxes(state.sheet, this.placedById(state)).get(groupId);
+    if (!gb) return null;
+    const tab = this.groupTab(g, gb.box);
+    if (tab) return { x: tab.x, y: tab.y, w: tab.w, h: tab.h };
+    const b = gb.box;
+    return {
+      x: b.x + GROUP_LABEL_INSET,
+      y: b.y - GROUP_LABEL_H / 2,
+      w: Math.min(120, Math.max(60, b.w - GROUP_LABEL_INSET * 2)),
+      h: GROUP_LABEL_H,
+    };
+  }
+
   private groupOnScreen(state: RenderState, b: Box): boolean {
     const s = state.camera.scale;
     if (b.x + b.w < state.camera.x - state.viewW / 2 / s - 40 || b.x > state.camera.x + state.viewW / 2 / s + 40) return false;
@@ -4374,6 +4412,11 @@ export class Renderer {
 
   /** Group fills go UNDER connectors and topics: a tint behind the branch,
    *  never a film over it. */
+  /** A link (Group.link) is drawn and clickable only while shown (groupShown). */
+  private groupVisible(state: RenderState, g: Group): boolean {
+    return groupShown(g, state);
+  }
+
   private drawGroupFills(state: RenderState, byId: Map<string, Placed>): void {
     if (!state.sheet.boundaries.some((g) => g.fill)) return;
     const ctx = this.ctx;
@@ -4382,7 +4425,7 @@ export class Renderer {
     const order = [...state.sheet.boundaries].sort((a, b) => (geo.get(b.id)?.covered.size ?? 0) - (geo.get(a.id)?.covered.size ?? 0));
     for (const g of order) {
       const gb = geo.get(g.id);
-      if (!g.fill || !gb || !this.groupOnScreen(state, gb.box)) continue;
+      if (!g.fill || !gb || !this.groupOnScreen(state, gb.box) || !this.groupVisible(state, g)) continue;
       ctx.save();
       ctx.globalAlpha = GROUP_FILL_ALPHA;
       ctx.fillStyle = g.fill;
@@ -4397,7 +4440,7 @@ export class Renderer {
     const geo = this.groupGeometry(state, byId);
     for (const g of state.sheet.boundaries) {
       const gb = geo.get(g.id);
-      if (!gb || !this.groupOnScreen(state, gb.occupied)) continue;
+      if (!gb || !this.groupOnScreen(state, gb.occupied) || !this.groupVisible(state, g)) continue;
       this.drawGroup(theme, g, gb.box, state.groupSel === g.id, s);
     }
     for (const sum of state.sheet.summaries) {
@@ -4538,12 +4581,13 @@ export class Renderer {
   /** Distance from a point to the relationship bezier, in world units. */
   hitTestRelationship(state: RenderState, wx: number, wy: number): string | null {
     const byId = this.placedById(state);
+    const geo = state.sheet.boundaries.length > 0 ? this.groupGeometry(state, byId) : undefined;
     const threshold = 8 / state.camera.scale;
     let best: string | null = null;
     let bestD = Infinity;
     for (const rel of state.sheet.relationships) {
-      const a = byId.get(rel.fromId);
-      const b = byId.get(rel.toId);
+      const a = this.relEndBox(state, rel.fromId, byId, geo);
+      const b = this.relEndBox(state, rel.toId, byId, geo);
       if (!a || !b) continue;
       // The drawn route, not the old centre-to-centre curve: an elbow or an
       // anchored line runs somewhere else entirely.
@@ -4556,12 +4600,12 @@ export class Renderer {
     return best;
   }
 
-  /** World rect of a placed topic plus its route endpoints for a relationship. */
+  /** World rect of a placed topic/group plus its route endpoints for a relationship. */
   relationshipEnds(state: RenderState, relId: string): { from: { x: number; y: number }; to: { x: number; y: number } } | null {
     const rel = state.sheet.relationships.find((r) => r.id === relId);
     if (!rel) return null;
-    const a = this.nodeWorldRect(state, rel.fromId);
-    const b = this.nodeWorldRect(state, rel.toId);
+    const a = this.relEndWorldRect(state, rel.fromId);
+    const b = this.relEndWorldRect(state, rel.toId);
     if (!a || !b) return null;
     const route = this.relRoute(state, rel, a, b);
     return { from: route.start.tip, to: route.end.tip };
@@ -4576,8 +4620,8 @@ export class Renderer {
   hitTestBend(state: RenderState, wx: number, wy: number, reach = REL_END_R + 3): BendHandle | null {
     if (!state.relSel) return null;
     const rel = state.sheet.relationships.find((r) => r.id === state.relSel);
-    const a = rel && this.nodeWorldRect(state, rel.fromId);
-    const b = rel && this.nodeWorldRect(state, rel.toId);
+    const a = rel && this.relEndWorldRect(state, rel.fromId);
+    const b = rel && this.relEndWorldRect(state, rel.toId);
     if (!rel || !a || !b) return null;
     const tol = reach / state.camera.scale;
     let best: BendHandle | null = null, bestD = Infinity;
@@ -4610,12 +4654,18 @@ export class Renderer {
     return null;
   }
 
-  /** The connection arrow of a selected freeform item under the pointer. */
+  /** The connection arrow of a selected freeform item or group under the pointer. */
   hitTestConnectHandle(state: RenderState, wx: number, wy: number): { id: string; anchor: RelAnchor } | null {
-    if (state.relSel || state.selection.size !== 1) return null;
-    const [id] = state.selection;
-    if (!freeformOwner(state.sheet, id)) return null;
-    const r = this.nodeWorldRect(state, id);
+    if (state.relSel) return null;
+    let id: string | null = null;
+    if (state.selection.size === 1) {
+      const [sel] = state.selection;
+      if (freeformOwner(state.sheet, sel)) id = sel;
+    } else if (state.groupSel && endpointFreeformOwner(state.sheet, state.groupSel)) {
+      id = state.groupSel;
+    }
+    if (!id) return null;
+    const r = this.relEndWorldRect(state, id);
     if (!r) return null;
     for (const h of connectHandles(r, state.camera.scale)) {
       if (Math.hypot(wx - h.x, wy - h.y) <= h.r * 1.4) return { id, anchor: h.anchor };
@@ -4623,14 +4673,35 @@ export class Renderer {
     return null;
   }
 
+  /** Hit-test only the title tabs of groups; smallest group wins when nested. */
+  hitTestGroupTab(state: RenderState, wx: number, wy: number): string | null {
+    const placed = this.placedById(state);
+    const geo = groupBoxes(state.sheet, placed);
+    let best: string | null = null;
+    let bestArea = Infinity;
+    for (const g of state.sheet.boundaries) {
+      const gb = geo.get(g.id);
+      if (!gb || !this.groupVisible(state, g)) continue;
+      const tab = this.groupTab(g, gb.box);
+      if (!tab || wx < tab.x || wx > tab.x + tab.w || wy < tab.y || wy > tab.y + tab.h) continue;
+      const area = gb.box.w * gb.box.h;
+      if (area < bestArea) {
+        bestArea = area;
+        best = g.id;
+      }
+    }
+    return best;
+  }
+
   /**
    * A group is hit on its LINE (a band a few screen pixels wide) or its title
-   * tab — not anywhere inside the box (G4). The whole interior used to count,
-   * which made a marquee started inside a group impossible and let the first
-   * of two overlapping groups win every click. Among several hits the smallest
-   * box wins: a click on a nested group's line means that group.
+   * tab — not anywhere inside the box by default (G4), so a marquee started
+   * inside a group still works. Context menus pass `{ includeInterior: true }`
+   * so right-clicking anywhere inside the group opens its menu unless a topic
+   * was hit directly. Among several hits the smallest box wins: a click on a
+   * nested group resolves to that inner group.
    */
-  hitTestGroup(state: RenderState, wx: number, wy: number): string | null {
+  hitTestGroup(state: RenderState, wx: number, wy: number, opts?: { includeInterior?: boolean }): string | null {
     const placed = this.placedById(state);
     const geo = groupBoxes(state.sheet, placed);
     const s = state.camera.scale;
@@ -4638,14 +4709,15 @@ export class Renderer {
     let bestArea = Infinity;
     for (const g of state.sheet.boundaries) {
       const gb = geo.get(g.id);
-      if (!gb) continue;
+      if (!gb || !this.groupVisible(state, g)) continue;
       const b = gb.box;
       const tol = Math.max(6, (g.borderWidth ?? DEFAULT_GROUP_BORDER_WIDTH) / 2 + 3) / s + (g.shape === "wave" ? 3 : 0);
       const inOuter = wx >= b.x - tol && wx <= b.x + b.w + tol && wy >= b.y - tol && wy <= b.y + b.h + tol;
       const inInner = wx > b.x + tol && wx < b.x + b.w - tol && wy > b.y + tol && wy < b.y + b.h - tol;
       const tab = this.groupTab(g, b);
       const onTab = !!tab && wx >= tab.x && wx <= tab.x + tab.w && wy >= tab.y && wy <= tab.y + tab.h;
-      if (!onTab && !(inOuter && !inInner)) continue;
+      const hitBox = opts?.includeInterior ? inOuter : (inOuter && !inInner);
+      if (!onTab && !hitBox) continue;
       const area = b.w * b.h;
       if (area < bestArea) {
         bestArea = area;
@@ -5266,7 +5338,9 @@ export class Renderer {
     return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
   }
 
-  private paintFull(_ctx: CanvasRenderingContext2D, state: RenderState, theme: RenderTheme): void {
+  private paintFull(_ctx: CanvasRenderingContext2D, shown: RenderState, theme: RenderTheme): void {
+    // Links are invisible: an export never draws them, whatever is selected.
+    const state: RenderState = { ...shown, showLinks: false, selection: new Set(), groupSel: null };
     const all = this.placedNodes({ ...state, showHidden: true });
     const byId = new Map(all.map((p) => [p.node.id, p]));
     for (const p of all) if (p.node.style.freeform) this.drawFreeform(theme, p);

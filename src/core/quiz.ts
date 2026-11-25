@@ -74,21 +74,41 @@ export function quizHasMistakes(quiz: QuizInfo): boolean {
     : !!quiz.score && quiz.score.last < quiz.questions.length;
 }
 
-/** Explicit question links only; unlinked/obsolete questions fall back to their quiz owner. */
+function collectQuizMistakes(
+  quizzes: QuizInfo[] | undefined,
+  allowed: Set<string>,
+  fallback: string[],
+  result: Set<string>,
+): void {
+  for (const quiz of quizzes ?? []) {
+    if (!quizHasMistakes(quiz)) continue;
+    if (!Array.isArray(quiz.lastAnswers) || quiz.lastAnswers.length !== quiz.questions.length) {
+      for (const id of fallback) result.add(id);
+      continue;
+    }
+    quiz.questions.forEach((question, i) => {
+      if (quiz.lastAnswers![i] === question.correct) return;
+      const targets = Array.isArray(question.sourceNodeIds) ? question.sourceNodeIds.filter((id) => allowed.has(id)) : [];
+      for (const id of targets.length ? targets : fallback) result.add(id);
+    });
+  }
+}
+
+/** Explicit question links only; unlinked/obsolete questions fall back to their quiz owner (or group members). */
 export function quizMistakeNodeIds(sheet: Sheet): Set<string> {
   const result = new Set<string>();
   for (const owner of Object.values(sheet.nodes)) {
     if (!owner.style.showQuizMistakes) continue;
-    const allowed = quizBranchIds(sheet,owner.id);
-    for (const quiz of owner.style.quizzes ?? []) {
-      if (!quizHasMistakes(quiz)) continue;
-      if (!Array.isArray(quiz.lastAnswers) || quiz.lastAnswers.length !== quiz.questions.length) { result.add(owner.id); continue; }
-      quiz.questions.forEach((question,i) => {
-        if (quiz.lastAnswers![i] === question.correct) return;
-        const targets = Array.isArray(question.sourceNodeIds) ? question.sourceNodeIds.filter(id => allowed.has(id)) : [];
-        for (const id of targets.length ? targets : [owner.id]) result.add(id);
-      });
+    collectQuizMistakes(owner.style.quizzes, quizBranchIds(sheet, owner.id), [owner.id], result);
+  }
+  for (const group of sheet.boundaries) {
+    if (!group.showQuizMistakes) continue;
+    const fallback = group.memberIds.filter((id) => !!sheet.nodes[id]);
+    const allowed = new Set<string>();
+    for (const id of fallback) {
+      for (const subId of quizBranchIds(sheet, id)) allowed.add(subId);
     }
+    collectQuizMistakes(group.quizzes, allowed, fallback, result);
   }
   return result;
 }

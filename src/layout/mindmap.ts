@@ -104,6 +104,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
   const marginBefore = new Map<string, number>();
   const marginAfter = new Map<string, number>();
   for (const g of sheet.boundaries) {
+    if (g.link) continue; // a link is invisible: no room, no cut
     for (const run of groupRuns(sheet, g)) {
       if (run.members.length === 0) continue;
       const first = run.members[0];
@@ -359,6 +360,7 @@ export function layoutSheet(sheet: Sheet, force = false, measurer?: TextMeasurer
           };
           const noCut = new Set<number>();
           for (const g of sheet.boundaries) {
+            if (g.link) continue; // a link is invisible: no room, no cut
             const idx = g.memberIds.map(branchIndex).filter((i) => i >= 0);
             if (idx.length < 2) continue;
             for (let c = Math.min(...idx) + 1; c <= Math.max(...idx); c++) noCut.add(c);

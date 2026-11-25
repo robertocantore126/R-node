@@ -17,7 +17,11 @@ export type PathCmd =
   | ["C", number, number, number, number, number, number]
   | ["Z"];
 
-export const DIAGRAM_SHAPES = ["ellipse", "cylinder", "document", "parallelogram", "triangle", "process", "note", "actor"] as const;
+export const DIAGRAM_SHAPES = [
+  "ellipse", "cylinder", "document", "parallelogram", "triangle", "process", "note", "actor",
+  "trapezoid", "manualInput", "delay", "offPage", "internalStorage", "multiDocument",
+  "step", "arrowRight", "doubleArrow", "cross", "star", "octagon", "cube", "callout", "cloud",
+] as const;
 export type DiagramShape = (typeof DIAGRAM_SHAPES)[number];
 
 export function isDiagramShape(shape: string | undefined): shape is DiagramShape {
@@ -117,7 +121,132 @@ export function diagramShapePath(shape: DiagramShape, x: number, y: number, w: n
         detail: [["M", x + w - f, y], ["L", x + w - f, y + f], ["L", x + w, y + f]],
       };
     }
+    case "trapezoid": {
+      // Manual operation: narrower at the top.
+      const s = Math.min(w * 0.2, 20);
+      return { outline: poly([[x + s, y], [x + w - s, y], [x + w, y + h], [x, y + h]]), detail: [] };
+    }
+    case "manualInput": {
+      // A keyboard's slanted top edge.
+      const a = Math.min(h * 0.3, 20);
+      return { outline: poly([[x, y + a], [x + w, y], [x + w, y + h], [x, y + h]]), detail: [] };
+    }
+    case "delay": {
+      // Flat left side, round right side (the "D").
+      const ry = h / 2, rx = Math.min(w / 2, ry), cy = y + ry, ex = x + w - rx;
+      return {
+        outline: [
+          ["M", x, y], ["L", ex, y],
+          ["C", ex + rx * K, y, x + w, cy - ry * K, x + w, cy],
+          ["C", x + w, cy + ry * K, ex + rx * K, y + h, ex, y + h],
+          ["L", x, y + h], ["Z"],
+        ],
+        detail: [],
+      };
+    }
+    case "offPage": {
+      // Off-page connector: a box with a point at the bottom.
+      const a = Math.min(h * 0.3, 20);
+      return { outline: poly([[x, y], [x + w, y], [x + w, y + h - a], [x + w / 2, y + h], [x, y + h - a]]), detail: [] };
+    }
+    case "internalStorage": {
+      const b = Math.min(w * 0.15, 12), c = Math.min(h * 0.2, 12);
+      return {
+        outline: poly([[x, y], [x + w, y], [x + w, y + h], [x, y + h]]),
+        detail: [["M", x + b, y], ["L", x + b, y + h], ["M", x, y + c], ["L", x + w, y + c]],
+      };
+    }
+    case "multiDocument": {
+      // Two sheets behind a document, each offset up-right by `o`.
+      const o = Math.min(6, w * 0.06, h * 0.08);
+      const W = w - 2 * o, a = (h - 2 * o) * 0.1;
+      return {
+        outline: [
+          ["M", x, y + 2 * o], ["L", x + o, y + 2 * o], ["L", x + o, y + o], ["L", x + 2 * o, y + o], ["L", x + 2 * o, y],
+          ["L", x + w, y], ["L", x + w, y + h - 2 * o], ["L", x + w - o, y + h - 2 * o], ["L", x + w - o, y + h - o],
+          ["L", x + W, y + h - o], ["L", x + W, y + h - a],
+          ["C", x + W * 0.6, y + h - a * 3, x + W * 0.4, y + h + a, x, y + h - a],
+          ["Z"],
+        ],
+        detail: [
+          ["M", x + 2 * o, y + o], ["L", x + w - o, y + o], ["L", x + w - o, y + h - 2 * o],
+          ["M", x + o, y + 2 * o], ["L", x + W, y + 2 * o], ["L", x + W, y + h - o],
+        ],
+      };
+    }
+    case "step": {
+      // A chevron: a step of a process.
+      const s = Math.min(w * 0.25, h * 0.5, 20);
+      return { outline: poly([[x, y], [x + w - s, y], [x + w, y + h / 2], [x + w - s, y + h], [x, y + h], [x + s, y + h / 2]]), detail: [] };
+    }
+    case "arrowRight": {
+      const hl = Math.min(w * 0.35, h * 0.9), t = y + h * 0.25, b = y + h * 0.75;
+      return { outline: poly([[x, t], [x + w - hl, t], [x + w - hl, y], [x + w, y + h / 2], [x + w - hl, y + h], [x + w - hl, b], [x, b]]), detail: [] };
+    }
+    case "doubleArrow": {
+      const hl = Math.min(w * 0.25, h * 0.9), t = y + h * 0.25, b = y + h * 0.75;
+      return {
+        outline: poly([
+          [x, y + h / 2], [x + hl, y], [x + hl, t], [x + w - hl, t], [x + w - hl, y], [x + w, y + h / 2],
+          [x + w - hl, y + h], [x + w - hl, b], [x + hl, b], [x + hl, y + h],
+        ]),
+        detail: [],
+      };
+    }
+    case "cross": {
+      const x1 = x + w / 3, x2 = x + (2 * w) / 3, y1 = y + h / 3, y2 = y + (2 * h) / 3;
+      return {
+        outline: poly([[x1, y], [x2, y], [x2, y1], [x + w, y1], [x + w, y2], [x2, y2], [x2, y + h], [x1, y + h], [x1, y2], [x, y2], [x, y1], [x1, y1]]),
+        detail: [],
+      };
+    }
+    case "star": {
+      const cx = x + w / 2, cy = y + h / 2, pts: [number, number][] = [];
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? 1 : 0.4, a = -Math.PI / 2 + (i * Math.PI) / 5;
+        pts.push([cx + (w / 2) * r * Math.cos(a), cy + (h / 2) * r * Math.sin(a)]);
+      }
+      return { outline: poly(pts), detail: [] };
+    }
+    case "octagon": {
+      const c = Math.min(w, h) * 0.29;
+      return { outline: poly([[x + c, y], [x + w - c, y], [x + w, y + c], [x + w, y + h - c], [x + w - c, y + h], [x + c, y + h], [x, y + h - c], [x, y + c]]), detail: [] };
+    }
+    case "cube": {
+      // A box seen from the front-right: front face plus top and side.
+      const d = Math.min(w, h) * 0.18;
+      return {
+        outline: poly([[x, y + d], [x + d, y], [x + w, y], [x + w, y + h - d], [x + w - d, y + h], [x, y + h]]),
+        detail: [["M", x, y + d], ["L", x + w - d, y + d], ["L", x + w, y], ["M", x + w - d, y + d], ["L", x + w - d, y + h]],
+      };
+    }
+    case "callout": {
+      // A speech bubble: the box, and a tail at the bottom left.
+      const hb = h * 0.8;
+      return { outline: poly([[x, y], [x + w, y], [x + w, y + hb], [x + w * 0.45, y + hb], [x + w * 0.22, y + h], [x + w * 0.27, y + hb], [x, y + hb]]), detail: [] };
+    }
+    case "cloud": {
+      const X = (f: number): number => x + w * f, Y = (f: number): number => y + h * f;
+      return {
+        outline: [
+          ["M", X(0.25), Y(0.25)],
+          ["C", X(0.05), Y(0.25), X(0), Y(0.5), X(0.16), Y(0.55)],
+          ["C", X(0), Y(0.66), X(0.18), Y(0.9), X(0.31), Y(0.8)],
+          ["C", X(0.4), Y(1), X(0.7), Y(1), X(0.8), Y(0.8)],
+          ["C", X(1), Y(0.8), X(1), Y(0.6), X(0.875), Y(0.5)],
+          ["C", X(1), Y(0.3), X(0.8), Y(0.1), X(0.625), Y(0.2)],
+          ["C", X(0.5), Y(0.05), X(0.3), Y(0.05), X(0.25), Y(0.25)],
+          ["Z"],
+        ],
+        detail: [],
+      };
+    }
   }
+}
+
+/** A closed polygon through `pts`. */
+function poly(pts: [number, number][]): PathCmd[] {
+  return [["M", pts[0][0], pts[0][1]], ...pts.slice(1).map(([px, py]): PathCmd => ["L", px, py]), ["Z"]];
 }
 
 /** Replay onto a Canvas2D path (the caller begins and fills/strokes it). */
@@ -157,6 +286,21 @@ export const DIAGRAM_SHAPE_LABELS: Record<DiagramShape, string> = {
   process: "Process",
   note: "Note",
   actor: "Actor (person)",
+  trapezoid: "Manual operation (trapezoid)",
+  manualInput: "Manual input",
+  delay: "Delay",
+  offPage: "Off-page connector",
+  internalStorage: "Internal storage",
+  multiDocument: "Multiple documents",
+  step: "Step (chevron)",
+  arrowRight: "Arrow",
+  doubleArrow: "Double arrow",
+  cross: "Cross",
+  star: "Star",
+  octagon: "Octagon (stop)",
+  cube: "Cube",
+  callout: "Callout",
+  cloud: "Cloud",
 };
 
 /** The share of an actor's box its figure takes; the rest is its name. */

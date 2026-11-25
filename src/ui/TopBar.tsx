@@ -113,6 +113,26 @@ export function TopBar(): JSX.Element {
         >
           ❐ Group
         </button>
+        <button
+          className="btn"
+          data-help="Link"
+          data-help-more="Links the selected topics like a group, but invisibly: the link is drawn only when you select one of its topics, or with Show links on. It takes no room in the layout and is not exported."
+          title="Link the selected topics invisibly (🔗)"
+          disabled={state.selection.length < 1}
+          onClick={() => store.createLinkFromSelection()}
+        >
+          🔗 Link
+        </button>
+        <button
+          className={`btn icon${state.showLinks ? " on" : ""}`}
+          data-help="Show links"
+          data-help-more="On: every link of the map is drawn. Off: a link shows only while one of its topics is selected."
+          title={state.showLinks ? "Hide links" : "Show all links"}
+          aria-pressed={state.showLinks}
+          onClick={() => store.toggleShowLinks()}
+        >
+          👁
+        </button>
       </div>
 
       <div className="topbar-group zoom-group">

@@ -70,6 +70,20 @@ export type TopicShape =
   | "process"
   | "note"
   | "actor"
+  | "trapezoid"
+  | "manualInput"
+  | "delay"
+  | "offPage"
+  | "internalStorage"
+  | "multiDocument"
+  | "step"
+  | "arrowRight"
+  | "doubleArrow"
+  | "cross"
+  | "star"
+  | "octagon"
+  | "cube"
+  | "callout"
   | "underline"
   | "none";
 
@@ -613,6 +627,19 @@ export interface Group {
    * exactly like the hairline it replaces. Absent = DEFAULT_GROUP_BORDER_WIDTH.
    */
   borderWidth?: number;
+  /** Quizzes attached to this group (opened from the group's right-click menu). */
+  quizzes?: QuizInfo[];
+  /** Show study arrows on missed topics for this group's quizzes. */
+  showQuizMistakes?: boolean;
+  /** Flashcard decks attached to this group (opened from the group's right-click menu). */
+  flashcards?: FlashcardDeck[];
+  /**
+   * A LINK: a group that is invisible on the map. It is drawn only while one
+   * of its topics (or the link itself) is selected, or while "Show links" is
+   * on; it never takes room in the layout and is not exported. Everything
+   * else — title, menu, quizzes, flashcards — is a group's.
+   */
+  link?: boolean;
 }
 
 /**

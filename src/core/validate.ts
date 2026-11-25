@@ -53,12 +53,13 @@ export function validateSheet(sheet: Sheet): void {
       throw new InvariantViolation(`node '${node.id}' has parentId '${node.parentId}' which is not in sheet.nodes`);
     }
   }
+  const groupIds = new Set(sheet.boundaries.map((g) => g.id));
   for (const rel of sheet.relationships) {
-    if (!nodes[rel.fromId]) {
-      throw new InvariantViolation(`relationship '${rel.id}' has fromId '${rel.fromId}' which is not in sheet.nodes`);
+    if (!nodes[rel.fromId] && !groupIds.has(rel.fromId)) {
+      throw new InvariantViolation(`relationship '${rel.id}' has fromId '${rel.fromId}' which is not in sheet.nodes or sheet.boundaries`);
     }
-    if (!nodes[rel.toId]) {
-      throw new InvariantViolation(`relationship '${rel.id}' has toId '${rel.toId}' which is not in sheet.nodes`);
+    if (!nodes[rel.toId] && !groupIds.has(rel.toId)) {
+      throw new InvariantViolation(`relationship '${rel.id}' has toId '${rel.toId}' which is not in sheet.nodes or sheet.boundaries`);
     }
   }
 

@@ -1,7 +1,8 @@
-import { FREEFORM_HEADER, freeformOwner, isBarePicture } from "../core/freeform";
+import { endpointFreeformOwner, FREEFORM_HEADER, freeformOwner, isBarePicture } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, svgPathData } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { connectorRibbon } from "../layout/connectorRibbon";
+import { groupBoxes, type Box } from "../layout/groups";
 import { getVisualFlags } from "../render/visualFlags";
 import { nodeImageIds } from "../core/ops";
 /**
@@ -240,7 +241,7 @@ function arrowHead(shape: HeadShape | null, color: string, width: number): strin
  * pinned to anchors) and the same heads, tip on the border and angled along
  * the line's real direction there.
  */
-function relationship(rel: Relationship, byId: Map<string, Placed>, color: string, env: RouteEnv = {}): string {
+function relationship(rel: Relationship, byId: Map<string, Box>, color: string, env: RouteEnv = {}): string {
   const a = byId.get(rel.fromId);
   const b = byId.get(rel.toId);
   if (!a || !b) return "";
@@ -552,20 +553,24 @@ export async function sheetToSvg(sheet: Sheet, opts: SvgExportOptions): Promise<
   for (const dot of junctionDots) parts.push(dot);
   parts.push("</g>");
 
+  const relEndById = new Map<string, Box>(byId);
+  if (sheet.boundaries.length > 0) {
+    for (const [gid, gb] of groupBoxes(sheet, byId)) relEndById.set(gid, gb.box);
+  }
   let relationships = 0;
   // Diagram arrows (both ends inside a canvas) are painted over the boxes, as on screen.
-  const inCanvas = (rel: Relationship): boolean => !!freeformOwner(sheet, rel.fromId) && !!freeformOwner(sheet, rel.toId);
+  const inCanvas = (rel: Relationship): boolean => !!endpointFreeformOwner(sheet, rel.fromId) && !!endpointFreeformOwner(sheet, rel.toId);
   const overRels: string[] = [];
   if (sheet.relationships.length > 0) {
     parts.push("<g>");
     for (const rel of sheet.relationships) {
       if (inCanvas(rel)) {
-        const el = relationship(rel, byId, opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5", obstaclesOf(rel));
+        const el = relationship(rel, relEndById, opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5", obstaclesOf(rel));
         if (el) { overRels.push(el); relationships++; }
         continue;
       }
       const color = opts.relColorOf ? opts.relColorOf(rel.id) : "#4f46e5";
-      const el = relationship(rel, byId, color, obstaclesOf(rel));
+      const el = relationship(rel, relEndById, color, obstaclesOf(rel));
       if (el) {
         parts.push(el);
         relationships++;

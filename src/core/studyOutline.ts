@@ -20,11 +20,53 @@
  */
 import { runsToPlain, nodeRuns } from "./text";
 import { chartSlotNote, freeformNote } from "./chartNotes";
-import type { MindNode, Sheet } from "./types";
+import type { MindNode, Relationship, Sheet } from "./types";
 
 export type OutlineMode = "quiz" | "plain" | "ai";
 
 const titleOf = (n: MindNode): string => runsToPlain(nodeRuns(n.title, n.titleRuns));
+
+/** The page of a diagram sheet (its root canvas), or null. */
+function diagramPage(sheet: Sheet): string | null {
+  const root = sheet.nodes[sheet.rootNodeId];
+  return sheet.structure.structureType === "diagram" && root?.style.freeform ? root.id : null;
+}
+
+/** A Tab arrow of a diagram: its tree, not an arrow to write down. */
+function isTreeArrow(sheet: Sheet, rel: Relationship): boolean {
+  const page = diagramPage(sheet);
+  return !!page && !!rel.tree && sheet.nodes[rel.fromId]?.parentId === page && sheet.nodes[rel.toId]?.parentId === page;
+}
+
+/**
+ * A topic's children in the outline. On a map, its children. In a diagram
+ * every shape is a child of the PAGE and the tree is drawn by Tab arrows, so
+ * a shape's children are the shapes its Tab arrows reach, and the page's are
+ * the shapes no Tab arrow reaches (the tops of the trees, and loose shapes).
+ */
+export function studyChildren(sheet: Sheet, n: MindNode): string[] {
+  const page = diagramPage(sheet);
+  if (!page) return n.childrenIds;
+  if (n.id === page) {
+    const reached = new Set(sheet.relationships.filter((r) => isTreeArrow(sheet, r)).map((r) => r.toId));
+    return n.childrenIds.filter((id) => !reached.has(id));
+  }
+  if (n.parentId !== page) return n.childrenIds;
+  const tab = sheet.relationships.filter((r) => r.fromId === n.id && isTreeArrow(sheet, r)).map((r) => r.toId);
+  return [...n.childrenIds, ...tab];
+}
+
+/**
+ * The topics to start an outline from, out of `ids` (a group's or link's
+ * members): those not already inside another one's branch — in a diagram,
+ * inside its Tab tree too — so no topic is written twice.
+ */
+export function studyRoots(sheet: Sheet, ids: string[]): string[] {
+  const present = ids.filter((id, i) => !!sheet.nodes[id] && ids.indexOf(id) === i);
+  return present.filter((id) => !present.some((other) => other !== id && studyBranchIds(sheet, other).has(id)
+    // Two members in each other's branch (a loop of Tab arrows): keep the first.
+    && !(studyBranchIds(sheet, id).has(other) && present.indexOf(other) > present.indexOf(id))));
+}
 
 /**
  * Every topic a branch's outline can show as a TOPIC: the subtree plus, for
@@ -39,7 +81,7 @@ export function studyBranchIds(sheet: Sheet, rootId: string): Set<string> {
     const n = sheet.nodes[id];
     if (!n || seen.has(id)) continue;
     seen.add(id);
-    stack.push(...n.childrenIds.slice().reverse());
+    stack.push(...studyChildren(sheet, n).slice().reverse());
     const g = n.style.gallery;
     if (g?.chart) g.items.forEach((_, i) => { const note = chartSlotNote(sheet, n.id, i); if (note) stack.push(note.id); });
     const canvasNote = freeformNote(sheet, n.id);
@@ -76,17 +118,33 @@ export function studyOutline(sheet: Sheet, rootIds: string[], mode: OutlineMode)
     note(d, "note", n.notes ?? "");
     if (n.labels?.length) note(d, "labels", n.labels.join(", "));
     for (const rel of sheet.relationships) {
+      // A diagram's Tab arrows ARE the outline's nesting: not written twice.
+      if (isTreeArrow(sheet, rel)) continue;
       const label = (rel.label ?? "").trim();
       if (rel.fromId === n.id) {
         const to = sheet.nodes[rel.toId];
-        if (!to) continue;
-        if (quiz) lines.push(`${ind(d)}[arrow to topic ${q(to.id)}] ${q(label)}`);
-        else lines.push(`${ind(d)}(arrow → ${titleOf(to) || "untitled"})${label ? " " + label : ""}`);
+        if (to) {
+          if (quiz) lines.push(`${ind(d)}[arrow to topic ${q(to.id)}] ${q(label)}`);
+          else lines.push(`${ind(d)}(arrow → ${titleOf(to) || "untitled"})${label ? " " + label : ""}`);
+        } else {
+          const toGroup = (sheet.boundaries ?? []).find((g) => g.id === rel.toId);
+          if (!toGroup) continue;
+          const gName = (toGroup.label ?? "").trim() || "untitled", gKind = toGroup.link ? "link" : "group";
+          if (quiz) lines.push(`${ind(d)}[arrow to ${gKind} ${q(gName)}] ${q(label)}`);
+          else lines.push(`${ind(d)}(arrow → ${gKind} ${gName})${label ? " " + label : ""}`);
+        }
       } else if (rel.toId === n.id && !inside.has(rel.fromId)) {
         const from = sheet.nodes[rel.fromId];
-        if (!from) continue;
-        if (quiz) lines.push(`${ind(d)}[arrow from outside: ${q(titleOf(from))}] ${q(label)}`);
-        else lines.push(`${ind(d)}(arrow from ${titleOf(from) || "untitled"})${label ? " " + label : ""}`);
+        if (from) {
+          if (quiz) lines.push(`${ind(d)}[arrow from outside: ${q(titleOf(from))}] ${q(label)}`);
+          else lines.push(`${ind(d)}(arrow from ${titleOf(from) || "untitled"})${label ? " " + label : ""}`);
+        } else {
+          const fromGroup = (sheet.boundaries ?? []).find((g) => g.id === rel.fromId);
+          if (!fromGroup) continue;
+          const gName = (fromGroup.label ?? "").trim() || "untitled", gKind = fromGroup.link ? "link" : "group";
+          if (quiz) lines.push(`${ind(d)}[arrow from ${gKind}: ${q(gName)}] ${q(label)}`);
+          else lines.push(`${ind(d)}(arrow from ${gKind} ${gName})${label ? " " + label : ""}`);
+        }
       }
     }
     const span = (kind: string, members: string[], label: string | undefined): void => {
@@ -95,7 +153,8 @@ export function studyOutline(sheet: Sheet, rootIds: string[], mode: OutlineMode)
       const text = `${(label ?? "").trim() || "untitled"} — ${names.join(", ")}`;
       note(d, kind, text);
     };
-    for (const g of sheet.boundaries ?? []) span("group", g.memberIds, g.label);
+    // A link (an invisible group) is a grouping too, under its own name.
+    for (const g of sheet.boundaries ?? []) span(g.link ? "link" : "group", g.memberIds, g.label);
     for (const s of sheet.summaries ?? []) span("summary", s.memberIds, s.label);
     const g = n.style.gallery;
     if (g) g.items.forEach((item, i) => {
@@ -129,9 +188,9 @@ export function studyOutline(sheet: Sheet, rootIds: string[], mode: OutlineMode)
     seen.add(id);
     lines.push(quiz ? `${ind(d)}[topic ${q(id)}] ${q(titleOf(n))}` : `${ind(d)}${titleOf(n)}`);
     extras(n, d + 1);
-    for (const c of n.childrenIds) topic(c, d + 1);
+    for (const c of studyChildren(sheet, n)) topic(c, d + 1);
   };
 
-  for (const r of rootIds) topic(r, 0);
+  for (const r of studyRoots(sheet, rootIds)) topic(r, 0);
   return lines.join("\n");
 }

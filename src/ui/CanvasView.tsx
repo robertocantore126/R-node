@@ -15,18 +15,20 @@ import { getAssetStore } from "../persist/assets";
 import { screenToWorld, wheelZoomFactor, worldToScreen } from "../render/viewport";
 import { imageResolver, measureNode } from "../layout/mindmap";
 import { anchorAt, borderAnchor, dragElbowSegment, innerPoints, worldWaypoints } from "../layout/relationship";
-import { createCanvasTextMeasurer, chartGrowDelta, chartGrowPitch, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
+import { createCanvasTextMeasurer, chartGrowDelta, chartGrowPitch, chartSlotIndex, GALLERY_CAPTION_SIZE, galleryInsertIndex, GROUP_LABEL_FONT, MAX_IMAGE_W, MIN_TOPIC_W } from "../layout/measure";
 import { isDescendantOf } from "../core/tree";
 import { slotKey } from "../core/ops";
 import { nearestImageSide } from "./imageDrop";
 import { SHAPE_DRAG_TYPE } from "./ShapeLibrary";
 import { FreeformInsertMenu, type FreeformInsertAt } from "./FreeformInsertMenu";
 import { DiagramPalette } from "./DiagramPalette";
+import { groupShown } from "../layout/groups";
 import { WEB_ITEM_DRAG_TYPE, type WebItem } from "../editor/webSearch";
 import { listShapes } from "../editor/shapeLibrary";
 import type { ImageSlot, MindNode, Relationship, Sheet } from "../core/types";
 import { RichEditor } from "./RichEditor";
 import { NodeContextMenu, type CtxMenuState } from "./NodeContextMenu";
+import { GroupContextMenu, type GroupMenuState } from "./GroupContextMenu";
 import { TouchGestures } from "./touchGestures";
 import { createCanvasGestureMachine, gestureHoldsKeyboard, IDLE_GESTURE, isResizeGesture, type CanvasGesture, type ResizeHandle } from "./canvasGesture";
 import { registerInspectable, type Machine } from "../editor/machine";
@@ -175,8 +177,8 @@ export function CanvasView(): JSX.Element {
   // Right-click context menu: null = closed, otherwise the wrap-space cursor
   // position and the right-clicked topic (see onContextMenu).
   const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
-  // Right-click on a group's line or title: its own small menu.
-  const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; groupId: string } | null>(null);
+  // Right-click on a group's line, title, or interior: its own menu.
+  const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
   /** The double-click picker over a freeform canvas (text or a shape). */
   const [ffInsert, setFfInsert] = useState<FreeformInsertAt | null>(null);
   const closeFfInsert = useCallback(() => setFfInsert(null), []);
@@ -184,6 +186,9 @@ export function CanvasView(): JSX.Element {
   // which cell it is editing. A plain <input> over the title band — not the
   // Lexical overlay — so it owns none of the §3 parity contract.
   const [captionEdit, setCaptionEdit] = useState<{ nodeId: string; index: number } | null>(null);
+  // Inline title field for a group's tab (double-click on its line/tab or
+  // "Rename group" from the group menu).
+  const [groupTitleEdit, setGroupTitleEdit] = useState<string | null>(null);
   // Ghost preview of an image being dragged to another node (internal
   // reassignment): world coords of the cursor + the image to draw. Read by
   // paint/currentRenderState on every frame; the renderer draws the cached
@@ -241,6 +246,7 @@ export function CanvasView(): JSX.Element {
       viewH: h,
       relSel: s.relSel,
       groupSel: s.groupSel,
+      showLinks: s.showLinks,
       summarySel: s.summarySel,
       imageSel: s.imageSel,
       imageSlot: s.imageSlot,
@@ -322,7 +328,12 @@ export function CanvasView(): JSX.Element {
     const erasedLen = inkErasedRef.current?.size ?? 0;
     const moving = gesture.state.kind === "pan" || wheelZoomRef.current || tweenActive;
     const flagsKey = `${flags.taper ? 1 : 0}${flags.mutedDeep ? 1 : 0}${flags.flatShadow ? 1 : 0}${flags.accentStrip ? 1 : 0}${flags.rootPolish ? 1 : 0}${flags.junctions ? 1 : 0}${flags.softSelect ? 1 : 0}${flags.lod ? 1 : 0}${flags.vignette ? 1 : 0}${flags.overlayLayer ? 1 : 0}${flags.sceneCache ? 1 : 0}${flags.batchedPaths ? 1 : 0}${flags.motionQuality ? 1 : 0}`;
-    const sceneContentKey = `${rev}|${w}|${h}|${s.theme}|${s.background ?? ""}|${s.grid ?? ""}|0|${s.editingId ?? ""}|${tweenActive ? performance.now() : 0}|${inkLen}|${erasedLen}|${flagsKey}`;
+    // Links (invisible groups) appear with the selection: the scene cache
+    // must repaint when the set of shown links changes.
+    const linksKey = store.sheet.boundaries.some((g) => g.link)
+      ? store.sheet.boundaries.filter((g) => g.link && groupShown(g, rs)).map((g) => g.id).join(",")
+      : "";
+    const sceneContentKey = `${linksKey}|${rev}|${w}|${h}|${s.theme}|${s.background ?? ""}|${s.grid ?? ""}|0|${s.editingId ?? ""}|${tweenActive ? performance.now() : 0}|${inkLen}|${erasedLen}|${flagsKey}`;
     const sceneKey = `${s.camera.x}|${s.camera.y}|${s.camera.scale}|${moving ? 1 : 0}|${wheelZoomRef.current ? 1 : 0}|${sceneContentKey}`;
     rs.moving = moving;
     rs.zooming = wheelZoomRef.current;
@@ -364,6 +375,7 @@ export function CanvasView(): JSX.Element {
     endGesture(`cancel:${reason}`);
     if (g.kind === "node-drag") store.cancelNodeDrag();
     else if (g.kind === "group-drag") store.cancelGroupDrag();
+    else if (g.kind === "boundary-drag") store.cancelBoundaryDrag();
     else if (g.kind === "resize-topic") store.cancelResize();
     else if (g.kind === "resize-freeform") store.cancelCanvasResize();
     else if (g.kind === "resize-item") store.cancelItemResize();
@@ -860,8 +872,8 @@ export function CanvasView(): JSX.Element {
     const renderer = rendererRef.current!;
     const rs = currentRenderState();
     const rel = store.sheet.relationships.find((r) => r.id === g.relId);
-    const a = rel && renderer.nodeWorldRect(rs, rel.fromId);
-    const b = rel && renderer.nodeWorldRect(rs, rel.toId);
+    const a = rel && renderer.relEndWorldRect(rs, rel.fromId);
+    const b = rel && renderer.relEndWorldRect(rs, rel.toId);
     if (!rel || !a || !b) return null;
     if (g.mode === "label") {
       const o = g.base[0];
@@ -1033,7 +1045,7 @@ export function CanvasView(): JSX.Element {
       const bend = s.relSel ? renderer.hitTestBend(rs, world.x, world.y, onLabel ? 3 : undefined) : null;
       const relS = s.relSel ? store.sheet.relationships.find((r) => r.id === s.relSel) : undefined;
       if (relS && (bend || onLabel)) {
-        const a = renderer.nodeWorldRect(rs, relS.fromId), b = renderer.nodeWorldRect(rs, relS.toId);
+        const a = renderer.relEndWorldRect(rs, relS.fromId), b = renderer.relEndWorldRect(rs, relS.toId);
         if (a && b) {
           const elbow = relS.connector === "elbow";
           const base = !bend
@@ -1172,10 +1184,14 @@ export function CanvasView(): JSX.Element {
     const hit = renderer.hitTest(rs, world.x, world.y);
 
     if (s.relFrom) {
-      if (hit) {
-        store.createRelationship(s.relFrom, hit);
+      const grpTarget = (!hit || store.doc.node(hit)?.style.freeform)
+        ? renderer.hitTestGroup(rs, world.x, world.y, { includeInterior: true })
+        : null;
+      const target = grpTarget ?? hit;
+      if (target) {
+        store.createRelationship(s.relFrom, target);
         store.clearRelFrom();
-        trace.applied("pointerdown:rel-target", { from: s.relFrom, to: hit });
+        trace.applied("pointerdown:rel-target", { from: s.relFrom, to: target });
       } else {
         store.clearRelFrom();
         trace.ignored("pointerdown:rel-target", "dropped on empty canvas", { from: s.relFrom });
@@ -1183,11 +1199,29 @@ export function CanvasView(): JSX.Element {
       return;
     }
 
+    const startBoundaryDrag = (): boolean => {
+      const tabGrp = renderer.hitTestGroupTab(rs, world.x, world.y);
+      if (!tabGrp) return false;
+      store.selectGroup(tabGrp);
+      if (store.beginBoundaryDrag(tabGrp)) {
+        gesture.to({ kind: "boundary-drag", groupId: tabGrp, startWorldX: world.x, startWorldY: world.y }, "pointerdown");
+      }
+      trace.applied("pointerdown:group-tab", { id: tabGrp, wasEditing });
+      return true;
+    };
+
     if (hit && store.doc.node(hit)?.style.freeform) {
       const rel = renderer.hitTestRelationship(rs, world.x, world.y);
       if (rel) {
         store.selectRelationship(rel);
         trace.applied("pointerdown:relationship", { id: rel, insideFreeform: true });
+        return;
+      }
+      if (startBoundaryDrag()) return;
+      const grpId = renderer.hitTestGroup(rs, world.x, world.y);
+      if (grpId) {
+        store.selectGroup(grpId);
+        trace.applied("pointerdown:group", { id: grpId, reselect: s.groupSel === grpId, wasEditing });
         return;
       }
       // Below the title band, the canvas's empty area draws a selection box
@@ -1238,6 +1272,7 @@ export function CanvasView(): JSX.Element {
         trace.applied("pointerdown:relationship", { id: relId, reselect: s.relSel === relId, wasEditing });
         return;
       }
+      if (startBoundaryDrag()) return;
       const grpId = renderer.hitTestGroup(rs, world.x, world.y);
       if (grpId) {
         store.selectGroup(grpId);
@@ -1307,9 +1342,13 @@ export function CanvasView(): JSX.Element {
       if (!base) return;
       const fixed = c.kind === "new" ? c.fromId : c.end === "to" ? base.fromId : base.toId;
       // A freeform board is the surface, not something to link to; the end
-      // that stays put cannot be the other end too.
-      const target = renderer.hitTest(rs, world.x, world.y, (id) => id === fixed || !!store.doc.node(id)?.style.freeform);
-      const rect = target ? renderer.nodeWorldRect(rs, target) : null;
+      // that stays put cannot be the other end too. A group border/tab wins
+      // over items near it; inside a group, items win over the group interior.
+      const groupBorder = renderer.hitTestGroup(rs, world.x, world.y);
+      const nodeTarget = renderer.hitTest(rs, world.x, world.y, (id) => id === fixed || !!store.doc.node(id)?.style.freeform);
+      const groupInterior = renderer.hitTestGroup(rs, world.x, world.y, { includeInterior: true });
+      const target = (groupBorder && groupBorder !== fixed) ? groupBorder : nodeTarget ?? (groupInterior && groupInterior !== fixed ? groupInterior : null);
+      const rect = target ? renderer.relEndWorldRect(rs, target) : null;
       const anchor = rect ? anchorAt(rect, world, 8 / s.camera.scale) : undefined;
       const moving = c.kind === "new" || c.end === "to" ? "to" : "from";
       const rel: Relationship =
@@ -1365,7 +1404,7 @@ export function CanvasView(): JSX.Element {
         const rdx = dx * cos - dy * sin, rdy = dx * sin + dy * cos;
         dx = rdx; dy = rdy;
       }
-      store.setItemResizeDraft(dx, dy, e.shiftKey, e.altKey ? 0 : GRID);
+      store.setItemResizeDraft(dx, dy, e.shiftKey, e.altKey ? 0 : GRID, e.ctrlKey || e.metaKey);
       drag.moved = true;
       return;
     }
@@ -1496,6 +1535,14 @@ export function CanvasView(): JSX.Element {
       store.setGroupDragDraft(d.dx, d.dy);
       return;
     }
+    if (gs.kind === "boundary-drag") {
+      if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
+      drag.moved = true;
+      const w = screenToWorld(s0.camera, sizeRef.current.w, sizeRef.current.h, x, y);
+      const d = store.snapBoundaryDelta(w.x - gs.startWorldX, w.y - gs.startWorldY, e.altKey ? 0 : GRID);
+      store.setBoundaryDragDraft(d.dx, d.dy);
+      return;
+    }
     // Only idle and a marquee still inside its 4px arm distance get here.
     if (gs.kind !== "node-drag") {
       const p = localPoint(e);
@@ -1508,6 +1555,8 @@ export function CanvasView(): JSX.Element {
       setResizeHover(!!rh);
       const onRelHandle = !!renderer && (!!renderer.hitTestConnectHandle(rs, w.x, w.y) || !!renderer.hitTestRelEnd(rs, w.x, w.y));
       const slider = renderer?.hitTestChartGrow(rs, w.x, w.y) ?? null;
+      const hoverHit = rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null);
+      const overTab = !!renderer && (!hoverHit || !!store.doc.node(hoverHit)?.style.freeform) && !!renderer.hitTestGroupTab(rs, w.x, w.y);
       setHandleCursor(
         canvasCorner ? (
           canvasCorner.rotate ? "grab"
@@ -1515,10 +1564,13 @@ export function CanvasView(): JSX.Element {
           : canvasCorner.corner === "w" || canvasCorner.corner === "e" ? "ew-resize"
           : canvasCorner.corner === "nw" || canvasCorner.corner === "se" ? "nwse-resize" : "nesw-resize"
         )
-        : onRelHandle ? "crosshair" : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize") : null,
+        : onRelHandle ? "crosshair"
+        : slider ? (slider.grow === "col" ? "ew-resize" : "ns-resize")
+        : overTab ? "grab"
+        : null,
       );
       setImgResizeHover(!!ih);
-      store.setHover(rh || ih ? null : (renderer?.hitTest(rs, w.x, w.y) ?? null));
+      store.setHover(hoverHit);
       return;
     }
     if (!drag.moved && Math.hypot(x - drag.startX, y - drag.startY) < 4) return;
@@ -1539,7 +1591,9 @@ export function CanvasView(): JSX.Element {
     // so the lower ("after") half of a topic below could never be reached and
     // the node could only ever be dropped above one.
     const dragging = gs.nodeId; // a closure cannot re-narrow the state
-    const movesWithCursor = (id: string): boolean => id === dragging || isDescendantOf(store.doc, dragging, id);
+    // In a diagram the shapes Tab grew from the dragged one ride along too.
+    const riders = new Set(store.diagramDescendants(dragging));
+    const movesWithCursor = (id: string): boolean => id === dragging || riders.has(id) || isDescendantOf(store.doc, dragging, id);
     // Diagram mode (draw.io): a shape is only ever moved, never dropped onto
     // another one to become its child. It follows the pointer, its subtree
     // with it, and stays wherever it is released.
@@ -1549,6 +1603,17 @@ export function CanvasView(): JSX.Element {
       return;
     }
     const hit = renderer.hitTest(rs, world.x, world.y, movesWithCursor);
+
+    // Diagram: a shape held over another shape becomes its Tab child on
+    // release (grandparent, sibling, cousin...). It keeps following the
+    // pointer; the target shows the drop frame.
+    if (hit && store.canDiagramReparent(dragging, hit)) {
+      store.setDrop({ mode: "child", nodeId: hit });
+      const owner = freeformOwner(store.sheet, dragging)!;
+      const at = snapInCanvas(owner, world.x - gs.grabOffsetX, world.y - gs.grabOffsetY, e.altKey);
+      store.setNodeDragDraft(dragging, at.x, at.y);
+      return;
+    }
 
     let dropMode: "child" | "before" | "after" | "floating" | "none" = "none";
     if (hit) {
@@ -1654,6 +1719,17 @@ export function CanvasView(): JSX.Element {
       }
       return;
     }
+    if (gs.kind === "boundary-drag") {
+      if (drag.moved) {
+        const { x, y } = localPoint(e);
+        const w = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
+        const d = store.snapBoundaryDelta(w.x - gs.startWorldX, w.y - gs.startWorldY, e.altKey ? 0 : GRID);
+        store.commitBoundaryDrag(d.dx, d.dy);
+      } else {
+        store.cancelBoundaryDrag();
+      }
+      return;
+    }
     if (gs.kind === "marquee") {
       // A plain click on empty canvas never armed the box: nothing to select.
       if (!gs.active) return;
@@ -1697,6 +1773,14 @@ export function CanvasView(): JSX.Element {
     // gs is a node drag: every other gesture has returned above.
     const s = store.getSnapshot();
     const drop = s.drop;
+    // Diagram: released on another shape — it becomes that shape's Tab child
+    // (the drag preview is undone first; the tree layout places it).
+    if (drag.moved && drop?.mode === "child" && store.canDiagramReparent(gs.nodeId, drop.nodeId)) {
+      store.cancelNodeDrag();
+      store.diagramReparent(gs.nodeId, drop.nodeId);
+      store.setDrop(null);
+      return;
+    }
     if (drag.moved && drop && drop.mode !== "none") {
       const { x, y } = localPoint(e);
       const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
@@ -1731,6 +1815,17 @@ export function CanvasView(): JSX.Element {
       return;
     }
     const hit = renderer.hitTest(currentRenderState(), world.x, world.y);
+    // Double-click on a group's line or tab renames it inline (and focuses the
+    // Inspector field if open). Checked before the diagram-page / freeform
+    // insert picker so groups on a diagram canvas can be renamed too.
+    const grpId = renderer.hitTestGroup(currentRenderState(), world.x, world.y);
+    if (grpId && (!hit || isDiagramPage(store.sheet, hit) || store.doc.node(hit)?.style.freeform)) {
+      store.selectGroup(grpId);
+      setGroupTitleEdit(grpId);
+      window.dispatchEvent(new CustomEvent("r-node:focus-group-title", { detail: { id: grpId } }));
+      trace.applied("dblclick:group-title", { id: grpId });
+      return;
+    }
     if (hit) {
       if (store.doc.node(hit)?.style.freeform) {
         // Empty part of a canvas: offer text or a shape, draw.io style.
@@ -1768,16 +1863,6 @@ export function CanvasView(): JSX.Element {
       }
       store.startEdit(hit);
     } else {
-      // Double-click on a group's line or tab renames it (G2). The title is
-      // edited in the Inspector's plain field — a canvas overlay would be a
-      // second text renderer and drag the §3 parity contract along.
-      const grpId = renderer.hitTestGroup(currentRenderState(), world.x, world.y);
-      if (grpId) {
-        store.selectGroup(grpId);
-        window.dispatchEvent(new CustomEvent("r-node:focus-group-title", { detail: { id: grpId } }));
-        trace.applied("dblclick:group-title", { id: grpId });
-        return;
-      }
       store.createFloatingAt(world.x - 60, world.y - 18);
     }
   };
@@ -1805,11 +1890,12 @@ export function CanvasView(): JSX.Element {
     const s = store.getSnapshot();
     const world = screenToWorld(s.camera, sizeRef.current.w, sizeRef.current.h, x, y);
     const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
-    // A group's line or title tab answers with the group's menu: study
-    // prompts built from the topics it encloses.
-    const groupHit = rendererRef.current?.hitTestGroup(currentRenderState(), world.x, world.y) ?? null;
+    // A group's line, title tab, or interior answers with the group's menu
+    // when no mind-map topic itself was right-clicked.
+    const groupHit = rendererRef.current?.hitTestGroup(currentRenderState(), world.x, world.y, { includeInterior: true }) ?? null;
     if (groupHit && (!hit || isDiagramPage(store.sheet, hit) || store.doc.node(hit)?.style.freeform)) {
       const r = canvasRef.current!.parentElement!.getBoundingClientRect();
+      setCtxMenu(null);
       setGroupMenu({ x: clientX - r.left, y: clientY - r.top, groupId: groupHit });
       return;
     }
@@ -1826,6 +1912,7 @@ export function CanvasView(): JSX.Element {
       if (cellHit?.nodeId === hit) store.selectGalleryCell(hit, cellHit.index);
       const sel = store.getSnapshot().gallerySel;
       if (sel?.nodeId === hit) {
+        setGroupMenu(null);
         setCtxMenu({ x: clientX - rect.left, y: clientY - rect.top, nodeId: hit, cell: sel.index });
         return;
       }
@@ -1835,6 +1922,7 @@ export function CanvasView(): JSX.Element {
     // not just the one clicked. Right-clicking an unselected topic selects it
     // alone (the same rule the Inspector's picker follows).
     if (!s.selection.includes(hit)) store.select(hit);
+    setGroupMenu(null);
     setCtxMenu({ x: clientX - rect.left, y: clientY - rect.top, nodeId: hit });
   };
 
@@ -1956,6 +2044,7 @@ export function CanvasView(): JSX.Element {
       viewH: sizeRef.current.h,
       relSel: s.relSel,
       groupSel: s.groupSel,
+      showLinks: s.showLinks,
       summarySel: s.summarySel,
       // MUST match the state `paint` builds, field for field. This one was
       // missing here: selecting an image drew its ring (paint had it) while
@@ -2037,6 +2126,29 @@ export function CanvasView(): JSX.Element {
         />
       );
     }
+  } else if (groupTitleEdit) {
+    const grp = store.sheet.boundaries.find((g) => g.id === groupTitleEdit);
+    const band = grp ? rendererRef.current?.groupTabWorldRect(currentRenderState(), groupTitleEdit) : null;
+    if (grp && band) {
+      const tl = worldToScreen(state.camera, viewSize.w, viewSize.h, band.x, band.y);
+      const gid = groupTitleEdit;
+      captionField = (
+        <CaptionField
+          key={`grp:${gid}`}
+          rect={{ left: tl.x, top: tl.y, width: band.w * state.camera.scale, height: band.h * state.camera.scale }}
+          fontSize={GROUP_LABEL_FONT * state.camera.scale}
+          caption={grp.label ?? ""}
+          placeholder="Group title"
+          ariaLabel="Group title"
+          onCommit={(text) => {
+            setGroupTitleEdit(null);
+            const trimmed = text.trim();
+            store.setGroup(gid, { label: trimmed || undefined, ...(trimmed ? { hideLabel: undefined } : {}) });
+          }}
+          onCancel={() => setGroupTitleEdit(null)}
+        />
+      );
+    }
   }
 
   let editStyle: CSSProperties | null = null;
@@ -2065,6 +2177,22 @@ export function CanvasView(): JSX.Element {
   // The canvas is opaque now (subpixel text, see Renderer.opaqueCanvas), so a
   // CSS vignette behind it would never show.
   const useVignette = false;
+
+  /**
+   * The canvas a dropped picture becomes a free item of, or null. A picture
+   * dropped on a canvas, or on an item inside one, lands on the canvas as its
+   * own item (draw.io) — EXCEPT on a chart or gallery item, which takes it in
+   * the cell under the cursor like anywhere else. Every shape of a diagram is
+   * an item of its page, so without that exception a chart in a diagram
+   * could never be filled by dropping.
+   */
+  const imageDropBoard = (hit: string | null): string | null => {
+    if (!hit) return null;
+    const n = store.doc.node(hit);
+    if (n?.style.freeform) return hit;
+    if (n?.style.gallery) return null;
+    return freeformOwner(store.sheet, hit);
+  };
 
   // Diagram mode's shape bar: page point → world, and the view's centre.
   const paletteToWorld = useCallback((clientX: number, clientY: number): { x: number; y: number } | null => {
@@ -2100,7 +2228,7 @@ export function CanvasView(): JSX.Element {
           cursor:
             gesture.state.kind === "connect" ? "crosshair"
             : gesture.state.kind === "chart-grow" ? (gesture.state.grow === "col" ? "ew-resize" : "ns-resize")
-            : gesture.state.kind === "rotate-item" ? "grabbing"
+            : gesture.state.kind === "rotate-item" || gesture.state.kind === "boundary-drag" ? "grabbing"
             : gesture.state.kind === "resize-freeform" || gesture.state.kind === "resize-item" ? (
               gesture.state.corner === "n" || gesture.state.corner === "s" ? "ns-resize"
               : gesture.state.corner === "w" || gesture.state.corner === "e" ? "ew-resize"
@@ -2270,7 +2398,7 @@ export function CanvasView(): JSX.Element {
             const { x, y } = localPoint(e as unknown as RPointerEvent);
             const world = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, x, y);
             const hit = rendererRef.current?.hitTest(currentRenderState(), world.x, world.y) ?? null;
-            const board = hit && (store.doc.node(hit)?.style.freeform ? hit : freeformOwner(store.sheet, hit));
+            const board = imageDropBoard(hit);
             const g = hit ? store.doc.node(hit)?.style.gallery : undefined;
             const rects = hit && g ? rendererRef.current?.galleryCellRects(currentRenderState(), hit) ?? [] : [];
             trace.applied("drop:web", { source: item.source, hit: hit ?? "canvas" });
@@ -2285,7 +2413,7 @@ export function CanvasView(): JSX.Element {
           const point = localPoint(e as unknown as RPointerEvent);
           const dropWorld = screenToWorld(store.getSnapshot().camera, sizeRef.current.w, sizeRef.current.h, point.x, point.y);
           const dropHit = rendererRef.current?.hitTest(currentRenderState(), dropWorld.x, dropWorld.y);
-          const canvasId = dropHit && (store.doc.node(dropHit)?.style.freeform ? dropHit : freeformOwner(store.sheet, dropHit));
+          const canvasId = imageDropBoard(dropHit ?? null);
           if (canvasId) {
             e.preventDefault(); clearExternalGhost(); store.setDrop(null); store.setHover(null);
             let files = imageFiles(e.dataTransfer.files);
@@ -2389,15 +2517,12 @@ export function CanvasView(): JSX.Element {
         <DiagramPalette toWorld={paletteToWorld} viewCenter={paletteViewCenter} />
       )}
       {groupMenu && (
-        <div
-          className="menu"
-          style={{ position: "absolute", left: groupMenu.x, top: groupMenu.y, zIndex: 40 }}
-          onPointerDown={(e) => e.stopPropagation()}
-          onMouseLeave={() => setGroupMenu(null)}
-        >
-          <button onClick={() => { void store.copyGroupStudyPrompt(groupMenu.groupId, "quiz"); setGroupMenu(null); }}>Copy as quiz prompt</button>
-          <button onClick={() => { void store.copyGroupStudyPrompt(groupMenu.groupId, "flashcards"); setGroupMenu(null); }}>Copy as flashcards prompt</button>
-        </div>
+        <GroupContextMenu
+          key={groupMenu.groupId}
+          menu={groupMenu}
+          onClose={() => setGroupMenu(null)}
+          onRename={() => setGroupTitleEdit(groupMenu.groupId)}
+        />
       )}
       {ctxMenu && <NodeContextMenu key={`${ctxMenu.nodeId}:${ctxMenu.cell ?? ""}`} menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
       {captionField}

@@ -1,10 +1,10 @@
 import { phoneMapPages } from "./pdfPhone";
-import { FREEFORM_HEADER, freeformOwner, isBarePicture } from "../core/freeform";
+import { endpointFreeformOwner, FREEFORM_HEADER, isBarePicture } from "../core/freeform";
 import { diagramShapePath, isDiagramShape, pdfPathOps } from "../core/diagramShapes";
 import { inkPolyline, inkStrokes } from "../core/ink";
 import { borderDash, DEFAULT_GROUP_BORDER_WIDTH, GROUP_FILL_ALPHA, groupDash, groupLabel, type Group, type ResolvedBorder } from "../core/types";
 import { THEMES, readableOn, type RenderTheme } from "../render/theme";
-import { groupBoxes, groupRadius, wavePoints } from "../layout/groups";
+import { groupBoxes, groupRadius, wavePoints, type Box } from "../layout/groups";
 import { GROUP_LABEL_FONT, GROUP_LABEL_H, GROUP_LABEL_INSET } from "../layout/measure";
 import { connectorRibbon } from "../layout/connectorRibbon";
 import { getVisualFlags } from "../render/visualFlags";
@@ -523,7 +523,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   const withIndex = phone || opts.index === true;
   const placed = placeAll(sheet, opts.measurer);
   // Elbow arrows go around the same boxes as on screen.
-  const routeOf = (rel: Relationship, a: Placed, b: Placed): RelRoute => {
+  const routeOf = (rel: Relationship, a: Box, b: Box): RelRoute => {
     const env: RouteEnv = routeEnv(sheet, placed, rel);
     return relationshipRoute(rel, a, b, env.obstacles, env.origin);
   };
@@ -1054,8 +1054,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
   const drawRelationship = (
     cmds: string[],
     rel: Relationship,
-    a: Placed,
-    b: Placed,
+    a: Box,
+    b: Box,
     color: string,
     fr: Frame,
   ): void => {
@@ -1127,7 +1127,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     // Group tints under everything they enclose, outer groups first.
     if (opts.theme) for (const group of [...sheet.boundaries].sort((a,b)=>(groupGeo.get(b.id)?.covered.size??0)-(groupGeo.get(a.id)?.covered.size??0))) {
       const gb=groupGeo.get(group.id);
-      if(!group.fill||!gb) continue;
+      if(!group.fill||!gb||group.link) continue; // links are invisible
       cmds.push("q",opacityCommand(group.fill,GROUP_FILL_ALPHA),`${rgb(group.fill)} rg`,groupPath(group,gb.box,fr),"f","Q");
       ops+=5;
     }
@@ -1175,9 +1175,9 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     // Diagram arrows (both ends inside a canvas) go over the boxes, as on screen.
     const paintRels = (over: boolean): void => {
       for (const rel of sheet.relationships) {
-        if ((!!freeformOwner(sheet, rel.fromId) && !!freeformOwner(sheet, rel.toId)) !== over) continue;
-        const a = byId.get(rel.fromId);
-        const b = byId.get(rel.toId);
+        if ((!!endpointFreeformOwner(sheet, rel.fromId) && !!endpointFreeformOwner(sheet, rel.toId)) !== over) continue;
+        const a = byId.get(rel.fromId) ?? groupGeo.get(rel.fromId)?.box;
+        const b = byId.get(rel.toId) ?? groupGeo.get(rel.toId)?.box;
         if (!a || !b) continue;
         const span = routeYRange(routeOf(rel, a, b));
         if (span.lo >= pg.top + pg.height || span.hi <= pg.top) continue;
@@ -1245,7 +1245,7 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
 
     if (opts.theme) for (const group of sheet.boundaries) {
       const gb=groupGeo.get(group.id);
-      if(!gb) continue;
+      if(!gb||group.link) continue; // links are invisible
       // Line weight and dashes are screen pixels on the canvas; on paper they
       // are points, the same at every page scale.
       const width=group.borderWidth??DEFAULT_GROUP_BORDER_WIDTH;
@@ -1466,8 +1466,8 @@ export async function sheetToPdf(sheet: Sheet, opts: PdfExportOptions): Promise<
     emitted: {
       nodes: placed.length,
       images,
-      relationships: sheet.relationships.filter((r) => byId.has(r.fromId) && byId.has(r.toId)).length,
-      boundaries: opts.theme ? sheet.boundaries.filter(g=>g.memberIds.some(id=>byId.has(id))).length : 0,
+      relationships: sheet.relationships.filter((r) => (byId.has(r.fromId) || groupGeo.has(r.fromId)) && (byId.has(r.toId) || groupGeo.has(r.toId))).length,
+      boundaries: opts.theme ? sheet.boundaries.filter(g=>!g.link&&g.memberIds.some(id=>byId.has(id))).length : 0,
       summaries: 0,
     },
     // Declared, not detected: an exporter cannot notice what it never thought
