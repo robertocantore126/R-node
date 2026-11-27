@@ -1,66 +1,48 @@
-<img width="189" height="189" alt="R-node logo" src="https://github.com/user-attachments/assets/5f3b0327-59a9-4e8d-92f9-141164861046" />
+<img width="128" height="128" alt="R-node" src="src/assets/logo.png" />
 
 # R-node
 
-**A cross-platform visual thinking and mind-mapping workspace.**
+**A local-first visual thinking and mind-mapping workspace.**
 
-R-node is a keyboard-first mind-mapping application for brainstorming, knowledge
-organization, project planning and presentations. Code, brand and design system
-are original; the interaction model is inspired by the conventions of
-established mind-mapping tools such as Xmind.
+R-node is a keyboard-first app for mind maps and draw.io-style diagrams. Each
+document is a single `.rnode` file — a SQLite database holding the map and its
+images — that opens on desktop and in the browser.
 
-- **Fast** — single-canvas rendering, no DOM or SVG element per topic; smooth
-  at 10,000+ topics.
-- **Keyboard-first** — Enter/Tab/Shift+Tab to create and structure topics,
-  arrow keys to navigate, every action undoable.
-- **Local-first** — documents save when you decide (Ctrl+S, no hidden
-  autosave). Each document is **one `.rnode` file** (a SQLite database
-  holding the document *and* its images) on desktop and on the web alike — the
-  web build runs SQLite in WebAssembly, so the same file opens in both.
-- **Images in nodes** — drop or paste an image onto a topic, resize it, share
-  the map as a single `.rnode.zip`. The canvas only decodes pre-scaled levels
-  inside a byte budget, so maps with hundreds of images stay fluid.
-- **Rich text on the canvas** — bold, italic, colours, headings and bullet
-  lists live in the topic itself, drawn by the canvas and edited in an overlay
-  that matches it pixel for pixel.
+- **Fast** — one canvas, no element per topic; smooth at 10,000+ topics.
+- **Keyboard-first** — Enter/Tab to grow the map, arrows to move, everything
+  undoable.
+- **Local-first** — saves only when you press Ctrl+S; no hidden autosave.
+- **Maps and diagrams** — rich text, pictures and freeform canvases in the same
+  file.
 
 ## Install
 
-### End users
+Download the latest Windows build — installer, MSI or portable `.exe`:
 
-Prebuilt installers are not published yet. Until they are, use the developer
-build below — or build a release installer locally with `cargo tauri build`
-(the installer lands in `src-tauri/target/release/bundle/`).
+**[R-node releases](https://github.com/robertocantore126/R-node/releases/latest)**
 
-### Developers
+## Develop
 
-Requirements: [Node.js](https://nodejs.org) 18+ (npm),
-[Rust](https://rustup.rs) (stable) and the Tauri CLI:
+Requires Node.js 18+, Rust stable and the Tauri CLI.
 
 ```bash
 npm install
-cargo install tauri-cli --locked   # if not already installed
+cargo install tauri-cli --locked
+
+npm run dev        # web version → http://localhost:5173
+cargo tauri dev    # desktop app
 ```
 
-Run the app:
+Build the desktop installer:
 
 ```bash
-npm run dev          # web version → http://localhost:5173
-cargo tauri dev      # desktop version — opens a native window
+cargo tauri build  # src-tauri/target/release/bundle/
 ```
 
-Build a production desktop installer:
+## Docs
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
 
 ```bash
-cargo tauri build    # installer in src-tauri/target/release/bundle/
-```
-
-## Documentation
-
-Architecture, invariants and task list live in [`docs/`](docs/): start with
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
-[docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) before changing code. Tests:
-
-```bash
-npm test             # 263 tests across 17 suites
+npm test
 ```
